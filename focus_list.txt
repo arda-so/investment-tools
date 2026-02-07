@@ -1,0 +1,6 @@
+# Deep Comparison Focus List
+# Add tickers here (one per line) for 10-year deep analysis
+# Example:
+# AAPL
+# MSFT
+# JPM
