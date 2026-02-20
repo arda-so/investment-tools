@@ -1280,7 +1280,13 @@ def _render(
         monitor_info = run_event_driven_monitor(force=False)
     except Exception as exc:
         monitor_info = {"ok": False, "error": str(exc)}
-    proposals = list_action_proposals(status="open", limit=10)
+    # Show newest proposals first on dashboard so fresh filing cards are visible immediately.
+    proposals = list_action_proposals(status="open", limit=60)
+    proposals = sorted(
+        proposals,
+        key=lambda p: int(p.get("id") or 0),
+        reverse=True,
+    )[:10]
     risk_veto = list_recent_risk_veto_decisions(limit=8)
     risk_veto_config = get_risk_veto_config()
     agent_runs = list_recent_agent_runs(limit=8)
