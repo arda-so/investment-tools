@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/Users/solmaz/Investment_Tools"
+cd "$ROOT"
+PORT="${INVESTOR_PORT:-8766}"
+
+# Default to memory-enabled runtime for Organizer Memory Inspector.
+# You can still override these in your shell before running this script.
+export INVESTOR_DISABLE_MEMORY="${INVESTOR_DISABLE_MEMORY:-0}"
+export INVESTOR_ENABLE_MEMORY="${INVESTOR_ENABLE_MEMORY:-1}"
+
+# Stop any existing v2 process on selected port, then launch.
+lsof -ti tcp:"$PORT" | xargs kill -9 2>/dev/null || true
+
+echo "Dashboard URL: http://127.0.0.1:${PORT}/dashboard"
+
+if [ -x "$ROOT/.venv-memory/bin/uvicorn" ]; then
+  if "$ROOT/.venv-memory/bin/python" - <<'PY' >/dev/null 2>&1
+import fastapi  # noqa: F401
+import sqlmodel  # noqa: F401
+import jinja2  # noqa: F401
+PY
+  then
+    exec "$ROOT/.venv-memory/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$PORT"
+  fi
+  echo "Warning: .venv-memory is missing core app deps (fastapi/sqlmodel/jinja2). Falling back to system uvicorn." >&2
+fi
+exec uvicorn app.main:app --host 127.0.0.1 --port "$PORT"

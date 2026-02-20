@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 import datetime as dt
 import difflib
@@ -51,6 +52,7 @@ WATCHLIST_PATH = ROOT / "data" / "my_watchlist.txt"
 CASH_BAL_PATH = ROOT / "data" / "cash_balances.csv"
 MARKET_CACHE_PATH = ROOT / "data" / "cache" / "market_brief.json"
 REPORTS_DIR = ROOT / "reports"
+MONITOR_RENDER_TIMEOUT_SEC = 0.35
 
 
 def _to_float(v: object, default: float = 0.0) -> float:
@@ -1267,6 +1269,17 @@ def _is_hx(request: Request) -> bool:
     return str(request.headers.get("HX-Request") or "").strip().lower() == "true"
 
 
+def _safe_monitor_info() -> dict[str, object]:
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(run_event_driven_monitor, False)
+            return dict(fut.result(timeout=MONITOR_RENDER_TIMEOUT_SEC) or {})
+    except concurrent.futures.TimeoutError:
+        return {"ok": True, "timed_out": True, "note": "monitor deferred"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _render(
     request: Request,
     message: str = "",
@@ -1275,11 +1288,7 @@ def _render(
     portfolio_intel: str = "",
 ):
     templates = request.app.state.templates
-    monitor_info: dict[str, object] = {}
-    try:
-        monitor_info = run_event_driven_monitor(force=False)
-    except Exception as exc:
-        monitor_info = {"ok": False, "error": str(exc)}
+    monitor_info = _safe_monitor_info()
     # Show newest proposals first on dashboard so fresh filing cards are visible immediately.
     proposals = list_action_proposals(status="open", limit=60)
     proposals = sorted(
