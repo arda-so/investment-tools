@@ -21,18 +21,36 @@ done
 mkdir -p "$BACKUP_DIR"
 
 create_backup() {
-  local ts out
+  local ts out out_tmp list_file
   ts="$(date +%Y%m%d_%H%M%S)"
   out="${BACKUP_DIR}/investment_tools_backup_${ts}.tar.gz"
-  echo "Creating backup: ${out}"
-  tar -czf "$out" \
-    --exclude='./backups/*' \
-    --exclude='./.git/*' \
-    --exclude='./.venv-memory/*' \
-    --exclude='./.venv/*' \
-    --exclude='./node_modules/*' \
-    -C "$ROOT" .
-  echo "Backup created: ${out}"
+  out_tmp="${out}.tmp"
+  list_file="$(mktemp)"
+  echo "Creating DB-only backup: ${out}"
+  (
+    cd "$ROOT"
+    # Lean whitelist: core runtime databases only.
+    for p in \
+      "./data/core.db" \
+      "./data/core.db-wal" \
+      "./data/core.db-shm" \
+      "./data/ai_queue.db" \
+      "./data/cache.db" \
+      "./onyx_brain.db" \
+      "./onyx_data/memory_db/chroma.sqlite3"
+    do
+      [ -f "$p" ] && printf '%s\n' "${p#./}" >> "$list_file"
+    done
+  )
+  if [ ! -s "$list_file" ]; then
+    rm -f "$list_file"
+    echo "No database files found to back up."
+    return 1
+  fi
+  tar -czf "$out_tmp" -C "$ROOT" -T "$list_file"
+  mv -f "$out_tmp" "$out"
+  rm -f "$list_file"
+  echo "Backup created (DB-only): ${out}"
 }
 
 prune_old_backups() {
