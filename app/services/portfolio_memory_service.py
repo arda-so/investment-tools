@@ -16,6 +16,8 @@ from typing import Any
 from app.core.config import CORE_DB_PATH, ROOT
 from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
 from app.services.postgres_core_service import (
+    core_backend,
+    insert_portfolio_transaction_pg,
     list_portfolio_transactions_pg,
     list_recent_portfolio_transactions_pg,
     pg_enabled,
@@ -1439,6 +1441,19 @@ def record_portfolio_transaction(
     a = str(action or "").strip().lower()[:32]
     if not t or not a:
         return
+    created = str(timestamp or "").strip() or dt.datetime.now().isoformat()
+    if core_backend() == "postgres":
+        _ = insert_portfolio_transaction_pg(
+            created_at=created,
+            ticker=t,
+            action=a,
+            shares=float(shares or 0.0),
+            price=float(price or 0.0),
+            note=str(note or "")[:2000],
+            source=str(source or "app")[:64],
+            meta_json=(meta or {}),
+        )
+        return
     def _write() -> None:
         con = _conn()
         try:
@@ -1447,7 +1462,7 @@ def record_portfolio_transaction(
                    (created_at, ticker, action, shares, price, note, source, meta_json)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    str(timestamp or "").strip() or dt.datetime.now().isoformat(),
+                    created,
                     t,
                     a,
                     float(shares or 0.0),

@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="/Users/solmaz/Investment_Tools"
+SRC="$ROOT/automations/launchd"
+DST="$HOME/Library/LaunchAgents"
+mkdir -p "$DST" "$ROOT/logs"
+
+UIDN="$(id -u)"
+GUI_DOMAIN="gui/${UIDN}"
+
+for lbl in com.solmaz.v2.app com.solmaz.v2.worker; do
+  launchctl bootout "${GUI_DOMAIN}/${lbl}" >/dev/null 2>&1 || true
+  launchctl remove "$lbl" >/dev/null 2>&1 || true
+done
+
+cp "$SRC/com.solmaz.v2.app.plist" "$DST/com.solmaz.v2.app.plist"
+cp "$SRC/com.solmaz.v2.worker.plist" "$DST/com.solmaz.v2.worker.plist"
+
+set +e
+launchctl bootstrap "${GUI_DOMAIN}" "$DST/com.solmaz.v2.app.plist"
+APP_BOOT_RC=$?
+launchctl bootstrap "${GUI_DOMAIN}" "$DST/com.solmaz.v2.worker.plist"
+WORKER_BOOT_RC=$?
+set -e
+
+if [ "$APP_BOOT_RC" -eq 0 ] && [ "$WORKER_BOOT_RC" -eq 0 ]; then
+  launchctl enable "${GUI_DOMAIN}/com.solmaz.v2.app"
+  launchctl enable "${GUI_DOMAIN}/com.solmaz.v2.worker"
+  launchctl kickstart -k "${GUI_DOMAIN}/com.solmaz.v2.app"
+  launchctl kickstart -k "${GUI_DOMAIN}/com.solmaz.v2.worker"
+else
+  # Fallback for shells where bootstrap gui domain is unavailable.
+  launchctl load -w "$DST/com.solmaz.v2.app.plist" >/dev/null 2>&1 || true
+  launchctl load -w "$DST/com.solmaz.v2.worker.plist" >/dev/null 2>&1 || true
+fi
+
+echo "Installed and started core services:"
+if command -v rg >/dev/null 2>&1; then
+  launchctl list | rg "com\\.solmaz\\.v2\\.(app|worker)" -N || true
+else
+  launchctl list | grep -E "com\\.solmaz\\.v2\\.(app|worker)" || true
+fi

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.solmaz.v2.app</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd /Users/solmaz/Investment_Tools &amp;&amp; ./bin/run_v2_app</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CORE_DB_BACKEND</key>
+    <string>postgres</string>
+    <key>CORE_DB_GUARD_ENFORCE</key>
+    <string>1</string>
+    <key>CORE_DB_STRICT_POSTGRES</key>
+    <string>1</string>
+    <key>PHASE2_POSTGRES_ENABLED</key>
+    <string>1</string>
+    <key>AI_QUEUE_BACKEND</key>
+    <string>postgres</string>
+    <key>AI_QUEUE_STRICT_PROD</key>
+    <string>1</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/solmaz/Investment_Tools</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/solmaz/Investment_Tools/logs/launchd_v2_app.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/solmaz/Investment_Tools/logs/launchd_v2_app_err.log</string>
+</dict>
+</plist>

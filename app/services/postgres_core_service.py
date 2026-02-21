@@ -54,6 +54,17 @@ def pg_connect():
         return None
 
 
+def _sqlite_table_exists(con: sqlite3.Connection, table: str) -> bool:
+    try:
+        row = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (str(table or "").strip(),),
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
 def ensure_postgres_core_schema() -> dict[str, Any]:
     con = pg_connect()
     if con is None:
@@ -174,6 +185,90 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rf_core_ticker_date ON report_facts_core(ticker, fact_date DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rf_core_importance ON report_facts_core(importance DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS todos_core (
+                id BIGINT PRIMARY KEY,
+                task TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL DEFAULT 'P2',
+                due_date TEXT NOT NULL DEFAULT '',
+                ticker TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'general'
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_core_status ON todos_core(status, id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_core_ticker ON todos_core(ticker, id DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_journal_core (
+                id BIGINT PRIMARY KEY,
+                ticker TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT 'Note',
+                emotion TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'approved',
+                created_by TEXT NOT NULL DEFAULT 'human'
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_wj_core_ticker ON workspace_journal_core(ticker, id DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investor_notes_core (
+                id BIGINT PRIMARY KEY,
+                scope TEXT NOT NULL DEFAULT 'organizer',
+                ticker TEXT NOT NULL DEFAULT '',
+                sentiment TEXT NOT NULL DEFAULT 'neutral',
+                note TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT 'log',
+                created_at TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'approved',
+                created_by TEXT NOT NULL DEFAULT 'human',
+                ai_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                ai_reasoning TEXT NOT NULL DEFAULT '',
+                trace_id TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_inv_notes_core_created ON investor_notes_core(created_at DESC, id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_inv_notes_core_ticker ON investor_notes_core(ticker, id DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_reminders_core (
+                id BIGINT PRIMARY KEY,
+                ticker TEXT NOT NULL DEFAULT '',
+                remind_at TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cr_core_ticker ON company_reminders_core(ticker, id DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_compact_core (
+                id BIGINT PRIMARY KEY,
+                memory_key TEXT NOT NULL UNIQUE,
+                bucket TEXT NOT NULL DEFAULT 'preference',
+                value TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'chat_turn',
+                reliability DOUBLE PRECISION NOT NULL DEFAULT 0.7,
+                reuse_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                conflict_of TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                last_used_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_core_bucket ON memory_compact_core(bucket)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_core_status ON memory_compact_core(status)")
         con.commit()
         return {"ok": True}
     except Exception as exc:
@@ -202,6 +297,11 @@ def sync_core_from_sqlite() -> dict[str, Any]:
         "investor_style_memory_core": 0,
         "filings_core": 0,
         "report_facts_core": 0,
+        "todos_core": 0,
+        "workspace_journal_core": 0,
+        "investor_notes_core": 0,
+        "company_reminders_core": 0,
+        "memory_compact_core": 0,
     }
     try:
         cp = con_pg.cursor()
@@ -366,6 +466,148 @@ def sync_core_from_sqlite() -> dict[str, Any]:
             )
             counts["report_facts_core"] += 1
 
+        if _sqlite_table_exists(con_sq, "todos"):
+            for r in con_sq.execute(
+                "SELECT id, task, status, created_at, priority, due_date, ticker, category FROM todos"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO todos_core(id, task, status, created_at, priority, due_date, ticker, category)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      task=EXCLUDED.task, status=EXCLUDED.status, created_at=EXCLUDED.created_at, priority=EXCLUDED.priority,
+                      due_date=EXCLUDED.due_date, ticker=EXCLUDED.ticker, category=EXCLUDED.category
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["task"] or ""),
+                        str(r["status"] or "open"),
+                        str(r["created_at"] or ""),
+                        str(r["priority"] or "P2"),
+                        str(r["due_date"] or ""),
+                        str(r["ticker"] or "").upper(),
+                        str(r["category"] or "general"),
+                    ),
+                )
+                counts["todos_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "workspace_journal"):
+            for r in con_sq.execute(
+                "SELECT id, ticker, action, emotion, note, created_at, COALESCE(status,'approved') AS status, COALESCE(created_by,'human') AS created_by FROM workspace_journal"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO workspace_journal_core(id, ticker, action, emotion, note, created_at, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      ticker=EXCLUDED.ticker, action=EXCLUDED.action, emotion=EXCLUDED.emotion, note=EXCLUDED.note,
+                      created_at=EXCLUDED.created_at, status=EXCLUDED.status, created_by=EXCLUDED.created_by
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["ticker"] or "").upper(),
+                        str(r["action"] or "Note"),
+                        str(r["emotion"] or ""),
+                        str(r["note"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["status"] or "approved"),
+                        str(r["created_by"] or "human"),
+                    ),
+                )
+                counts["workspace_journal_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "investor_notes"):
+            for r in con_sq.execute(
+                """SELECT id, scope, ticker, sentiment, note, tags, created_at,
+                          COALESCE(status,'approved') AS status,
+                          COALESCE(created_by,'human') AS created_by,
+                          COALESCE(ai_confidence,0) AS ai_confidence,
+                          COALESCE(ai_reasoning,'') AS ai_reasoning,
+                          COALESCE(trace_id,'') AS trace_id
+                     FROM investor_notes"""
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO investor_notes_core(id, scope, ticker, sentiment, note, tags, created_at, status, created_by, ai_confidence, ai_reasoning, trace_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      scope=EXCLUDED.scope, ticker=EXCLUDED.ticker, sentiment=EXCLUDED.sentiment, note=EXCLUDED.note, tags=EXCLUDED.tags,
+                      created_at=EXCLUDED.created_at, status=EXCLUDED.status, created_by=EXCLUDED.created_by,
+                      ai_confidence=EXCLUDED.ai_confidence, ai_reasoning=EXCLUDED.ai_reasoning, trace_id=EXCLUDED.trace_id
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["scope"] or "organizer"),
+                        str(r["ticker"] or "").upper(),
+                        str(r["sentiment"] or "neutral"),
+                        str(r["note"] or ""),
+                        str(r["tags"] or "log"),
+                        str(r["created_at"] or ""),
+                        str(r["status"] or "approved"),
+                        str(r["created_by"] or "human"),
+                        float(r["ai_confidence"] or 0.0),
+                        str(r["ai_reasoning"] or ""),
+                        str(r["trace_id"] or ""),
+                    ),
+                )
+                counts["investor_notes_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "company_reminders"):
+            for r in con_sq.execute(
+                "SELECT id, ticker, remind_at, note, status, created_at FROM company_reminders"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO company_reminders_core(id, ticker, remind_at, note, status, created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      ticker=EXCLUDED.ticker, remind_at=EXCLUDED.remind_at, note=EXCLUDED.note,
+                      status=EXCLUDED.status, created_at=EXCLUDED.created_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["ticker"] or "").upper(),
+                        str(r["remind_at"] or ""),
+                        str(r["note"] or ""),
+                        str(r["status"] or "open"),
+                        str(r["created_at"] or ""),
+                    ),
+                )
+                counts["company_reminders_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "memory_compact"):
+            for r in con_sq.execute(
+                """SELECT id, memory_key, bucket, value, source, reliability, reuse_count,
+                          status, conflict_of, created_at, updated_at, last_used_at
+                   FROM memory_compact"""
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO memory_compact_core
+                    (id, memory_key, bucket, value, source, reliability, reuse_count, status, conflict_of, created_at, updated_at, last_used_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      memory_key=EXCLUDED.memory_key, bucket=EXCLUDED.bucket, value=EXCLUDED.value, source=EXCLUDED.source,
+                      reliability=EXCLUDED.reliability, reuse_count=EXCLUDED.reuse_count, status=EXCLUDED.status,
+                      conflict_of=EXCLUDED.conflict_of, created_at=EXCLUDED.created_at, updated_at=EXCLUDED.updated_at, last_used_at=EXCLUDED.last_used_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["memory_key"] or ""),
+                        str(r["bucket"] or "preference"),
+                        str(r["value"] or ""),
+                        str(r["source"] or "chat_turn"),
+                        float(r["reliability"] or 0.7),
+                        int(r["reuse_count"] or 0),
+                        str(r["status"] or "active"),
+                        str(r["conflict_of"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                        str(r["last_used_at"] or ""),
+                    ),
+                )
+                counts["memory_compact_core"] += 1
+
         con_pg.commit()
         return {"ok": True, "synced": counts}
     except Exception as exc:
@@ -395,9 +637,17 @@ def verify_core_counts() -> dict[str, Any]:
             ("investor_style_memory", "investor_style_memory_core"),
             ("filings", "filings_core"),
             ("report_facts", "report_facts_core"),
+            ("todos", "todos_core"),
+            ("workspace_journal", "workspace_journal_core"),
+            ("investor_notes", "investor_notes_core"),
+            ("company_reminders", "company_reminders_core"),
+            ("memory_compact", "memory_compact_core"),
         ]
         for sq, pg in pairs:
-            sq_n = int((con_sq.execute(f"SELECT COUNT(*) AS c FROM {sq}").fetchone() or {"c": 0})["c"] or 0)
+            if _sqlite_table_exists(con_sq, sq):
+                sq_n = int((con_sq.execute(f"SELECT COUNT(*) AS c FROM {sq}").fetchone() or {"c": 0})["c"] or 0)
+            else:
+                sq_n = 0
             cp.execute(f"SELECT COUNT(*) FROM {pg}")
             pg_n = int((cp.fetchone() or [0])[0] or 0)
             out["counts"][sq] = {"sqlite": sq_n, "postgres": pg_n, "match": bool(sq_n == pg_n)}
@@ -541,6 +791,51 @@ def list_portfolio_transactions_pg(limit: int = 100, ticker: str = "", year: int
 
 def list_recent_portfolio_transactions_pg(limit: int = 20, ticker: str = "") -> list[dict[str, Any]]:
     return list_portfolio_transactions_pg(limit=limit, ticker=ticker, year=0)
+
+
+def insert_portfolio_transaction_pg(
+    *,
+    created_at: str,
+    ticker: str,
+    action: str,
+    shares: float,
+    price: float,
+    note: str = "",
+    source: str = "app",
+    meta_json: dict[str, Any] | None = None,
+) -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO portfolio_transactions_core
+            (id, created_at, ticker, action, shares, price, note, source, meta_json)
+            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM portfolio_transactions_core), %s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+            """,
+            (
+                str(created_at or "").strip(),
+                str(ticker or "").strip().upper()[:16],
+                str(action or "").strip().lower()[:32],
+                float(shares or 0.0),
+                float(price or 0.0),
+                str(note or "")[:2000],
+                str(source or "app")[:64],
+                json.dumps(meta_json or {}, ensure_ascii=True),
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
 
 
 def summarize_investor_style_memory_pg(limit: int = 24) -> str:
@@ -877,5 +1172,526 @@ def query_report_facts_pg(
         ]
     except Exception:
         return []
+    finally:
+        con.close()
+
+
+def list_todos_pg(open_only: bool = True, limit: int = 400, ticker: str = "") -> list[dict[str, Any]]:
+    con = pg_connect()
+    if con is None:
+        return []
+    lim = max(1, min(2000, int(limit or 400)))
+    tk = str(ticker or "").strip().upper()
+    try:
+        clauses: list[str] = []
+        vals: list[Any] = []
+        if tk:
+            clauses.append("ticker = %s")
+            vals.append(tk)
+        if open_only:
+            clauses.append("status = 'open'")
+        else:
+            clauses.append("status IN ('done','archived')")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        order = (
+            "ORDER BY CASE priority WHEN 'P1' THEN 0 WHEN 'P2' THEN 1 ELSE 2 END,"
+            " CASE WHEN due_date <> '' THEN due_date ELSE '9999-12-31' END, id DESC"
+            if open_only
+            else "ORDER BY id DESC"
+        )
+        cur = con.cursor()
+        cur.execute(
+            f"""SELECT id, task, status, priority, due_date, ticker, category, created_at
+                FROM todos_core {where} {order} LIMIT %s""",
+            tuple(vals + [lim]),
+        )
+        out: list[dict[str, Any]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "task": str(r[1] or ""),
+                    "status": str(r[2] or "open"),
+                    "priority": str(r[3] or "P2"),
+                    "due_date": str(r[4] or ""),
+                    "ticker": str(r[5] or "").upper(),
+                    "category": str(r[6] or "general"),
+                    "created_at": str(r[7] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def add_todo_pg(task: str, *, ticker: str = "", category: str = "general", priority: str = "P2", due_date: str = "") -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    txt = str(task or "").strip()
+    if not txt:
+        con.close()
+        return False
+    tk = str(ticker or "").strip().upper()[:16]
+    cat = str(category or "general").strip().lower()
+    pr = str(priority or "P2").strip().upper()
+    dd = str(due_date or "").strip()
+    if cat not in {"company", "quick", "general"}:
+        cat = "general"
+    if pr not in {"P1", "P2", "P3"}:
+        pr = "P2"
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO todos_core (id, task, status, created_at, priority, due_date, ticker, category)
+            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM todos_core), %s, 'open', %s, %s, %s, %s, %s)
+            """,
+            (txt[:4000], now, pr, dd, tk, cat),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def update_todo_status_pg(todo_id: int, new_status: str) -> bool:
+    rid = int(todo_id or 0)
+    if rid <= 0:
+        return False
+    st = str(new_status or "").strip().lower()
+    if st not in {"open", "done", "archived"}:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("UPDATE todos_core SET status=%s WHERE id=%s", (st, rid))
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def toggle_todo_pg(todo_id: int) -> bool:
+    rid = int(todo_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT status, category FROM todos_core WHERE id=%s", (rid,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        cur_status = str(row[0] or "open").strip().lower()
+        cat = str(row[1] or "general").strip().lower()
+        nxt = ("archived" if cat == "quick" else "done") if cur_status == "open" else "open"
+        cur.execute("UPDATE todos_core SET status=%s WHERE id=%s", (nxt, rid))
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def delete_todo_pg(todo_id: int) -> bool:
+    rid = int(todo_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM todos_core WHERE id=%s", (rid,))
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def update_todo_pg(todo_id: int, *, task: str, due_date: str = "", priority: str = "P2") -> bool:
+    rid = int(todo_id or 0)
+    txt = str(task or "").strip()
+    if rid <= 0 or not txt:
+        return False
+    pr = str(priority or "P2").strip().upper()
+    if pr not in {"P1", "P2", "P3"}:
+        pr = "P2"
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE todos_core SET task=%s, due_date=%s, priority=%s, created_at=%s WHERE id=%s",
+            (txt[:4000], str(due_date or "").strip(), pr, dt.datetime.now().isoformat(), rid),
+        )
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def list_recent_notes_pg(limit: int = 200) -> list[dict[str, str]]:
+    con = pg_connect()
+    if con is None:
+        return []
+    lim = max(1, min(2000, int(limit or 200)))
+    try:
+        cur = con.cursor()
+        out: list[dict[str, str]] = []
+        cur.execute(
+            """SELECT id, created_at, scope, ticker, note, status, created_by, ai_confidence, ai_reasoning, trace_id
+               FROM investor_notes_core ORDER BY id DESC LIMIT %s""",
+            (lim,),
+        )
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": str(r[0] or ""),
+                    "source_table": "investor_notes",
+                    "date": str(r[1] or ""),
+                    "kind": "General",
+                    "ticker": str(r[3] or "").strip().upper(),
+                    "tag": str(r[2] or "general"),
+                    "text": str(r[4] or ""),
+                    "status": str(r[5] or "approved"),
+                    "created_by": str(r[6] or "human"),
+                    "ai_confidence": str(r[7] or "0"),
+                    "ai_reasoning": str(r[8] or ""),
+                    "trace_id": str(r[9] or ""),
+                }
+            )
+        cur.execute(
+            """SELECT id, created_at, ticker, action, note, status, created_by
+               FROM workspace_journal_core ORDER BY id DESC LIMIT %s""",
+            (lim,),
+        )
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": str(r[0] or ""),
+                    "source_table": "workspace_journal",
+                    "date": str(r[1] or ""),
+                    "kind": "Company",
+                    "ticker": str(r[2] or "").strip().upper(),
+                    "tag": str(r[3] or "note"),
+                    "text": str(r[4] or ""),
+                    "status": str(r[5] or "approved"),
+                    "created_by": str(r[6] or "human"),
+                    "ai_confidence": "0",
+                    "ai_reasoning": "",
+                    "trace_id": "",
+                }
+            )
+        out.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
+        return out[:lim]
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def add_investor_note_pg(
+    *,
+    scope: str,
+    ticker: str,
+    sentiment: str,
+    note: str,
+    tags: str,
+    status: str,
+    created_by: str,
+    ai_confidence: float = 0.0,
+    ai_reasoning: str = "",
+    trace_id: str = "",
+) -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO investor_notes_core
+            (id, scope, ticker, sentiment, note, tags, created_at, status, created_by, ai_confidence, ai_reasoning, trace_id)
+            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM investor_notes_core), %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                str(scope or "organizer")[:40],
+                str(ticker or "").upper()[:16],
+                str(sentiment or "neutral")[:32],
+                str(note or "")[:4000],
+                str(tags or "log")[:200],
+                now,
+                str(status or "approved")[:20],
+                str(created_by or "human")[:20],
+                float(ai_confidence or 0.0),
+                str(ai_reasoning or "")[:3000],
+                str(trace_id or "")[:120],
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def add_workspace_journal_note_pg(ticker: str, note: str, action: str = "Note", emotion: str = "Calm") -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO workspace_journal_core
+            (id, ticker, action, emotion, note, created_at, status, created_by)
+            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM workspace_journal_core), %s,%s,%s,%s,%s,'approved','human')
+            """,
+            (
+                str(ticker or "").upper()[:16],
+                str(action or "Note")[:80],
+                str(emotion or "Calm")[:80],
+                str(note or "")[:4000],
+                now,
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def update_workspace_journal_note_pg(note_id: int, note: str) -> bool:
+    rid = int(note_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE workspace_journal_core SET note=%s, created_at=%s WHERE id=%s",
+            (str(note or "")[:4000], dt.datetime.now().isoformat(), rid),
+        )
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def delete_workspace_journal_note_pg(note_id: int) -> bool:
+    rid = int(note_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM workspace_journal_core WHERE id=%s", (rid,))
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def list_company_reminders_pg(ticker: str, limit: int = 160) -> list[dict[str, Any]]:
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        return []
+    con = pg_connect()
+    if con is None:
+        return []
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """SELECT id, remind_at, note, status, created_at
+               FROM company_reminders_core
+               WHERE ticker=%s
+               ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, id DESC
+               LIMIT %s""",
+            (tk, max(1, min(1000, int(limit or 160)))),
+        )
+        out: list[dict[str, Any]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "remind_at": str(r[1] or ""),
+                    "note": str(r[2] or ""),
+                    "status": str(r[3] or "open"),
+                    "created_at": str(r[4] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def add_company_reminder_pg(ticker: str, remind_at: str, note: str) -> bool:
+    tk = str(ticker or "").strip().upper()
+    if not tk or not str(note or "").strip():
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO company_reminders_core (id, ticker, remind_at, note, status, created_at)
+            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM company_reminders_core), %s,%s,%s,'open',%s)
+            """,
+            (tk[:16], str(remind_at or "")[:64], str(note or "")[:500], dt.datetime.now().isoformat()),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def toggle_company_reminder_pg(reminder_id: int) -> bool:
+    rid = int(reminder_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT status FROM company_reminders_core WHERE id=%s", (rid,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        nxt = "done" if str(row[0] or "open").strip().lower() == "open" else "open"
+        cur.execute("UPDATE company_reminders_core SET status=%s WHERE id=%s", (nxt, rid))
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def update_company_reminder_pg(reminder_id: int, remind_at: str, note: str) -> bool:
+    rid = int(reminder_id or 0)
+    if rid <= 0 or not str(note or "").strip():
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE company_reminders_core SET remind_at=%s, note=%s, created_at=%s WHERE id=%s",
+            (str(remind_at or "")[:64], str(note or "")[:500], dt.datetime.now().isoformat(), rid),
+        )
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def delete_company_reminder_pg(reminder_id: int) -> bool:
+    rid = int(reminder_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM company_reminders_core WHERE id=%s", (rid,))
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
     finally:
         con.close()
