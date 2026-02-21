@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -43,6 +44,7 @@ from app.services.proactive_ai_service import (
     simulate_macro_shock_batch,
 )
 from app.services.sec_ingest_pipeline_service import process_new_filings_pipeline
+from app.services.postgres_core_service import core_backend, pg_connect, strict_postgres_mode
 
 
 router = APIRouter()
@@ -53,6 +55,8 @@ CASH_BAL_PATH = ROOT / "data" / "cash_balances.csv"
 MARKET_CACHE_PATH = ROOT / "data" / "cache" / "market_brief.json"
 REPORTS_DIR = ROOT / "reports"
 MONITOR_RENDER_TIMEOUT_SEC = 0.35
+EARNINGS_ENRICH_TTL_SEC = 180.0
+_EARNINGS_ENRICH_CACHE: dict[str, object] = {"ts": 0.0, "key": "", "rows": []}
 
 
 def _to_float(v: object, default: float = 0.0) -> float:
@@ -767,11 +771,38 @@ def _fmt_eps(v: object) -> str:
 def _enrich_earnings_with_reported_status(rows: list[dict[str, str]], today: dt.date) -> list[dict[str, str]]:
     if not rows:
         return rows
-    key = _finnhub_key()
-    if not key:
-        return rows
     tickers = sorted({str(r.get("symbol") or "").strip().upper() for r in rows if str(r.get("symbol") or "").strip()})
     if not tickers:
+        return rows
+    cache_key = json.dumps(
+        {
+            "tickers": tickers,
+            "rows": [(str(r.get("date") or ""), str(r.get("symbol") or "")) for r in rows],
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    now_ts = time.time()
+    def _cache_and_return(base_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+        try:
+            _EARNINGS_ENRICH_CACHE["ts"] = now_ts
+            _EARNINGS_ENRICH_CACHE["key"] = cache_key
+            _EARNINGS_ENRICH_CACHE["rows"] = [dict(x) for x in base_rows]
+        except Exception:
+            pass
+        return base_rows
+    try:
+        if (
+            str(_EARNINGS_ENRICH_CACHE.get("key") or "") == cache_key
+            and (now_ts - float(_EARNINGS_ENRICH_CACHE.get("ts") or 0.0)) <= EARNINGS_ENRICH_TTL_SEC
+        ):
+            cached_rows = list(_EARNINGS_ENRICH_CACHE.get("rows") or [])
+            if cached_rows:
+                return [dict(x) for x in cached_rows if isinstance(x, dict)]
+    except Exception:
+        pass
+    key = _finnhub_key()
+    if not key:
         return rows
     try:
         min_d = min(dt.datetime.strptime(str(r.get("date") or ""), "%Y-%m-%d").date() for r in rows if str(r.get("date") or ""))
@@ -788,52 +819,53 @@ def _enrich_earnings_with_reported_status(rows: list[dict[str, str]], today: dt.
         import certifi  # type: ignore
         import requests  # type: ignore
 
-        for tk in tickers[:30]:
-            r = requests.get(
-                "https://finnhub.io/api/v1/calendar/earnings",
-                params={"symbol": tk, "from": date_from, "to": date_to, "token": key},
-                timeout=10,
-                verify=certifi.where(),
-                headers={"Accept": "application/json", "User-Agent": "InvestorOS/1.0"},
-            )
-            if r.status_code != 200:
+        r = requests.get(
+            "https://finnhub.io/api/v1/calendar/earnings",
+            params={"from": date_from, "to": date_to, "token": key},
+            timeout=(2.0, 4.0),
+            verify=certifi.where(),
+            headers={"Accept": "application/json", "User-Agent": "InvestorOS/1.0"},
+        )
+        if r.status_code != 200:
+            return [dict(x) for x in rows]
+        cal = r.json() or {}
+        events = cal.get("earningsCalendar") if isinstance(cal, dict) else []
+        if not isinstance(events, list):
+            events = []
+        ticker_set = set(tickers)
+        for ev in events:
+            if not isinstance(ev, dict):
                 continue
-            cal = r.json() or {}
-            events = cal.get("earningsCalendar") if isinstance(cal, dict) else []
-            if not isinstance(events, list):
+            sym = _safe_ticker(str(ev.get("symbol") or ""))
+            d = str(ev.get("date") or "").strip()
+            if not sym or not d or sym not in ticker_set:
                 continue
-            for ev in events:
-                if not isinstance(ev, dict):
-                    continue
-                sym = _safe_ticker(str(ev.get("symbol") or ""))
-                d = str(ev.get("date") or "").strip()
-                if not sym or not d:
-                    continue
-                a = ev.get("epsActual")
-                e = ev.get("epsEstimate")
-                if a is None or e is None:
-                    continue
-                try:
-                    af = float(a)
-                    ef = float(e)
-                except Exception:
-                    continue
+            a = ev.get("epsActual")
+            e = ev.get("epsEstimate")
+            if a is None or e is None:
+                continue
+            try:
+                af = float(a)
+                ef = float(e)
+            except Exception:
+                continue
+            surprise = None
+            try:
+                if ef != 0:
+                    surprise = ((af - ef) / abs(ef)) * 100.0
+            except Exception:
                 surprise = None
-                try:
-                    if ef != 0:
-                        surprise = ((af - ef) / abs(ef)) * 100.0
-                except Exception:
-                    surprise = None
-                verdict = "BEAT" if af >= ef else "MISS"
-                reported[(d, sym)] = {
-                    "verdict": verdict,
-                    "surprise": surprise,
-                    "eps_actual": af,
-                    "eps_estimate": ef,
-                    "source": "Finnhub Earnings Calendar",
-                }
+            verdict = "BEAT" if af >= ef else "MISS"
+            reported[(d, sym)] = {
+                "verdict": verdict,
+                "surprise": surprise,
+                "eps_actual": af,
+                "eps_estimate": ef,
+                "source": "Finnhub Earnings Calendar",
+            }
     except Exception:
-        return rows
+        # Do not cache transport failures; allow fast retry on next request.
+        return [dict(x) for x in rows]
 
     out: list[dict[str, str]] = []
     for row in rows:
@@ -858,8 +890,19 @@ def _enrich_earnings_with_reported_status(rows: list[dict[str, str]], today: dt.
             rr["result_source"] = str(rep.get("source") or "")
             rr["confidence"] = "preliminary"
             rr["event_status"] = "reported"
+        else:
+            # If event date is already in the past and we still have no feed result,
+            # avoid showing it as "upcoming" forever.
+            try:
+                ed = dt.datetime.strptime(d, "%Y-%m-%d").date()
+                if ed < today:
+                    rr["event_status"] = "reported"
+                    rr["confidence"] = "preliminary"
+            except Exception:
+                pass
         out.append(rr)
-    return _verify_reported_earnings_with_sec(out)
+    final_rows = _verify_reported_earnings_with_sec(out)
+    return _cache_and_return([dict(x) for x in final_rows])
 
 
 def _verify_reported_earnings_with_sec(rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -871,30 +914,64 @@ def _verify_reported_earnings_with_sec(rows: list[dict[str, str]]) -> list[dict[
     if not tickers:
         return rows
     filing_map: dict[tuple[str, str], list[tuple[dt.date, str]]] = {}
-    con = connect_sqlite(CORE_DB_PATH)
-    try:
-        marks = ",".join("?" for _ in tickers)
-        q = (
-            f"SELECT ticker, form, date FROM filings "
-            f"WHERE ticker IN ({marks}) AND date IS NOT NULL AND date != '' "
-            f"ORDER BY date DESC LIMIT 5000"
-        )
-        db_rows = con.execute(q, tuple(tickers)).fetchall()
-        for r in db_rows:
-            tk = _safe_ticker(str(r["ticker"] or ""))
-            fm = str(r["form"] or "").strip().upper()
-            ds = str(r["date"] or "").strip()
-            if not tk or not fm or fm not in forms or not ds:
-                continue
+    used_pg = False
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None and strict_postgres_mode():
+            return rows
+        if con_pg is not None:
             try:
-                fd = dt.datetime.strptime(ds, "%Y-%m-%d").date()
+                marks = ",".join("%s" for _ in tickers)
+                q = (
+                    f"SELECT ticker, form, date FROM filings_core "
+                    f"WHERE ticker IN ({marks}) AND date IS NOT NULL AND date != '' "
+                    f"ORDER BY date DESC LIMIT 5000"
+                )
+                cur = con_pg.cursor()
+                cur.execute(q, tuple(tickers))
+                db_rows = cur.fetchall() or []
+                for r in db_rows:
+                    tk = _safe_ticker(str(r[0] or ""))
+                    fm = str(r[1] or "").strip().upper()
+                    ds = str(r[2] or "").strip()
+                    if not tk or not fm or fm not in forms or not ds:
+                        continue
+                    try:
+                        fd = dt.datetime.strptime(ds, "%Y-%m-%d").date()
+                    except Exception:
+                        continue
+                    filing_map.setdefault((tk, fm), []).append((fd, ds))
+                used_pg = True
             except Exception:
-                continue
-            filing_map.setdefault((tk, fm), []).append((fd, ds))
-    except Exception:
-        return rows
-    finally:
-        con.close()
+                if strict_postgres_mode():
+                    return rows
+            finally:
+                con_pg.close()
+    if not used_pg:
+        con = connect_sqlite(CORE_DB_PATH)
+        try:
+            marks = ",".join("?" for _ in tickers)
+            q = (
+                f"SELECT ticker, form, date FROM filings "
+                f"WHERE ticker IN ({marks}) AND date IS NOT NULL AND date != '' "
+                f"ORDER BY date DESC LIMIT 5000"
+            )
+            db_rows = con.execute(q, tuple(tickers)).fetchall()
+            for r in db_rows:
+                tk = _safe_ticker(str(r["ticker"] or ""))
+                fm = str(r["form"] or "").strip().upper()
+                ds = str(r["date"] or "").strip()
+                if not tk or not fm or fm not in forms or not ds:
+                    continue
+                try:
+                    fd = dt.datetime.strptime(ds, "%Y-%m-%d").date()
+                except Exception:
+                    continue
+                filing_map.setdefault((tk, fm), []).append((fd, ds))
+        except Exception:
+            return rows
+        finally:
+            con.close()
 
     out: list[dict[str, str]] = []
     for rr in rows:
@@ -1270,13 +1347,17 @@ def _is_hx(request: Request) -> bool:
 
 
 def _safe_monitor_info() -> dict[str, object]:
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(run_event_driven_monitor, False)
-            return dict(fut.result(timeout=MONITOR_RENDER_TIMEOUT_SEC) or {})
+        fut = ex.submit(run_event_driven_monitor, False)
+        out = dict(fut.result(timeout=MONITOR_RENDER_TIMEOUT_SEC) or {})
+        ex.shutdown(wait=False, cancel_futures=True)
+        return out
     except concurrent.futures.TimeoutError:
+        ex.shutdown(wait=False, cancel_futures=True)
         return {"ok": True, "timed_out": True, "note": "monitor deferred"}
     except Exception as exc:
+        ex.shutdown(wait=False, cancel_futures=True)
         return {"ok": False, "error": str(exc)}
 
 
@@ -2133,9 +2214,9 @@ def dashboard_proposals_scan(request: Request):
     try:
         out = run_event_driven_monitor(force=True)
         created = int(out.get("created") or 0)
-        return _render(request, message=f"Proposal scan complete. New proposals: {created}.")
+        return _render(request, message=f"Insight refresh complete. New insights: {created}.")
     except Exception as exc:
-        return _render(request, message=f"Proposal scan failed: {exc}")
+        return _render(request, message=f"Insight refresh failed: {exc}")
 
 
 @router.post("/dashboard/proposals/{proposal_id}/dismiss")
@@ -2146,8 +2227,8 @@ def dashboard_proposals_dismiss(
 ):
     ok = dismiss_action_proposal(proposal_id=proposal_id, reason=reason)
     if not ok:
-        return _render(request, message="Could not dismiss proposal.")
-    return _render(request, message="Proposal dismissed.")
+        return _render(request, message="Could not dismiss insight.")
+    return _render(request, message="Insight dismissed.")
 
 
 @router.post("/dashboard/proposals/{proposal_id}/execute")
