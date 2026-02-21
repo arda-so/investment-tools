@@ -25,12 +25,46 @@ from app.services.ai_job_queue_service import (
     touch_worker,
 )
 from app.services.phase2_scaling_service import save_map_reduce_report
+from tools.llm_engine import ask_ai
 
 
 def _run_with_timeout(fn, timeout_sec: float):
     with cf.ThreadPoolExecutor(max_workers=1) as ex:
         fut = ex.submit(fn)
         return fut.result(timeout=max(5.0, float(timeout_sec or 45.0)))
+
+
+def _map_analyze(ticker: str, question: str, task_prompt: str) -> dict:
+    tk = str(ticker or "").strip().upper()
+    q = str(question or "").strip()
+    tp = str(task_prompt or "").strip()
+    prompt = (
+        f"You are an elite fundamental equity analyst.\n"
+        f"Ticker: {tk}\n"
+        f"Sector question: {q}\n"
+        f"Task context: {tp[:1800]}\n\n"
+        "Return concise company-specific analysis focused on margins, demand, pricing power, and near-term durability."
+    )
+    try:
+        txt = str(
+            ask_ai(
+                prompt,
+                "Map-step analyst. Direct answer only.",
+                mode="smart",
+                temperature=0.1,
+            )
+            or ""
+        ).strip()
+    except Exception:
+        txt = ""
+    if not txt:
+        txt = f"{tk}: insufficient signal extracted for margin durability analysis."
+    return {
+        "status": "ok",
+        "intent": "map_reduce_map",
+        "message": txt[:4000],
+        "confidence": 0.65,
+    }
 
 
 def _run_reduce_task(payload: dict) -> dict:
@@ -87,7 +121,24 @@ def _run_reduce_task(payload: dict) -> dict:
         },
         "job_type": "reduce_task",
     }
-    out = _ai_command_sync(synth_payload)
+    try:
+        out_txt = str(
+            ask_ai(
+                synth_payload["query"],
+                "Reducer analyst. Synthesize cross-company margin durability with direct answer only.",
+                mode="smart",
+                temperature=0.1,
+            )
+            or ""
+        ).strip()
+    except Exception:
+        out_txt = ""
+    out = {
+        "status": "ok" if out_txt else "needs_clarification",
+        "intent": "map_reduce_reduce",
+        "message": out_txt or "Reducer could not synthesize a confident sector view from child analyses.",
+        "confidence": 0.68 if out_txt else 0.35,
+    }
     final = out if isinstance(out, dict) else {"status": "ok", "message": str(out or "")}
     if not str(final.get("message") or "").strip():
         if mini_reports:
@@ -159,19 +210,7 @@ def main() -> int:
                 q = str(mp.get("query") or "").strip()
                 tk = str(mp.get("ticker") or "").strip().upper()
                 qq = str(mp.get("question") or "").strip()
-                mp["query"] = (
-                    f"Map step: Analyze {tk} for sector question.\n"
-                    f"Question: {qq}\n"
-                    f"Task prompt: {q}\n"
-                    "Return concrete company-specific points, not portfolio summaries."
-                ).strip()
-                ctx = mp.get("context") if isinstance(mp.get("context"), dict) else {}
-                ctx = dict(ctx or {})
-                ctx["force_deep_reasoning"] = True
-                ctx["disable_manager_interrupts"] = True
-                mp["context"] = ctx
-                mp["job_type"] = "map_task"
-                out = _run_with_timeout(lambda: _ai_command_sync(mp), job_timeout_sec)
+                out = _run_with_timeout(lambda: _map_analyze(tk, qq, q), job_timeout_sec)
             else:
                 out = _run_with_timeout(lambda: _ai_command_sync(p), job_timeout_sec)
             stop_hb.set()
