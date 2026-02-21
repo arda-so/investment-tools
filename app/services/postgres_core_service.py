@@ -19,7 +19,7 @@ def pg_enabled() -> bool:
 
 
 def strict_postgres_mode() -> bool:
-    return str(os.getenv("CORE_DB_STRICT_POSTGRES", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    return str(os.getenv("CORE_DB_STRICT_POSTGRES", "1")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def pg_dsn() -> str:

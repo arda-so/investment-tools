@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.routers.ai import _ai_command_sync
+from app.services.chat_memory_service import append_chat_message, ensure_chat_memory_schema
 from app.services.ai_job_queue_service import (
     claim_next_job,
     complete_job,
@@ -158,6 +159,23 @@ def _run_reduce_task(payload: dict) -> dict:
             result=final,
             status=str(final.get("status") or "done"),
         )
+    except Exception:
+        pass
+    # Push reducer completion into chat memory so users see result without polling another endpoint.
+    try:
+        sid = str((p.get("context") or {}).get("session_id") or "map_reduce").strip()[:120]
+        if sid:
+            ensure_chat_memory_schema()
+            title = f"Phase 2 Sector Analysis Complete ({', '.join(tickers[:8])})"
+            body = str(final.get("message") or "").strip()
+            msg = f"{title}\n\n{body}" if body else title
+            append_chat_message(
+                session_id=sid,
+                role="assistant",
+                text=msg[:6000],
+                intent="map_reduce_reduce",
+                status=str(final.get("status") or "done")[:80],
+            )
     except Exception:
         pass
     return final

@@ -24,6 +24,7 @@ from app.services.postgres_core_service import (
     core_backend,
     ensure_postgres_core_schema,
     guard_core_backend_cutover,
+    strict_postgres_mode,
     sync_core_from_sqlite,
     verify_core_counts,
 )
@@ -821,6 +822,7 @@ def ai_migration_status():
     return {
         "ok": True,
         "core_db_backend": core_backend(),
+        "core_db_strict_postgres": strict_postgres_mode(),
         "core_db_guard": guard_core_backend_cutover(),
         "phase2": phase2_status(),
     }

@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from app.services.ai_job_queue_service import enqueue_job, get_job
+from app.services.chat_memory_service import append_chat_message, ensure_chat_memory_schema
 
 _PG_CLIENT = None
 _PG_CONNECT_ERR = ""
@@ -506,4 +507,22 @@ def collect_map_reduce_snapshot(reducer_job_id: str) -> dict[str, Any]:
             if not isinstance(snap.get("result"), dict) or not snap["result"]:
                 snap["result"] = dict(rep.get("result") or {})
             snap["report"] = rep
+            # Backfill reducer result into chat memory for this session once available.
+            try:
+                sid = str(rep.get("session_id") or "map_reduce").strip()[:120]
+                ticks = [str(x or "").strip().upper() for x in list(rep.get("tickers") or []) if str(x or "").strip()]
+                msg = str(((rep.get("result") or {}) if isinstance(rep.get("result"), dict) else {}).get("message") or "").strip()
+                if sid and msg:
+                    ensure_chat_memory_schema()
+                    title = f"Phase 2 Sector Analysis Complete ({', '.join(ticks[:8])})"
+                    text = f"{title}\n\n{msg}"[:6000]
+                    append_chat_message(
+                        session_id=sid,
+                        role="assistant",
+                        text=text,
+                        intent="map_reduce_reduce",
+                        status=str(((rep.get("result") or {}) if isinstance(rep.get("result"), dict) else {}).get("status") or "done")[:80],
+                    )
+            except Exception:
+                pass
     return snap
