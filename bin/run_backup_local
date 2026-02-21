@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/Users/solmaz/Investment_Tools"
+BACKUP_DIR="${ROOT}/backups"
+RETENTION_DAYS="${RETENTION_DAYS:-7}"
+DRY_RUN=0
+RETENTION_ONLY=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --retention-only) RETENTION_ONLY=1 ;;
+    *)
+      echo "Unknown option: $arg"
+      echo "Usage: $0 [--dry-run] [--retention-only]"
+      exit 2
+      ;;
+  esac
+done
+
+mkdir -p "$BACKUP_DIR"
+
+epoch_days_ago() {
+  local days="$1"
+  if date -v-"$days"d +%s >/dev/null 2>&1; then
+    date -v-"$days"d +%s
+  else
+    date -d "$days days ago" +%s
+  fi
+}
+
+file_mtime_epoch() {
+  local p="$1"
+  if stat -f %m "$p" >/dev/null 2>&1; then
+    stat -f %m "$p"
+  else
+    stat -c %Y "$p"
+  fi
+}
+
+create_backup() {
+  local ts out
+  ts="$(date +%Y%m%d_%H%M%S)"
+  out="${BACKUP_DIR}/investment_tools_backup_${ts}.tar.gz"
+  echo "Creating backup: ${out}"
+  tar -czf "$out" \
+    --exclude='./backups/*' \
+    --exclude='./.git/*' \
+    --exclude='./.venv-memory/*' \
+    --exclude='./.venv/*' \
+    --exclude='./node_modules/*' \
+    -C "$ROOT" .
+  echo "Backup created: ${out}"
+}
+
+prune_old_backups() {
+  local cutoff now p m
+  now="$(date +%s)"
+  cutoff="$(epoch_days_ago "$RETENTION_DAYS")"
+  echo "Pruning backups older than ${RETENTION_DAYS} days (cutoff epoch: ${cutoff})"
+
+  shopt -s nullglob
+  for p in "$BACKUP_DIR"/*; do
+    [ -e "$p" ] || continue
+    case "$(basename "$p")" in
+      .gitkeep|README|README.md) continue ;;
+    esac
+    m="$(file_mtime_epoch "$p" || echo "$now")"
+    if [ "${m}" -lt "${cutoff}" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "DRY-RUN delete: $p"
+      else
+        echo "Deleting: $p"
+        rm -rf -- "$p"
+      fi
+    fi
+  done
+  shopt -u nullglob
+}
+
+if [ "$RETENTION_ONLY" -eq 0 ]; then
+  create_backup
+fi
+prune_old_backups
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "Dry run complete."
+else
+  echo "Backup + retention complete."
+fi
+
