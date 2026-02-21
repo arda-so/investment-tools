@@ -566,6 +566,65 @@ def summarize_investor_style_memory_pg(limit: int = 24) -> str:
         con.close()
 
 
+def list_investor_style_memory_pg(limit: int = 300) -> list[dict[str, str]]:
+    con = pg_connect()
+    if con is None:
+        return []
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT key, answer, updated_at FROM investor_style_memory_core ORDER BY updated_at DESC LIMIT %s",
+            (max(1, min(1000, int(limit or 300))),),
+        )
+        out: list[dict[str, str]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "key": str(r[0] or ""),
+                    "answer": str(r[1] or ""),
+                    "updated_at": str(r[2] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def list_watchlist_thesis_pg(limit: int = 300) -> list[dict[str, str]]:
+    con = pg_connect()
+    if con is None:
+        return []
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """SELECT ticker, thesis_summary, time_horizon, invalidation_criteria, strategy_tag, created_at, updated_at
+               FROM watchlist_thesis_core
+               ORDER BY updated_at DESC
+               LIMIT %s""",
+            (max(1, min(1000, int(limit or 300))),),
+        )
+        out: list[dict[str, str]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "ticker": str(r[0] or ""),
+                    "thesis_summary": str(r[1] or ""),
+                    "time_horizon": str(r[2] or ""),
+                    "invalidation_criteria": str(r[3] or ""),
+                    "strategy_tag": str(r[4] or ""),
+                    "created_at": str(r[5] or ""),
+                    "updated_at": str(r[6] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
 def upsert_watchlist_thesis_pg(
     *,
     ticker: str,
