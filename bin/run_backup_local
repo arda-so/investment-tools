@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="/Users/solmaz/Investment_Tools"
 BACKUP_DIR="${ROOT}/backups"
-RETENTION_DAYS="${RETENTION_DAYS:-7}"
 DRY_RUN=0
 RETENTION_ONLY=0
 
@@ -21,24 +20,6 @@ done
 
 mkdir -p "$BACKUP_DIR"
 
-epoch_days_ago() {
-  local days="$1"
-  if date -v-"$days"d +%s >/dev/null 2>&1; then
-    date -v-"$days"d +%s
-  else
-    date -d "$days days ago" +%s
-  fi
-}
-
-file_mtime_epoch() {
-  local p="$1"
-  if stat -f %m "$p" >/dev/null 2>&1; then
-    stat -f %m "$p"
-  else
-    stat -c %Y "$p"
-  fi
-}
-
 create_backup() {
   local ts out
   ts="$(date +%Y%m%d_%H%M%S)"
@@ -55,28 +36,13 @@ create_backup() {
 }
 
 prune_old_backups() {
-  local cutoff now p m
-  now="$(date +%s)"
-  cutoff="$(epoch_days_ago "$RETENTION_DAYS")"
-  echo "Pruning backups older than ${RETENTION_DAYS} days (cutoff epoch: ${cutoff})"
-
-  shopt -s nullglob
-  for p in "$BACKUP_DIR"/*; do
-    [ -e "$p" ] || continue
-    case "$(basename "$p")" in
-      .gitkeep|README|README.md) continue ;;
-    esac
-    m="$(file_mtime_epoch "$p" || echo "$now")"
-    if [ "${m}" -lt "${cutoff}" ]; then
-      if [ "$DRY_RUN" -eq 1 ]; then
-        echo "DRY-RUN delete: $p"
-      else
-        echo "Deleting: $p"
-        rm -rf -- "$p"
-      fi
-    fi
-  done
-  shopt -u nullglob
+  echo "Pruning backups older than 7 days"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    find "$BACKUP_DIR" -mindepth 1 -mtime +7 -print
+  else
+    # Exact 7-day FIFO retention command requested.
+    find "$BACKUP_DIR" -mindepth 1 -mtime +7 -delete
+  fi
 }
 
 if [ "$RETENTION_ONLY" -eq 0 ]; then
@@ -89,4 +55,3 @@ if [ "$DRY_RUN" -eq 1 ]; then
 else
   echo "Backup + retention complete."
 fi
-
