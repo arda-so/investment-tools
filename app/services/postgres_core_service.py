@@ -18,6 +18,10 @@ def pg_enabled() -> bool:
     return core_backend() == "postgres"
 
 
+def strict_postgres_mode() -> bool:
+    return str(os.getenv("CORE_DB_STRICT_POSTGRES", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def pg_dsn() -> str:
     return str(os.getenv("POSTGRES_DSN", "")).strip()
 
@@ -426,6 +430,21 @@ def guard_core_backend_cutover() -> dict[str, Any]:
         return {"ok": True, "backend": "postgres", "guard_enforced": True, "switched": False, "reason": "verified_match", "verify": v}
     os.environ["CORE_DB_BACKEND"] = "sqlite"
     return {"ok": False, "backend": "sqlite", "guard_enforced": True, "switched": True, "reason": "count_mismatch", "verify": v}
+
+
+def enforce_strict_postgres_ready() -> dict[str, Any]:
+    if not strict_postgres_mode():
+        return {"ok": True, "strict": False, "enforced": False, "reason": "strict_disabled"}
+    if core_backend() != "postgres":
+        raise RuntimeError("strict_postgres_requires_core_db_backend_postgres")
+    v = verify_core_counts()
+    if not bool(v.get("ok")):
+        raise RuntimeError("strict_postgres_verify_failed")
+    counts = dict(v.get("counts") or {})
+    bad = [k for k, meta in counts.items() if not bool((meta or {}).get("match"))]
+    if bad:
+        raise RuntimeError("strict_postgres_count_mismatch:" + ",".join(bad))
+    return {"ok": True, "strict": True, "enforced": True, "reason": "verified_match", "verify": v}
 
 
 def list_action_proposals_pg(status: str = "open", limit: int = 96) -> list[dict[str, Any]]:

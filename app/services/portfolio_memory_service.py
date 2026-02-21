@@ -20,6 +20,7 @@ from app.services.postgres_core_service import (
     list_recent_portfolio_transactions_pg,
     pg_enabled,
     query_report_facts_pg,
+    strict_postgres_mode,
     summarize_investor_style_memory_pg,
     upsert_investor_style_memory_pg,
     upsert_watchlist_thesis_pg,
@@ -442,9 +443,15 @@ def upsert_investor_style_answer(key: str, answer: str) -> bool:
 
 def summarize_investor_style_memory(limit: int = 24) -> str:
     if pg_enabled():
-        txt = summarize_investor_style_memory_pg(limit=limit)
-        if txt:
-            return txt
+        try:
+            txt = summarize_investor_style_memory_pg(limit=limit)
+            if txt:
+                return txt
+        except Exception:
+            if strict_postgres_mode():
+                return ""
+        if strict_postgres_mode():
+            return ""
     ensure_portfolio_memory_schema()
     con = _conn()
     try:
@@ -1190,7 +1197,10 @@ def query_report_facts(
             if out_pg:
                 return out_pg
         except Exception:
-            pass
+            if strict_postgres_mode():
+                return []
+        if strict_postgres_mode():
+            return []
     ensure_portfolio_memory_schema()
     lim = max(1, min(100, int(limit or 12)))
     tks = [str(t or "").strip().upper() for t in (tickers or []) if str(t or "").strip()]
@@ -1597,9 +1607,15 @@ def upsert_watchlist_thesis(
 
 def list_recent_portfolio_transactions(limit: int = 20, ticker: str = "") -> list[dict[str, Any]]:
     if pg_enabled():
-        rows_pg = list_recent_portfolio_transactions_pg(limit=limit, ticker=ticker)
-        if rows_pg:
-            return rows_pg
+        try:
+            rows_pg = list_recent_portfolio_transactions_pg(limit=limit, ticker=ticker)
+            if rows_pg:
+                return rows_pg
+        except Exception:
+            if strict_postgres_mode():
+                return []
+        if strict_postgres_mode():
+            return []
     lim = max(1, min(200, int(limit or 20)))
     t = str(ticker or "").strip().upper()[:16]
     con = _conn()
@@ -1641,9 +1657,15 @@ def list_portfolio_transactions(
     year: int = 0,
 ) -> list[dict[str, Any]]:
     if pg_enabled():
-        rows_pg = list_portfolio_transactions_pg(limit=limit, ticker=ticker, year=year)
-        if rows_pg:
-            return rows_pg
+        try:
+            rows_pg = list_portfolio_transactions_pg(limit=limit, ticker=ticker, year=year)
+            if rows_pg:
+                return rows_pg
+        except Exception:
+            if strict_postgres_mode():
+                return []
+        if strict_postgres_mode():
+            return []
     lim = max(1, min(2000, int(limit or 100)))
     t = str(ticker or "").strip().upper()[:16]
     y = int(year or 0)

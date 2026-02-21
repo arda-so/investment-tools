@@ -19,7 +19,7 @@ from app.core.config import CORE_DB_PATH, ROOT, app_env
 from app.core.sqlite_hardening import connect_sqlite
 from app.services.organizer_service import recall
 from app.services.memory_engine import OnyxMemory
-from app.services.postgres_core_service import company_news_from_report_facts_pg, core_backend, filing_stats_map_pg
+from app.services.postgres_core_service import company_news_from_report_facts_pg, core_backend, filing_stats_map_pg, strict_postgres_mode
 
 try:
     from tools.llm_engine import ask_ai
@@ -410,7 +410,10 @@ def _filing_stats_map(tickers: list[str]) -> dict[str, dict[str, str | int]]:
             if out_pg:
                 return out_pg
         except Exception:
-            pass
+            if strict_postgres_mode():
+                return {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
+        if strict_postgres_mode():
+            return {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
     con = _conn()
     out: dict[str, dict[str, str | int]] = {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
     marks = ",".join("?" for _ in tickers)
@@ -759,7 +762,10 @@ def _company_news_from_report_facts(tickers: list[str], limit: int = 8) -> list[
             if out_pg:
                 return out_pg
         except Exception:
-            pass
+            if strict_postgres_mode():
+                return []
+        if strict_postgres_mode():
+            return []
     con = _conn()
     try:
         marks = ",".join("?" for _ in tks)

@@ -19,7 +19,7 @@ from app.services.chat_memory_service import ensure_chat_memory_schema
 from app.services.observability_service import ensure_observability_schema
 from app.services.organizer_service import ensure_schema
 from app.services.portfolio_memory_service import ensure_portfolio_memory_schema
-from app.services.postgres_core_service import ensure_postgres_core_schema, guard_core_backend_cutover
+from app.services.postgres_core_service import ensure_postgres_core_schema, guard_core_backend_cutover, enforce_strict_postgres_ready
 from app.services.sec_ingest_pipeline_service import ensure_sec_ingest_schema
 from app.services.ai_insight_service import ensure_ai_insight_schema
 
@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
     ensure_ai_job_queue_schema()
     ensure_postgres_core_schema()
     guard_core_backend_cutover()
+    enforce_strict_postgres_ready()
     ensure_sec_ingest_schema()
     ensure_ai_insight_schema()
 
