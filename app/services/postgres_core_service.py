@@ -504,9 +504,11 @@ def list_portfolio_transactions_pg(limit: int = 100, ticker: str = "", year: int
             clauses.append("ticker = %s")
             vals.append(str(ticker or "").strip().upper())
         if int(year or 0) >= 1900:
+            # Support mixed broker timestamp formats by extracting a 4-digit year
+            # from anywhere in created_at instead of relying on lexicographic ranges.
             y = int(year)
-            clauses.append("created_at >= %s AND created_at < %s")
-            vals.extend([f"{y:04d}-01-01", f"{y+1:04d}-01-01"])
+            clauses.append("COALESCE(NULLIF(substring(created_at from '([12][0-9]{3})'), '')::int, 0) = %s")
+            vals.append(y)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         q = (
             "SELECT created_at, ticker, action, shares, price, note, source "

@@ -12,6 +12,7 @@ from typing import Any
 from app.core.config import CORE_DB_PATH, ROOT
 from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
 from app.services.organizer_service import add_general_note
+from app.services.postgres_core_service import core_backend, pg_connect, strict_postgres_mode
 from app.services.proactive_ai_service import ensure_proactive_schema, run_event_driven_monitor
 
 ONYX_BRAIN_DB_PATH = ROOT / "onyx_brain.db"
@@ -27,6 +28,63 @@ def _conn_core() -> sqlite3.Connection:
 
 def _conn_onyx() -> sqlite3.Connection:
     return connect_sqlite(str(ONYX_BRAIN_DB_PATH), row_factory=True)
+
+
+def _insert_report_fact_core_pg(
+    *,
+    report_name: str,
+    report_kind: str,
+    report_modified: str,
+    fact_date: str,
+    ticker: str,
+    fact_text: str,
+    importance: int,
+    source: str,
+    fact_hash: str,
+    created_at: str,
+) -> None:
+    con = pg_connect()
+    if con is None:
+        return
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO report_facts_core
+            (report_name, report_kind, report_modified, fact_date, ticker, fact_text, importance, source, fact_hash, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(fact_hash) DO UPDATE SET
+              report_name=EXCLUDED.report_name,
+              report_kind=EXCLUDED.report_kind,
+              report_modified=EXCLUDED.report_modified,
+              fact_date=EXCLUDED.fact_date,
+              ticker=EXCLUDED.ticker,
+              fact_text=EXCLUDED.fact_text,
+              importance=EXCLUDED.importance,
+              source=EXCLUDED.source,
+              created_at=EXCLUDED.created_at
+            """,
+            (
+                str(report_name or "")[:400],
+                str(report_kind or "")[:120],
+                str(report_modified or "")[:40],
+                str(fact_date or "")[:20],
+                str(ticker or "")[:16],
+                str(fact_text or "")[:4000],
+                int(importance or 0),
+                str(source or "")[:80],
+                str(fact_hash or "")[:80],
+                str(created_at or "")[:40],
+            ),
+        )
+        con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+    finally:
+        con.close()
 
 
 def ensure_sec_ingest_schema() -> None:
@@ -647,6 +705,36 @@ def _recent_competitor_mda(ticker: str, limit: int = 6) -> list[dict[str, str]]:
         con_onyx.close()
     if not peer_tickers:
         return []
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            out_pg: list[dict[str, str]] = []
+            try:
+                marks = ",".join("%s" for _ in peer_tickers)
+                cur = con_pg.cursor()
+                cur.execute(
+                    f"""SELECT ticker, fact_text, report_name, created_at
+                        FROM report_facts_core
+                        WHERE ticker IN ({marks}) AND source='sec_buffett'
+                        ORDER BY id DESC
+                        LIMIT %s""",
+                    tuple(peer_tickers + [max(2, int(limit or 6))]),
+                )
+                for r in cur.fetchall() or []:
+                    out_pg.append(
+                        {
+                            "ticker": str(r[0] or "").upper(),
+                            "fact_text": str(r[1] or ""),
+                            "report_name": str(r[2] or ""),
+                            "created_at": str(r[3] or ""),
+                        }
+                    )
+                return out_pg
+            except Exception:
+                if strict_postgres_mode():
+                    return []
+            finally:
+                con_pg.close()
     con_core = _conn_core()
     out: list[dict[str, str]] = []
     try:
@@ -862,6 +950,18 @@ def _process_one_filing(
                 now,
             ),
             )
+        _insert_report_fact_core_pg(
+            report_name=f"SEC:{ticker}:{form}:{filing_id}",
+            report_kind="sec_filing",
+            report_modified="",
+            fact_date=dt.date.today().isoformat(),
+            ticker=ticker,
+            fact_text=fact,
+            importance=int(imp),
+            source="sec_buffett",
+            fact_hash=h,
+            created_at=now,
+        )
 
     _maybe_write_thesis_alert_note(
         ticker=ticker,
@@ -901,15 +1001,41 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
     entities = 0
     rels = 0
     try:
-        marks = ",".join("?" for _ in ids)
-        rows = con_core.execute(
-            f"""SELECT id, ticker, form, path
-                FROM filings
-                WHERE id IN ({marks})
-                ORDER BY id ASC""",
-            tuple(ids),
-        ).fetchall()
-        for r in rows:
+        rows_iter: list[dict[str, Any]] = []
+        if core_backend() == "postgres":
+            con_pg = pg_connect()
+            if con_pg is not None:
+                try:
+                    marks_pg = ",".join("%s" for _ in ids)
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        f"""SELECT id, ticker, form, path
+                            FROM filings_core
+                            WHERE id IN ({marks_pg})
+                            ORDER BY id ASC""",
+                        tuple(ids),
+                    )
+                    rows_iter = [
+                        {"id": int(r[0] or 0), "ticker": str(r[1] or ""), "form": str(r[2] or ""), "path": str(r[3] or "")}
+                        for r in (cur.fetchall() or [])
+                    ]
+                except Exception:
+                    if strict_postgres_mode():
+                        rows_iter = []
+                finally:
+                    con_pg.close()
+        if not rows_iter:
+            marks = ",".join("?" for _ in ids)
+            rows = con_core.execute(
+                f"""SELECT id, ticker, form, path
+                    FROM filings
+                    WHERE id IN ({marks})
+                    ORDER BY id ASC""",
+                tuple(ids),
+            ).fetchall()
+            rows_iter = [dict(r) for r in rows]
+
+        for r in rows_iter:
             tk = _safe_ticker(str(r["ticker"] or ""))
             if scope and tk not in scope:
                 continue

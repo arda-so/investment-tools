@@ -1675,9 +1675,10 @@ def list_portfolio_transactions(
         clauses.append("ticker = ?")
         vals.append(t)
     if y >= 1900:
-        clauses.append("created_at >= ? AND created_at < ?")
-        vals.append(f"{y:04d}-01-01")
-        vals.append(f"{y + 1:04d}-01-01")
+        # Handle mixed timestamp formats from broker imports.
+        clauses.append("(CAST(substr(created_at, 1, 4) AS INTEGER) = ? OR created_at LIKE ?)")
+        vals.append(y)
+        vals.append(f"%{y:04d}%")
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     con = _conn()
     try:
