@@ -1,0 +1,1895 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Investor OS v2{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root{
+      --bg:#eaf0f4;
+      --panel:#f1f5f8;
+      --panel2:#edf2f6;
+      --border:#d6dee6;
+      --border2:#c8d3dd;
+      --text:#2f4358;
+      --muted:#4f6780;
+      --accent:#ff7a59;
+      --accent-ink:#b5472f;
+      --glass-bg:rgba(255,255,255,.72);
+      --glass-border:rgba(255,255,255,.5);
+      --glass-blur:14px;
+      --glass-shadow:0 20px 56px rgba(15,23,42,.24);
+      --glass-opacity:.94;
+    }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:"Avenir Next","Helvetica Neue",sans-serif; }
+    .wrap {
+      width:100%;
+      max-width:1920px;
+      margin:0 auto;
+      padding:24px;
+      box-sizing:border-box;
+    }
+    @media (max-width:900px) {
+      .wrap { padding:14px; }
+    }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px; }
+    .topbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+    .title{font-weight:800;letter-spacing:.01em;}
+    .btn { border:1px solid var(--border2); background:var(--panel2); color:var(--text); border-radius:8px; padding:6px 10px; text-decoration:none; font-size:12px; font-weight:700; cursor:pointer; }
+    input, textarea, select { width:100%; box-sizing:border-box; border:1px solid #c8d3dd; border-radius:8px; background:#edf2f6; color:#2f4358; padding:8px; }
+    button { border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:8px; padding:8px 10px; font-weight:700; cursor:pointer; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { border-bottom:1px solid #d6dee6; padding:8px; text-align:left; vertical-align:top; }
+    .muted { color:var(--muted); }
+    .flash { margin-bottom:10px; padding:8px; border:1px solid #9fbad0; border-radius:8px; background:#edf2f6; }
+    .grid { display:grid; grid-template-columns:1fr; gap:10px; }
+    .grid3 { display:grid; grid-template-columns:1fr; gap:10px; }
+    .stats { display:flex; gap:8px; flex-wrap:wrap; }
+    .chip { padding:4px 10px; border-radius:999px; border:1px solid #c8d3dd; background:#edf2f6; font-size:12px; font-weight:700; }
+    .kbd{font-family:ui-monospace,Menlo,monospace;font-size:11px;padding:2px 6px;border:1px solid var(--border2);border-radius:6px;background:var(--panel2);}
+    #cmdkOverlay{
+      display:none;position:fixed;inset:0;background:rgba(15,23,42,.26);z-index:10000;
+      backdrop-filter: blur(2px);
+    }
+    #cmdkCard{
+      max-width:94vw;
+      width:min(800px, calc(100vw - 28px));
+      height:min(80vh, 920px);
+      background:rgba(255,255,255,.85);
+      border:1px solid var(--glass-border);
+      border-radius:18px;
+      padding:0;
+      box-shadow:var(--glass-shadow);
+      backdrop-filter: blur(12px);
+      opacity:var(--glass-opacity);
+      display:flex;
+      flex-direction:column;
+      position:fixed;
+      left:50%;
+      top:8vh;
+      transform:translateX(-50%);
+      resize:both;
+      overflow:hidden;
+      min-width:520px;
+      min-height:420px;
+    }
+    #cmdkDragBar{ cursor:move; user-select:none; }
+    .ai-head{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:12px 14px; border-bottom:1px solid #e2e8f0; background:rgba(255,255,255,.7);
+    }
+    .ai-title{font-weight:800; font-size:14px; letter-spacing:.01em;}
+    .ai-actions{display:flex; gap:6px; align-items:center;}
+    .ai-icon-btn{
+      border:1px solid #cbd5e1; background:#f8fafc; color:#334155;
+      border-radius:8px; padding:4px 7px; font-weight:700; font-size:12px;
+    }
+    .ai-empty{
+      height:100%; display:flex; align-items:center; justify-content:center;
+      color:#64748b; font-size:20px; font-weight:700; text-align:center; padding:20px;
+    }
+    .ai-body{flex:1; min-height:0; display:flex; flex-direction:column;}
+    .ai-history{
+      flex:1; overflow-y:auto; padding:14px; background:rgba(248,250,252,.8);
+    }
+    .msg-row{display:flex; margin:10px 0;}
+    .msg-user{justify-content:flex-end;}
+    .msg-ai{justify-content:flex-start;}
+    .msg-user .bubble{
+      max-width:78%; background:#f1f5f9; color:#0f172a;
+      border-radius:16px 6px 16px 16px; padding:10px 12px;
+      font-size:15px; line-height:1.55;
+      border:1px solid #e2e8f0;
+    }
+    .msg-ai .bubble{
+      max-width:86%; background:#ffffff; color:#0f172a;
+      border-radius:12px; padding:10px 12px; border:none;
+      font-size:15px; line-height:1.6;
+    }
+    .msg-avatar{
+      width:22px; height:22px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center;
+      font-size:12px; margin-right:8px; margin-top:4px; background:#e2e8f0; color:#334155;
+    }
+    .md p{margin:0 0 8px 0;}
+    .md p:last-child{margin-bottom:0;}
+    .md ul,.md ol{margin:6px 0 8px 18px; padding:0;}
+    .md li{margin:3px 0;}
+    .md h1,.md h2,.md h3{margin:8px 0 6px 0; font-size:16px; line-height:1.3;}
+    .msg-meta{
+      margin-top:8px; font-size:11px; color:#64748b;
+    }
+    .msg-status{margin-top:8px; font-size:10px; color:#9aa7b8; display:flex; gap:8px; align-items:center;}
+    .msg-status .status-link{
+      color:#8aa0b8; cursor:pointer; border:1px solid #d7e1eb; background:#fff; padding:0;
+      font-size:11px; width:18px; height:18px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center;
+    }
+    .msg-status .status-link:hover{color:#5f7892; border-color:#c8d6e4;}
+    .msg-logs{
+      margin-top:6px; border:1px solid #d7dee8; border-radius:10px; background:#f8fafc; padding:8px;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.45; color:#334155;
+    }
+    .traces{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;}
+    .trace-chip{
+      border:1px solid #d5deea; background:#fff; color:#475569; border-radius:999px; padding:2px 8px; font-size:10px;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    }
+    .ai-foot{
+      border-top:1px solid #e2e8f0; padding:10px 12px; background:rgba(255,255,255,.82);
+      backdrop-filter: blur(8px);
+    }
+    .ai-chips-row{
+      display:flex; gap:8px; overflow-x:auto; white-space:nowrap; padding-bottom:8px;
+      scrollbar-width:thin;
+    }
+    .ai-chip-btn{
+      border:1px solid #d2ddea; background:#f8fbff; color:#334155;
+      border-radius:999px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer;
+      flex:0 0 auto;
+    }
+    .ai-input-wrap{position:relative;}
+    .ai-input-wrap.drop-active{
+      border-radius:14px;
+      box-shadow:0 0 0 3px rgba(59,130,246,.18) inset;
+      background:rgba(239,246,255,.65);
+    }
+    .ai-input-tools{display:flex; gap:8px; margin-top:8px; align-items:center;}
+    .ai-upload-btn{
+      border:1px solid #d2ddea; background:#fff; color:#334155;
+      border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; cursor:pointer;
+    }
+    .ai-voice-btn{
+      border:1px solid #d2ddea; background:#fff; color:#334155;
+      border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; cursor:pointer;
+    }
+    .ai-voice-btn.listening{
+      border-color:#ef4444; color:#b91c1c; background:#fff1f2;
+    }
+    .ai-voice-toggle{
+      border:1px solid #d2ddea; background:#f8fbff; color:#334155;
+      border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; cursor:pointer;
+    }
+    .ai-voice-toggle.loop-on{
+      border-color:#10b981; color:#065f46; background:#ecfdf5;
+    }
+    .ai-voice-rate{
+      border:1px solid #d2ddea; background:#fff; color:#334155;
+      border-radius:999px; padding:4px 8px; font-size:12px; font-weight:700; cursor:pointer; height:28px;
+    }
+    .ai-upload-pill{
+      border:1px solid #d7e0eb; background:#f8fafc; color:#334155;
+      border-radius:999px; padding:4px 10px; font-size:11px; display:none; align-items:center; gap:6px;
+    }
+    .ai-upload-thumb{
+      width:18px; height:18px; border-radius:6px; object-fit:cover; border:1px solid #cbd5e1; background:#fff;
+      display:none;
+    }
+    .ai-upload-pill button{
+      border:none; background:transparent; color:#64748b; cursor:pointer; font-size:12px; line-height:1;
+    }
+    #aiCmdInput{
+      width:100%;
+      box-sizing:border-box;
+      border:1px solid #d8e2ed;
+      border-radius:999px;
+      background:#ffffff;
+      color:#1f2f46;
+      padding:13px 110px 13px 16px;
+      height:52px;
+      font-size:15px;
+      box-shadow:0 10px 24px rgba(15,23,42,.08);
+    }
+    #aiCmdInput:focus{
+      outline:none;
+      border-color:#89a8c7;
+      box-shadow:0 0 0 3px rgba(59,130,246,.12);
+    }
+    .ai-meta{font-size:11px;color:#64748b;}
+    .ai-phase2{
+      margin-top:8px;
+      border:1px solid #dbe4ee;
+      border-radius:12px;
+      background:#f8fafc;
+      padding:8px;
+      display:grid;
+      gap:6px;
+    }
+    .ai-phase2-top{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    .ai-phase2-title{
+      font-size:11px;
+      font-weight:800;
+      color:#334155;
+      letter-spacing:.03em;
+      text-transform:uppercase;
+    }
+    .ai-phase2-status{
+      font-size:11px;
+      color:#334155;
+      font-weight:700;
+    }
+    .ai-phase2-grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:6px;
+    }
+    .ai-phase2-grid input{
+      height:32px;
+      font-size:12px;
+      padding:6px 10px;
+      border-radius:9px;
+      background:#fff;
+    }
+    .ai-phase2-run{
+      border:1px solid #d2ddea;
+      background:#fff;
+      color:#1f2f46;
+      border-radius:9px;
+      font-size:12px;
+      font-weight:800;
+      padding:6px 10px;
+      cursor:pointer;
+    }
+    .ai-phase2-run[disabled]{ opacity:.65; cursor:not-allowed; }
+    .ai-phase2-progress{
+      font-size:11px;
+      color:#475569;
+      line-height:1.3;
+      min-height:14px;
+    }
+    @media (max-width:780px){
+      .ai-phase2-grid{ grid-template-columns:1fr; }
+    }
+    .ai-chip{display:inline-block;border:1px solid #d2ddea;background:#f7fbff;color:#304a62;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;}
+    .ai-rich-card{
+      margin-top:8px; border:1px solid #dbe3ee; border-radius:10px; background:#f8fafc; padding:10px;
+    }
+    .ai-rich-title{font-size:12px; font-weight:800; color:#334155; margin-bottom:6px;}
+    .ai-rich-body{font-size:13px; color:#334155; line-height:1.5;}
+    .ai-toast-wrap{
+      position:fixed; right:14px; top:14px; z-index:10005; display:flex; flex-direction:column; gap:8px; max-width:360px;
+    }
+    .ai-toast{
+      border:1px solid #d7e0eb; background:#fff; border-radius:10px; padding:9px 10px; font-size:12px; color:#1f2f46;
+      box-shadow:0 8px 20px rgba(15,23,42,.14);
+    }
+    .ai-toast .undo{margin-left:8px; border:none; background:transparent; color:#0f766e; text-decoration:underline; cursor:pointer; font-size:12px; padding:0;}
+    .msg-ai.alert .bubble{border-left:4px solid #f59e0b;}
+    .msg-ai.question .bubble{border-left:4px solid #3b82f6;}
+    .msg-ai.action .bubble{border-left:4px solid #10b981;}
+    .iv-controls{display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;}
+    .iv-btn{border:1px solid #d2ddea; background:#fff; color:#334155; border-radius:999px; padding:4px 9px; font-size:11px; cursor:pointer;}
+    .task-cards{display:flex; flex-direction:column; gap:8px; margin-top:8px;}
+    .task-card{
+      background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:10px;
+      box-shadow:0 1px 3px rgba(15,23,42,.08); display:flex; align-items:flex-start; gap:8px;
+      transition:opacity .22s ease, transform .22s ease;
+    }
+    .task-card.done{opacity:.45; transform:translateY(-2px);}
+    .rec-controls{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+    .rec-btn{
+      border:1px solid #d4dee9; background:#fff; color:#0f172a;
+      border-radius:10px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer;
+    }
+    .rec-btn:hover{background:#f8fafc;}
+    .task-icon{
+      font-size:14px; line-height:1.2; color:#64748b; margin-top:1px;
+      border:1px solid #cbd5e1; border-radius:6px; background:#fff; cursor:pointer; width:22px; height:22px;
+      display:inline-flex; align-items:center; justify-content:center; padding:0;
+    }
+    .task-main{font-size:13px; color:#0f172a; line-height:1.35;}
+    .task-main p{margin:0;}
+    .task-due{font-size:11px; color:#64748b; margin-top:2px;}
+    #aiSendBtn{
+      position:absolute; right:6px; top:50%; transform:translateY(-50%);
+      height:38px; min-width:78px; border-radius:999px; font-size:12px; padding:0 14px;
+    }
+    .ai-open {
+      position:fixed;
+      right:14px;
+      bottom:14px;
+      z-index:10002;
+      border:1px solid #dbe4ee;
+      background:#fff;
+      color:#1f2f46;
+      border-radius:999px;
+      padding:10px 12px;
+      font-size:12px;
+      font-weight:800;
+      box-shadow:0 8px 18px rgba(15,23,42,.15);
+      cursor:pointer;
+    }
+    .ai-worker-badge{
+      position:fixed;
+      right:14px;
+      bottom:62px;
+      z-index:10002;
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      border:1px solid #dbe4ee;
+      background:#fff;
+      color:#1f2f46;
+      border-radius:999px;
+      padding:6px 10px;
+      font-size:11px;
+      font-weight:800;
+      line-height:1;
+      box-shadow:0 6px 14px rgba(15,23,42,.12);
+      user-select:none;
+    }
+    .ai-worker-dot{
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background:#94a3b8;
+      border:1px solid rgba(15,23,42,.1);
+      flex:0 0 auto;
+    }
+    .ai-worker-badge.ok .ai-worker-dot{ background:#10b981; }
+    .ai-worker-badge.busy .ai-worker-dot{ background:#f59e0b; }
+    .ai-worker-badge.degraded .ai-worker-dot{ background:#fb7185; }
+    .ai-worker-badge.down .ai-worker-dot{ background:#ef4444; }
+    .ai-ghost{
+      position:fixed;
+      right:18px;
+      top:14px;
+      width:10px;height:10px;border-radius:999px;
+      z-index:10003;
+      opacity:0;
+      box-shadow:0 0 0 0 rgba(16,185,129,.55);
+      transition:opacity .12s ease;
+    }
+    .ai-ghost.show{opacity:1;}
+    .ai-ghost.idle{background:#94a3b8;}
+    .ai-ghost.thinking{background:#10b981;animation:aiPulse 1.2s infinite;}
+    .ai-ghost.running{background:#f59e0b;animation:aiPulse 1s infinite;}
+    .ai-ghost.done{background:#10b981;}
+    .ai-ghost.failed{background:#f43f5e;}
+    @keyframes aiPulse{
+      0%{ box-shadow:0 0 0 0 rgba(16,185,129,.55); }
+      70%{ box-shadow:0 0 0 8px rgba(16,185,129,0); }
+      100%{ box-shadow:0 0 0 0 rgba(16,185,129,0); }
+    }
+    @media (prefers-reduced-motion: reduce){
+      .ai-ghost{animation:none !important;}
+    }
+    @media (max-width:780px){
+      #cmdkCard{
+        margin:10px;
+        border-radius:14px;
+        width:calc(100vw - 20px);
+        height:calc(100vh - 20px);
+        min-width:0;
+        min-height:0;
+        left:10px;
+        top:10px;
+        transform:none;
+        resize:none;
+      }
+    }
+    .section-title{margin:0 0 8px 0;font-size:18px;letter-spacing:.01em;}
+    .subtle{font-size:12px;color:var(--muted);}
+    @media (min-width:1020px) { .grid { grid-template-columns:1fr 1fr; } .grid3{grid-template-columns:1fr 1fr 1fr;} }
+  </style>
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <div class="wrap">
+    {% block body %}{% endblock %}
+  </div>
+  <button id="aiOpenBtn" class="ai-open" type="button">AI</button>
+  <div id="aiWorkerBadge" class="ai-worker-badge" title="AI worker health">
+    <span class="ai-worker-dot" aria-hidden="true"></span>
+    <span id="aiWorkerBadgeText">Worker: --</span>
+  </div>
+  <div id="aiToastWrap" class="ai-toast-wrap"></div>
+  <div id="aiGhost" class="ai-ghost idle" aria-hidden="true"></div>
+  <div id="cmdkOverlay">
+    <div id="cmdkCard">
+      <div class="ai-head" id="cmdkDragBar">
+        <strong class="ai-title">AI Copilot</strong>
+        <div class="ai-actions">
+          <button type="button" id="cmdkSmaller" class="ai-icon-btn">-</button>
+          <button type="button" id="cmdkBigger" class="ai-icon-btn">+</button>
+          <button type="button" id="cmdkReset" class="ai-icon-btn">Reset</button>
+          <button type="button" id="cmdkClose" class="ai-icon-btn">✕</button>
+        </div>
+      </div>
+      <div class="ai-body">
+        <div id="aiResult" class="ai-history" style="display:none;"></div>
+        <div id="aiEmpty" class="ai-empty">How can I help you invest today?</div>
+      </div>
+      <div class="ai-foot">
+        <div class="ai-chips-row" id="aiSuggestionRow">
+          <button type="button" class="ai-chip-btn" data-prompt="show me my notes">Show Notes</button>
+          <button type="button" class="ai-chip-btn" data-prompt="what are my notes today?">Notes Today</button>
+          <button type="button" class="ai-chip-btn" data-prompt="summarize latest report">Summarize Report</button>
+          <button type="button" class="ai-chip-btn" data-prompt="open company ADBE">Open Company</button>
+          <button type="button" class="ai-chip-btn" data-prompt="find CRM 10-K">Find 10-K</button>
+        </div>
+        <form id="aiCmdForm">
+          <div class="ai-input-wrap">
+            <input id="aiCmdInput" placeholder="Ask Investor OS..." autocomplete="off" autofocus>
+            <button id="aiSendBtn" type="submit">Send</button>
+          </div>
+          <div class="ai-input-tools">
+            <button id="aiImageBtn" class="ai-upload-btn" type="button">Upload Image</button>
+            <input id="aiImageInput" type="file" accept="image/png,image/jpeg,image/webp" style="display:none;">
+            <button id="aiVoiceBtn" class="ai-voice-btn" type="button">Mic</button>
+            <select id="aiVoiceRate" class="ai-voice-rate" title="Voice speed">
+              <option value="0.9">0.9x</option>
+              <option value="1.0" selected>1.0x</option>
+              <option value="1.15">1.15x</option>
+              <option value="1.3">1.3x</option>
+            </select>
+            <div id="aiUploadPill" class="ai-upload-pill">
+              <img id="aiUploadThumb" class="ai-upload-thumb" alt="upload preview">
+              <span id="aiUploadName"></span>
+              <button id="aiUploadClear" type="button">x</button>
+            </div>
+          </div>
+          <div class="ai-meta" id="aiStateText" style="margin-top:8px;">Idle</div>
+          <div class="ai-meta" id="aiInterviewProgress" style="margin-top:4px;display:none;"></div>
+          <div id="aiPhase2Panel" class="ai-phase2">
+            <div class="ai-phase2-top">
+              <div class="ai-phase2-title">Phase 2 Map/Reduce</div>
+              <div id="aiPhase2Status" class="ai-phase2-status">status: --</div>
+            </div>
+            <div class="ai-phase2-grid">
+              <input id="aiPhase2Tickers" placeholder="Tickers (AAPL,MSFT,CRM)">
+              <input id="aiPhase2Question" placeholder="Question (e.g. margin durability next 2q)">
+            </div>
+            <div class="ai-phase2-top">
+              <button id="aiPhase2RunBtn" class="ai-phase2-run" type="button">Run Sector Analysis</button>
+              <div id="aiPhase2Progress" class="ai-phase2-progress"></div>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function(){
+      var ov=document.getElementById('cmdkOverlay');
+      var closeBtn=document.getElementById('cmdkClose');
+      var smallerBtn=document.getElementById('cmdkSmaller');
+      var biggerBtn=document.getElementById('cmdkBigger');
+      var resetBtn=document.getElementById('cmdkReset');
+      var card=document.getElementById('cmdkCard');
+      var dragBar=document.getElementById('cmdkDragBar');
+      var openBtn=document.getElementById('aiOpenBtn');
+      var navBtn=document.getElementById('ai-trigger-btn');
+      var workerBadge=document.getElementById('aiWorkerBadge');
+      var workerBadgeText=document.getElementById('aiWorkerBadgeText');
+      var form=document.getElementById('aiCmdForm');
+      var input=document.getElementById('aiCmdInput');
+      var imageBtn=document.getElementById('aiImageBtn');
+      var imageInput=document.getElementById('aiImageInput');
+      var voiceBtn=document.getElementById('aiVoiceBtn');
+      var speakToggleBtn=document.getElementById('aiSpeakToggle');
+      var voiceLoopToggleBtn=document.getElementById('aiVoiceLoopToggle');
+      var voiceRateSel=document.getElementById('aiVoiceRate');
+      var uploadPill=document.getElementById('aiUploadPill');
+      var uploadName=document.getElementById('aiUploadName');
+      var uploadThumb=document.getElementById('aiUploadThumb');
+      var uploadClear=document.getElementById('aiUploadClear');
+      var result=document.getElementById('aiResult');
+      var ghost=document.getElementById('aiGhost');
+      var toastWrap=document.getElementById('aiToastWrap');
+      var stateText=document.getElementById('aiStateText');
+      var interviewProgressEl=document.getElementById('aiInterviewProgress');
+      var phase2StatusEl=document.getElementById('aiPhase2Status');
+      var phase2TickersEl=document.getElementById('aiPhase2Tickers');
+      var phase2QuestionEl=document.getElementById('aiPhase2Question');
+      var phase2RunBtn=document.getElementById('aiPhase2RunBtn');
+      var phase2ProgressEl=document.getElementById('aiPhase2Progress');
+      var threadKey='aiThreadV1';
+      var pendingKey='aiPendingV1';
+      var prefsKey='aiPrefsV1';
+      var sessionKey='aiSessionV1';
+      var proactiveSeenKey='aiProactiveSeenV1';
+      var uiMigrateKey='aiUiMigrateV2';
+      var morningBriefKey='aiMorningBriefSeenV1';
+      var voicePrefsKey='aiVoicePrefsV1';
+      var proactiveLatestPromptId='';
+      var aiThread=[];
+      var pendingQuery='';
+      var userPrefs='';
+      var interviewPending=false;
+      var pendingImageDataUrl='';
+      var pendingImageName='';
+      var autoReadAloud=false;
+      var voiceLoopEnabled=false;
+      var voiceRate=1.0;
+      var recognition=null;
+      var listening=false;
+      var voiceSubmitting=false;
+      var awaitingAssistant=false;
+      var voiceSubmitTimer=null;
+      var geomKey='aiCmdkGeomV1';
+      var phase2ReducerId='';
+      var phase2PollTimer=null;
+      var phase2RenderedReducerId='';
+      function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
+      function defaultGeom(){
+        var w = Math.min(800, window.innerWidth - 28);
+        var h = Math.min(920, Math.floor(window.innerHeight * 0.80));
+        var l = Math.floor((window.innerWidth - w)/2);
+        var t = Math.max(10, Math.floor(window.innerHeight * 0.08));
+        return {left:l, top:t, width:w, height:h};
+      }
+      function applyGeom(g){
+        if(!card || !g) return;
+        var width = clamp(Number(g.width||720), 360, window.innerWidth - 12);
+        var height = clamp(Number(g.height||620), 260, window.innerHeight - 12);
+        var left = clamp(Number(g.left||20), 6, window.innerWidth - width - 6);
+        var top = clamp(Number(g.top||20), 6, window.innerHeight - height - 6);
+        card.style.transform='none';
+        card.style.left = left + 'px';
+        card.style.top = top + 'px';
+        card.style.width = width + 'px';
+        card.style.height = height + 'px';
+      }
+      function saveGeom(){
+        if(!card) return;
+        var r = card.getBoundingClientRect();
+        var g = {left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height)};
+        try{ localStorage.setItem(geomKey, JSON.stringify(g)); }catch(_e){}
+      }
+      function loadGeom(){
+        if(!card) return;
+        try{
+          var raw = localStorage.getItem(geomKey);
+          if(raw){ applyGeom(JSON.parse(raw)); return; }
+        }catch(_e){}
+        applyGeom(defaultGeom());
+      }
+      function loadState(){
+        try{
+          if(localStorage.getItem(uiMigrateKey) !== '1'){
+            localStorage.removeItem(threadKey);
+            localStorage.removeItem(pendingKey);
+            localStorage.setItem(uiMigrateKey, '1');
+          }
+        }catch(_e){}
+        try{
+          aiThread = JSON.parse(localStorage.getItem(threadKey) || '[]');
+          if(!Array.isArray(aiThread)){ aiThread=[]; }
+        }catch(_e){ aiThread=[]; }
+        // Do not persist pending_query across sessions/refreshes; it can hijack new commands.
+        pendingQuery = '';
+        interviewPending = false;
+        userPrefs = String(localStorage.getItem(prefsKey) || '');
+        try{
+          if(!localStorage.getItem(sessionKey)){
+            localStorage.setItem(sessionKey, 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,10));
+          }
+        }catch(_e){}
+      }
+      function saveState(){
+        try{ localStorage.setItem(threadKey, JSON.stringify(aiThread.slice(-40))); }catch(_e){}
+        // Keep pending_query in-memory only for immediate clarification turn.
+        try{ localStorage.removeItem(pendingKey); }catch(_e){}
+        try{ localStorage.setItem(prefsKey, userPrefs || ''); }catch(_e){}
+        try{
+          localStorage.setItem(
+            voicePrefsKey,
+            JSON.stringify({autoReadAloud: !!autoReadAloud, voiceLoopEnabled: !!voiceLoopEnabled, rate: Number(voiceRate || 1.0)})
+          );
+        }catch(_e){}
+      }
+      function loadVoicePrefs(){
+        // Voice read-aloud and loop are temporarily disabled.
+        autoReadAloud = false;
+        voiceLoopEnabled = false;
+        try{
+          var raw = localStorage.getItem(voicePrefsKey) || '';
+          if(!raw){ return; }
+          var v = JSON.parse(raw);
+          var r = Number(v && v.rate);
+          if(isFinite(r) && r >= 0.7 && r <= 1.6){ voiceRate = r; }
+        }catch(_e){}
+      }
+      function updateVoiceUi(){
+        if(speakToggleBtn){
+          speakToggleBtn.textContent = 'Read Aloud: ' + (autoReadAloud ? 'On' : 'Off');
+        }
+        if(voiceLoopToggleBtn){
+          voiceLoopToggleBtn.textContent = 'Voice Loop: ' + (voiceLoopEnabled ? 'On' : 'Off');
+          voiceLoopToggleBtn.classList.toggle('loop-on', !!voiceLoopEnabled);
+        }
+        if(voiceRateSel){
+          var target = String(Number(voiceRate || 1.0).toFixed(2));
+          var matched = false;
+          for(var i=0;i<voiceRateSel.options.length;i++){
+            var opt = String(Number(voiceRateSel.options[i].value || '1.0').toFixed(2));
+            if(opt === target){ voiceRateSel.selectedIndex = i; matched = true; break; }
+          }
+          if(!matched){ voiceRateSel.value = '1.0'; voiceRate = 1.0; }
+        }
+        if(voiceBtn){
+          voiceBtn.classList.toggle('listening', !!listening);
+          voiceBtn.textContent = listening ? 'Listening...' : 'Mic';
+        }
+      }
+      function stopSpeaking(){
+        try{
+          if(window.speechSynthesis){ window.speechSynthesis.cancel(); }
+        }catch(_e){}
+      }
+      function maybeResumeVoiceLoop(delayMs){
+        return;
+      }
+      function scheduleVoiceSubmit(){
+        if(voiceSubmitTimer){ clearTimeout(voiceSubmitTimer); voiceSubmitTimer = null; }
+        voiceSubmitTimer = setTimeout(function(){
+          voiceSubmitTimer = null;
+          if(!voiceLoopEnabled || voiceSubmitting || awaitingAssistant || !form || !input){ return; }
+          var q = String(input.value || '').trim();
+          if(!q){ maybeResumeVoiceLoop(220); return; }
+          voiceSubmitting = true;
+          try{ form.requestSubmit(); }catch(_e){ voiceSubmitting = false; maybeResumeVoiceLoop(220); }
+        }, 220);
+      }
+      function speakText(text, onDone){
+        if(!autoReadAloud){ return; }
+        var raw = String(text || '').trim();
+        if(!raw){ return; }
+        if(!window.speechSynthesis || !window.SpeechSynthesisUtterance){
+          showToast('Read-aloud is not supported in this browser.');
+          return;
+        }
+        stopSpeaking();
+        var u = new SpeechSynthesisUtterance(raw.replace(/\s+/g, ' ').slice(0, 1800));
+        u.rate = Number(voiceRate || 1.0);
+        u.pitch = 1.0;
+        u.volume = 1.0;
+        u.onend = function(){ if(typeof onDone === 'function'){ try{ onDone(); }catch(_e){} } };
+        u.onerror = function(){ if(typeof onDone === 'function'){ try{ onDone(); }catch(_e){} } };
+        try{ window.speechSynthesis.speak(u); }catch(_e){}
+      }
+      function initSpeechRecognition(){
+        var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if(!SR){ return; }
+        try{
+          recognition = new SR();
+          recognition.continuous = false;
+          recognition.interimResults = true;
+          recognition.lang = 'en-US';
+          recognition.onstart = function(){
+            stopSpeaking(); // barge-in: user speech interrupts assistant speech
+            listening = true;
+            updateVoiceUi();
+            showToast('Listening...');
+          };
+          recognition.onend = function(){
+            listening = false;
+            updateVoiceUi();
+          };
+          recognition.onerror = function(){
+            listening = false;
+            updateVoiceUi();
+            showToast('Voice input failed.');
+          };
+          recognition.onresult = function(ev){
+            var finalTxt = '';
+            var interimTxt = '';
+            for(var i = ev.resultIndex; i < ev.results.length; i++){
+              var part = String(((ev.results[i]||[])[0]||{}).transcript || '');
+              if(ev.results[i].isFinal){ finalTxt += part + ' '; }
+              else { interimTxt += part + ' '; }
+            }
+            var spoken = String(finalTxt || interimTxt).trim();
+            if(spoken && input){
+              var prefix = String(input.value || '').trim();
+              input.value = (prefix ? (prefix + ' ') : '') + spoken;
+              if(finalTxt && voiceLoopEnabled){
+                scheduleVoiceSubmit();
+              }
+            }
+          };
+        }catch(_e){
+          recognition = null;
+        }
+      }
+      function toggleListening(){
+        if(!recognition){
+          showToast('Voice input is not supported in this browser.');
+          return;
+        }
+        try{
+          if(listening){ recognition.stop(); return; }
+          stopSpeaking();
+          recognition.start();
+        }catch(_e){
+          listening = false;
+          updateVoiceUi();
+          showToast('Could not start microphone.');
+        }
+      }
+      function resetResult(){
+        if(!result) return;
+        result.style.display='none';
+        result.innerHTML='';
+      }
+      function showEmpty(on){
+        var el=document.getElementById('aiEmpty');
+        if(!el) return;
+        el.style.display = on ? 'flex' : 'none';
+      }
+      function showResult(html){
+        if(!result) return;
+        result.style.display='block';
+        result.innerHTML = html;
+      }
+      function esc(s){
+        return String(s||'').replace(/[&<>\"']/g, function(ch){
+          return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch] || ch;
+        });
+      }
+      function showToast(text, opts){
+        if(!toastWrap){ return; }
+        var t = document.createElement('div');
+        t.className = 'ai-toast';
+        var msg = document.createElement('span');
+        msg.textContent = String(text || '');
+        t.appendChild(msg);
+        if(opts && typeof opts.onUndo === 'function'){
+          var u = document.createElement('button');
+          u.className = 'undo';
+          u.type = 'button';
+          u.textContent = 'Undo';
+          u.addEventListener('click', function(){
+            try { opts.onUndo(); } catch(_e) {}
+            if(t.parentNode){ t.parentNode.removeChild(t); }
+          });
+          t.appendChild(u);
+        }
+        toastWrap.appendChild(t);
+        setTimeout(function(){ if(t.parentNode){ t.parentNode.removeChild(t); } }, Number((opts && opts.ms) || 2600));
+      }
+      function classifyKind(m){
+        var it = String((m && m.intent) || '').toLowerCase();
+        var st = String((m && m.status) || '').toLowerCase();
+        if(it === 'portfolio_interview' || st === 'needs_input'){ return 'question'; }
+        if(it.indexOf('alert') >= 0 || it === 'proactive_gap_check'){ return 'alert'; }
+        if(it === 'add_task' || it === 'add_note_draft' || it === 'save_thesis' || it === 'add_daily_log' || it === 'backfill_trade_history'){ return 'action'; }
+        return 'normal';
+      }
+      function statusLabel(m){
+        var st = String((m && m.status) || '').toLowerCase();
+        var traces = Array.isArray(m && m.traces) ? m.traces : [];
+        if(st === 'needs_input' || st === 'needs_confirmation' || st === 'needs_clarification'){ return '⚪ Waiting for your input'; }
+        if(st === 'error'){ return '⚠ Could not complete'; }
+        if(traces.length){ return '✓ Used ' + traces.length + ' tool step' + (traces.length>1?'s':''); }
+        return '✓ Completed';
+      }
+      function richCard(m){
+        var it = String((m && m.intent) || '').toLowerCase();
+        if(['notes_summary','position_why','watchlist_why','summarize_latest_report','summarize_current_report','portfolio_change_log','get_holdings'].indexOf(it) < 0){ return ''; }
+        var t = 'Result';
+        if(it.indexOf('note') >= 0){ t = '📄 Notes'; }
+        else if(it.indexOf('report') >= 0){ t = '📊 Report'; }
+        else if(it.indexOf('portfolio') >= 0 || it.indexOf('holding') >= 0){ t = '📌 Portfolio'; }
+        var body = String((m && m.text) || '').split('\n').slice(0,4).join('\n');
+        return '<div class="ai-rich-card"><div class="ai-rich-title">' + esc(t) + '</div><div class="ai-rich-body">' + renderMarkdown(body) + '</div></div>';
+      }
+      function renderMarkdown(text){
+        var raw = String(text || '');
+        if(window.marked && typeof window.marked.parse === 'function'){
+          try{
+            var safeRaw = raw.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return window.marked.parse(safeRaw, {gfm:true, breaks:true, headerIds:false, mangle:false});
+          }catch(_mdErr){}
+        }
+        var safe = esc(raw);
+        // bold + inline code
+        safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        safe = safe.replace(/`([^`]+)`/g, '<code>$1</code>');
+        var lines = safe.split(/\r?\n/);
+        var out = [];
+        var inUl = false, inOl = false;
+        function closeLists(){
+          if(inUl){ out.push('</ul>'); inUl=false; }
+          if(inOl){ out.push('</ol>'); inOl=false; }
+        }
+        lines.forEach(function(line){
+          var s = String(line || '').trim();
+          if(!s){ closeLists(); return; }
+          var h = s.match(/^(#{1,3})\s+(.+)/);
+          if(h){
+            closeLists();
+            var lvl = Math.min(3, h[1].length);
+            out.push('<h'+lvl+'>'+h[2]+'</h'+lvl+'>');
+            return;
+          }
+          var ul = s.match(/^[-*]\s+(.+)/);
+          if(ul){
+            if(inOl){ out.push('</ol>'); inOl=false; }
+            if(!inUl){ out.push('<ul>'); inUl=true; }
+            out.push('<li>'+ul[1]+'</li>');
+            return;
+          }
+          var ol = s.match(/^\d+\.\s+(.+)/);
+          if(ol){
+            if(inUl){ out.push('</ul>'); inUl=false; }
+            if(!inOl){ out.push('<ol>'); inOl=true; }
+            out.push('<li>'+ol[1]+'</li>');
+            return;
+          }
+          closeLists();
+          out.push('<p>'+s+'</p>');
+        });
+        closeLists();
+        return out.join('');
+      }
+      function splitTaskLines(text){
+        var raw = String(text || '');
+        var normalized = raw
+          .replace(/\s+\*\s+/g, '\n* ')
+          .replace(/\s+•\s+/g, '\n• ')
+          .replace(/\s+☐\s+/g, '\n☐ ')
+          .replace(/\s+□\s+/g, '\n□ ');
+        var lines = normalized.split(/\r?\n/);
+        var items = [];
+        var keep = [];
+        var markerRe = /^(?:[-*•]\s+|\d+\.\s+|\[\s?\]\s*|☐\s*|□\s*)/;
+        lines.forEach(function(line){
+          var s = String(line || '').trim();
+          if(!s){ keep.push(line); return; }
+          if(!markerRe.test(s)){ keep.push(line); return; }
+          var content = s.replace(markerRe, '').trim();
+          if(!content){ return; }
+          var due = '';
+          var mParen = content.match(/\((?:due|by)\s*[:\-]?\s*([^)]+)\)\s*$/i);
+          if(mParen){
+            due = String(mParen[1] || '').trim();
+            content = content.slice(0, mParen.index).trim();
+          } else {
+            var mTail = content.match(/\s+(?:due|by)\s+(.+)$/i);
+            if(mTail){
+              due = String(mTail[1] || '').trim();
+              content = content.slice(0, mTail.index).trim();
+            }
+          }
+          var todoId = '';
+          var idMatch = content.match(/\s+\[#?(\d{1,10})\]\s*$/);
+          if(idMatch){
+            todoId = String(idMatch[1] || '').trim();
+            content = content.slice(0, idMatch.index).trim();
+          }
+          if(content){
+            items.push({task: content, due: due, todo_id: todoId});
+          }
+        });
+        return {items: items, nonTaskText: keep.join('\n').trim()};
+      }
+      function renderTaskCards(m){
+        var text = String((m && m.text) || '');
+        var intent = String((m && m.intent) || '').toLowerCase();
+        var parsed = splitTaskLines(text);
+        var items = parsed.items || [];
+        if(!items.length){ return ''; }
+        var looksTasky = /task|todo/.test(intent) || /(to-?do|tasks?)/i.test(text) || items.length >= 2;
+        if(!looksTasky){ return ''; }
+        var html = '<div class="task-cards">';
+        items.forEach(function(it){
+          html += '<div class="task-card">';
+          html += '<button type="button" class="task-icon" data-task-complete="1" data-task-id="' + esc(it.todo_id || '') + '" data-task-text="' + esc(it.task || '') + '" aria-label="Mark task done">☐</button>';
+          html += '<div>';
+          html += '<div class="task-main">' + renderMarkdown(it.task || '') + '</div>';
+          if(it.due){ html += '<div class="task-due">Due: ' + esc(it.due) + '</div>'; }
+          html += '</div></div>';
+        });
+        html += '</div>';
+        if(parsed.nonTaskText){
+          return '<div class="md">' + renderMarkdown(parsed.nonTaskText) + '</div>' + html;
+        }
+        return html;
+      }
+      function renderStructuredCards(m){
+        var ui = (m && typeof m.ui === 'object' && m.ui) ? m.ui : null;
+        if(!ui){ return ''; }
+        var t = String(ui.type || '').toLowerCase();
+        var title = String(ui.title || '').trim();
+        var items = Array.isArray(ui.items) ? ui.items : [];
+        if(!t){ return ''; }
+        if(t === 'task_list'){
+          if(!items.length){ return ''; }
+          var taskHtml = '<div class="task-cards">';
+          items.forEach(function(it){
+            var task = String((it && it.task) || '').trim();
+            if(!task){ return; }
+            var due = String((it && it.due) || '').trim();
+            var todoId = String((it && it.todo_id) || '').trim();
+            taskHtml += '<div class="task-card">';
+            taskHtml += '<button type="button" class="task-icon" data-task-complete="1" data-task-id="' + esc(todoId) + '" data-task-text="' + esc(task) + '" aria-label="Mark task done">☐</button>';
+            taskHtml += '<div><div class="task-main">' + renderMarkdown(task) + '</div>';
+            if(due){ taskHtml += '<div class="task-due">Due: ' + esc(due) + '</div>'; }
+            taskHtml += '</div></div>';
+          });
+          taskHtml += '</div>';
+          if(title){ taskHtml = '<div class="md"><p><strong>' + esc(title) + '</strong></p></div>' + taskHtml; }
+          return taskHtml;
+        }
+        if(t === 'checklist' || t === 'brief_card'){
+          var lines = [];
+          if(title){ lines.push('<p><strong>' + esc(title) + '</strong></p>'); }
+          if(items.length){
+            lines.push('<ul>');
+            items.forEach(function(it){
+              var label = String((it && (it.label || it.task || it)) || '').trim();
+              if(label){ lines.push('<li>' + esc(label) + '</li>'); }
+            });
+            lines.push('</ul>');
+          }
+          return '<div class="md">' + lines.join('') + '</div>';
+        }
+        return '';
+      }
+      function renderAssistantBody(m){
+        var uiCards = renderStructuredCards(m);
+        if(uiCards){ return uiCards; }
+        var cards = renderTaskCards(m);
+        if(cards){ return cards; }
+        return renderMarkdown(m.text || '');
+      }
+      function renderThread(){
+        if(!result) return;
+        var html = aiThread.map(function(m, idx){
+          if(m.role==='user'){
+            return '<div class=\"msg-row msg-user\"><div class=\"bubble md\"><p>'+esc(m.text)+'</p></div></div>';
+          }
+          var kind = classifyKind(m);
+          var rowClass = 'msg-row msg-ai ' + kind;
+          var out = '<div class=\"'+rowClass+'\"><div class=\"msg-avatar\">✨</div><div class=\"bubble md\">'+renderAssistantBody(m);
+          out += richCard(m);
+          if(Array.isArray(m.citations) && m.citations.length){
+            out += '<div class=\"msg-meta\">' + m.citations.map(function(c){
+              var u = String((c && c.url) || '#');
+              var l = String((c && c.label) || 'source');
+              return '<a class=\"ai-chip\" style=\"text-decoration:none;margin-right:6px;\" href=\"' + esc(u) + '\">' + esc(l) + '</a>';
+            }).join('') + '</div>';
+          }
+          var sid = 'log_' + String(m._id || idx);
+          out += '<div class=\"msg-status\">' + esc(statusLabel(m));
+          out += ' <button class="status-link" type="button" data-log-target="' + esc(sid) + '" aria-label="Show tool details" title="Show details">i</button></div>';
+          if(Array.isArray(m.traces) && m.traces.length){
+            out += '<div id="' + esc(sid) + '" class="msg-logs" style="display:none;">' +
+              m.traces.map(function(t){
+                var s = String((t && t.step) || '-');
+                var d = String((t && t.detail) || '-');
+                return '<span class=\"trace-chip\">' + esc(s) + ': ' + esc(d) + '</span>';
+              }).join('') + '</div>';
+          }
+          if(String(m.intent||'') === 'portfolio_interview' && String(m.status||'') === 'needs_input'){
+            out += '<div class="iv-controls">';
+            out += '<button class="iv-btn" type="button" data-iv-action="skip">Skip</button>';
+            out += '<button class="iv-btn" type="button" data-iv-action="later">Answer Later</button>';
+            out += '<button class="iv-btn" type="button" data-iv-action="why">Why this matters</button>';
+            out += '</div>';
+          }
+          if(String(m.status||'') === 'needs_clarification' && String(m.text||'').toLowerCase().indexOf('choose one: open now, cancel, or back to chat') >= 0){
+            out += '<div class="rec-controls">';
+            out += '<button class="rec-btn" type="button" data-rec-action="open_now">Open now</button>';
+            out += '<button class="rec-btn" type="button" data-rec-action="cancel">Cancel</button>';
+            out += '<button class="rec-btn" type="button" data-rec-action="back_chat">Back to chat</button>';
+            out += '</div>';
+          }
+          out += '</div></div>';
+          return out;
+        }).join('');
+        showResult(html);
+        showEmpty(!aiThread.length);
+        result.scrollTop = result.scrollHeight;
+        result.querySelectorAll('[data-log-target]').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            var id = String(btn.getAttribute('data-log-target') || '');
+            if(!id){ return; }
+            var el = document.getElementById(id);
+            if(!el){ return; }
+            el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+          });
+        });
+        result.querySelectorAll('[data-iv-action]').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            var a = String(btn.getAttribute('data-iv-action') || '');
+            if(a === 'skip'){
+              if(input){ input.value = 'skip'; form && form.requestSubmit(); }
+              return;
+            }
+            if(a === 'later'){
+              showToast('Saved for later. I will ask again.');
+              closeCmdk();
+              return;
+            }
+            if(a === 'why'){
+              aiThread.push({role:'assistant', intent:'portfolio_interview', status:'ok', text:'This helps me protect your capital by turning your own rules into repeatable checks before buy/add/sell decisions.', meta:'explanation', traces:[], citations:[], redirect_url:'', _id: Date.now()});
+              renderThread();
+            }
+          });
+        });
+        result.querySelectorAll('[data-rec-action]').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            var a = String(btn.getAttribute('data-rec-action') || '');
+            if(!input || !form){ return; }
+            if(a === 'open_now'){ input.value = 'open now'; form.requestSubmit(); return; }
+            if(a === 'cancel'){ input.value = 'cancel'; form.requestSubmit(); return; }
+            if(a === 'back_chat'){ input.value = 'back to chat'; form.requestSubmit(); return; }
+          });
+        });
+        result.querySelectorAll('[data-task-complete]').forEach(function(btn){
+          btn.addEventListener('click', async function(){
+            var card = btn.closest('.task-card');
+            var todoId = String(btn.getAttribute('data-task-id') || '').trim();
+            var taskText = String(btn.getAttribute('data-task-text') || '').trim();
+            btn.disabled = true;
+            try{
+              var payload = todoId ? {todo_id: Number(todoId)} : {task_text: taskText};
+              var res = await fetch('/ai/task/complete', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify(payload)
+              });
+              var data = await res.json();
+              if(data && data.ok){
+                if(card){
+                  card.classList.add('done');
+                  var main = card.querySelector('.task-main');
+                  if(main){ main.style.textDecoration = 'line-through'; }
+                  setTimeout(function(){ if(card && card.parentNode){ card.parentNode.removeChild(card); } }, 320);
+                }
+                showToast('Task marked complete.');
+              } else {
+                btn.disabled = false;
+                showToast('Could not complete task. Try again.');
+              }
+            }catch(_e){
+              btn.disabled = false;
+              showToast('Could not complete task. Try again.');
+            }
+          });
+        });
+        saveState();
+      }
+      function forceFocusInput(){
+        if(!input) return;
+        input.focus();
+        setTimeout(function(){ input.focus(); }, 0);
+        setTimeout(function(){ input.focus(); }, 30);
+      }
+      function setUploadPill(){
+        if(!uploadPill || !uploadName){ return; }
+        if(pendingImageDataUrl){
+          uploadName.textContent = pendingImageName || 'image attached';
+          uploadPill.style.display = 'inline-flex';
+          if(uploadThumb){
+            uploadThumb.src = pendingImageDataUrl;
+            uploadThumb.style.display = 'inline-block';
+          }
+        }else{
+          uploadName.textContent = '';
+          uploadPill.style.display = 'none';
+          if(uploadThumb){
+            uploadThumb.src = '';
+            uploadThumb.style.display = 'none';
+          }
+        }
+      }
+      function clearUpload(){
+        pendingImageDataUrl = '';
+        pendingImageName = '';
+        if(imageInput){ imageInput.value = ''; }
+        setUploadPill();
+      }
+      function fileToDataUrl(file){
+        return new Promise(function(resolve, reject){
+          try{
+            var reader = new FileReader();
+            reader.onload = function(){ resolve(String(reader.result || '')); };
+            reader.onerror = function(){ reject(new Error('file_read_failed')); };
+            reader.readAsDataURL(file);
+          }catch(err){
+            reject(err);
+          }
+        });
+      }
+      async function attachImageFile(file){
+        var f = file || null;
+        if(!f){ clearUpload(); return; }
+        if(f.size > 5 * 1024 * 1024){
+          showToast('Image too large. Max 5MB.');
+          clearUpload();
+          return;
+        }
+        try{
+          pendingImageDataUrl = await fileToDataUrl(f);
+          pendingImageName = String(f.name || 'image');
+          setUploadPill();
+        }catch(_e){
+          clearUpload();
+          showToast('Could not read image.');
+        }
+      }
+      function setState(st){
+        if(!ghost) return;
+        ghost.className='ai-ghost show '+st;
+        if(stateText){ stateText.textContent = st.replace('-', ' '); }
+        if(st==='done' || st==='failed'){
+          setTimeout(function(){ ghost.className='ai-ghost idle'; if(stateText){ stateText.textContent='Idle'; } }, 1200);
+        }
+      }
+      function setInterviewProgress(progress){
+        if(!interviewProgressEl){ return; }
+        var p = (progress && typeof progress === 'object') ? progress : {};
+        var reviewed = Number(p.reviewed || 0);
+        var total = Number(p.total || 0);
+        if(!total || total <= 0){
+          interviewProgressEl.style.display='none';
+          interviewProgressEl.textContent='';
+          return;
+        }
+        interviewProgressEl.style.display='block';
+        interviewProgressEl.textContent='Interview Progress: Reviewed ' + reviewed + '/' + total + ' holdings';
+      }
+      function setProactiveBadge(on){
+        var show = !!on;
+        if(openBtn){
+          openBtn.textContent = show ? 'AI *' : 'AI';
+        }
+        if(navBtn){
+          navBtn.textContent = show ? 'AI Command *' : 'AI Command';
+        }
+      }
+      function setWorkerBadge(state, label, title){
+        if(!workerBadge){ return; }
+        var st = String(state || 'down').toLowerCase();
+        if(['ok','busy','degraded','down'].indexOf(st) < 0){ st = 'down'; }
+        workerBadge.className = 'ai-worker-badge ' + st;
+        if(workerBadgeText){ workerBadgeText.textContent = String(label || 'Worker: --'); }
+        workerBadge.title = String(title || 'AI worker health');
+      }
+      function setPhase2StatusText(s){
+        if(!phase2StatusEl){ return; }
+        phase2StatusEl.textContent = String(s || 'status: --');
+      }
+      function setPhase2ProgressText(s){
+        if(!phase2ProgressEl){ return; }
+        phase2ProgressEl.textContent = String(s || '');
+      }
+      function setPhase2RunEnabled(on){
+        if(!phase2RunBtn){ return; }
+        phase2RunBtn.disabled = !on;
+      }
+      function pushPhase2ResultToChat(reducerId, messageText){
+        var rid = String(reducerId || '').trim();
+        var msg = String(messageText || '').trim();
+        if(!rid || !msg){ return; }
+        if(phase2RenderedReducerId === rid){ return; }
+        phase2RenderedReducerId = rid;
+        aiThread.push({
+          role:'assistant',
+          intent:'map_reduce_reduce',
+          status:'ok',
+          text: msg,
+          ui:{},
+          meta:'phase2 map/reduce',
+          traces:[],
+          citations:[],
+          redirect_url:'',
+          _id: Date.now() + Math.floor(Math.random()*1000)
+        });
+        renderThread();
+      }
+      async function pollPhase2Status(){
+        try{
+          var res = await fetch('/ai/phase2/status', {method:'GET'});
+          var data = await res.json();
+          if(!data || !data.ok){
+            setPhase2StatusText('status: unavailable');
+            return;
+          }
+          if(!data.postgres_enabled){
+            setPhase2StatusText('status: sqlite mode');
+            return;
+          }
+          var ready = data.postgres_ready ? 'pg ok' : 'pg down';
+          var vec = data.pgvector_ready ? 'vector ok' : 'vector off';
+          setPhase2StatusText('status: ' + ready + ' · ' + vec);
+        }catch(_e){
+          setPhase2StatusText('status: unavailable');
+        }
+      }
+      function stopPhase2Poll(){
+        try{
+          if(phase2PollTimer){ clearTimeout(phase2PollTimer); phase2PollTimer = null; }
+        }catch(_e){}
+      }
+      function phase2PollLoop(delayMs){
+        stopPhase2Poll();
+        phase2PollTimer = setTimeout(async function(){
+          if(!phase2ReducerId){ return; }
+          try{
+            var res = await fetch('/ai/phase2/map-reduce/' + encodeURIComponent(phase2ReducerId), {method:'GET'});
+            var data = await res.json();
+            if(!data || !data.ok){
+              setPhase2ProgressText('Map/Reduce status unavailable.');
+              phase2PollLoop(1600);
+              return;
+            }
+            var st = String(data.reducer_status || '').toLowerCase();
+            var cs = data.child_stats || {};
+            setPhase2ProgressText(
+              'Reducer ' + st + ' · children done ' + Number(cs.done || 0) + '/' + Number(data.child_total || 0) +
+              ' · running ' + Number(cs.running || 0) + ' · queued ' + Number(cs.queued || 0)
+            );
+            if(st === 'done'){
+              var doneMsg = String(((data || {}).result || {}).message || '').trim();
+              if(!doneMsg){
+                doneMsg = String((((data || {}).report || {}).summary_text) || '').trim();
+              }
+              if(doneMsg){
+                pushPhase2ResultToChat(phase2ReducerId, doneMsg);
+              }
+              setPhase2RunEnabled(true);
+              stopPhase2Poll();
+              return;
+            }
+            if(st === 'error'){
+              setPhase2RunEnabled(true);
+              stopPhase2Poll();
+              return;
+            }
+            phase2PollLoop(1300);
+          }catch(_e){
+            phase2PollLoop(2000);
+          }
+        }, Math.max(800, Number(delayMs || 1200)));
+      }
+      function startPhase2ReducerSse(jobId){
+        var jid = String(jobId || '').trim();
+        if(!jid){ return; }
+        try{
+          var es = new EventSource('/ai/command/sse/' + encodeURIComponent(jid));
+          es.addEventListener('result', function(ev){
+            try{
+              var obj = JSON.parse(String(ev.data || '{}'));
+              var rs = (obj && typeof obj.result === 'object') ? obj.result : {};
+              var msg = String((rs && rs.message) || '').trim();
+              if(!msg && rs && typeof rs.summary_text === 'string'){ msg = String(rs.summary_text || '').trim(); }
+              if(msg){
+                pushPhase2ResultToChat(jid, msg);
+              }
+            }catch(_e){}
+            setPhase2ProgressText('Map/Reduce completed.');
+            setPhase2RunEnabled(true);
+            try{ es.close(); }catch(_e){}
+            stopPhase2Poll();
+          });
+          es.addEventListener('error', function(){
+            try{ es.close(); }catch(_e){}
+          });
+        }catch(_e){}
+      }
+      async function runPhase2MapReduce(){
+        var tRaw = String((phase2TickersEl && phase2TickersEl.value) || '').trim();
+        var qRaw = String((phase2QuestionEl && phase2QuestionEl.value) || '').trim();
+        if(!tRaw){
+          showToast('Add tickers first. Example: AAPL,MSFT,CRM');
+          return;
+        }
+        if(!qRaw){
+          showToast('Add a sector question first.');
+          return;
+        }
+        var tickers = tRaw.split(/[,\s]+/).map(function(x){ return String(x||'').trim().toUpperCase(); }).filter(Boolean);
+        if(!tickers.length){
+          showToast('No valid tickers detected.');
+          return;
+        }
+        setPhase2RunEnabled(false);
+        setPhase2ProgressText('Queueing map/reduce jobs...');
+        try{
+          var sid = '';
+          try{ sid = String(localStorage.getItem(sessionKey) || 'phase2-ui'); }catch(_e){}
+          var res = await fetch('/ai/phase2/map-reduce/sector', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+              tickers: tickers,
+              question: qRaw,
+              context: {session_id: sid}
+            })
+          });
+          var data = await res.json();
+          if(!data || !data.ok || !data.reducer_job_id){
+            throw new Error((data && data.error) ? String(data.error) : 'map_reduce_enqueue_failed');
+          }
+          phase2ReducerId = String(data.reducer_job_id || '').trim();
+          setPhase2ProgressText('Reducer queued: ' + phase2ReducerId);
+          phase2PollLoop(300);
+          startPhase2ReducerSse(phase2ReducerId);
+          showToast('Phase 2 sector analysis queued.');
+        }catch(_e){
+          setPhase2ProgressText('Queue failed. Check worker/app logs.');
+          setPhase2RunEnabled(true);
+          showToast('Map/Reduce queue failed.');
+        }
+      }
+      var proactivePollInFlight = false;
+      var proactivePollTimer = null;
+      var proactivePollMs = 45000;
+      var workerHealthPollInFlight = false;
+      var workerHealthPollTimer = null;
+      var workerHealthPollMs = 20000;
+      async function pollProactiveBadge(){
+        if(document.hidden){ return; }
+        if(proactivePollInFlight){ return; }
+        proactivePollInFlight = true;
+        try{
+          var day = (new Date()).toISOString().slice(0,10);
+          var seen = {};
+          try { seen = JSON.parse(localStorage.getItem(proactiveSeenKey) || '{}'); } catch(_e) {}
+          var name = 'Arda';
+          var res = await fetch('/ai/proactive?name=' + encodeURIComponent(name), {method:'GET'});
+          var data = await res.json();
+          var pid = String((data && data.prompt_id) || '').trim();
+          proactiveLatestPromptId = pid;
+          if(!data || !data.needs_attention || !pid){
+            setProactiveBadge(false);
+            proactivePollInFlight = false;
+            return;
+          }
+          setProactiveBadge(String(seen[day] || '') !== pid);
+        }catch(_e){}
+        proactivePollInFlight = false;
+      }
+      async function pollWorkerHealth(){
+        if(document.hidden){ return; }
+        if(workerHealthPollInFlight){ return; }
+        workerHealthPollInFlight = true;
+        try{
+          var res = await fetch('/ai/worker/health', {method:'GET'});
+          if(!res || !res.ok){ throw new Error('worker_health_http_error'); }
+          var data = await res.json();
+          var counts = (data && typeof data.counts === 'object' && data.counts) ? data.counts : {};
+          var queued = Number(counts.queued || 0);
+          var running = Number(counts.running || 0);
+          var errored = Number(counts.error || 0);
+          var recentErrored = Number((data && data.recent_error_count) || 0);
+          var backend = String((data && data.backend) || '').toLowerCase();
+          var redisConnected = !!(data && data.redis_connected);
+          var backendDown = (backend === 'redis' && !redisConnected);
+          var state = 'ok';
+          var label = 'Worker: healthy';
+          if(backendDown){
+            state = 'down';
+            label = 'Worker: redis down';
+          } else if(recentErrored > 0){
+            state = 'degraded';
+            label = 'Worker: recent errors';
+          } else if(running > 0 || queued > 0){
+            state = 'busy';
+            label = 'Worker: busy';
+          }
+          var ttl = 'backend=' + (backend || '-') + ' queued=' + queued + ' running=' + running + ' error=' + errored + ' recent_error=' + recentErrored;
+          setWorkerBadge(state, label, ttl);
+        }catch(_e){
+          setWorkerBadge('down', 'Worker: offline', 'AI worker health unavailable');
+        }
+        workerHealthPollInFlight = false;
+      }
+      function scheduleProactivePoll(ms){
+        try { if(proactivePollTimer){ clearTimeout(proactivePollTimer); proactivePollTimer = null; } } catch(_e) {}
+        proactivePollTimer = setTimeout(function(){
+          pollProactiveBadge().finally(function(){
+            scheduleProactivePoll(proactivePollMs);
+          });
+        }, Math.max(12000, Number(ms || proactivePollMs)));
+      }
+      function scheduleWorkerHealthPoll(ms){
+        try { if(workerHealthPollTimer){ clearTimeout(workerHealthPollTimer); workerHealthPollTimer = null; } } catch(_e) {}
+        workerHealthPollTimer = setTimeout(function(){
+          pollWorkerHealth().finally(function(){
+            scheduleWorkerHealthPoll(workerHealthPollMs);
+          });
+        }, Math.max(8000, Number(ms || workerHealthPollMs)));
+      }
+      async function maybeAskProactive(){
+        try{
+          if(interviewPending){ return; }
+          var day = (new Date()).toISOString().slice(0,10);
+          var raw = localStorage.getItem(proactiveSeenKey) || '{}';
+          var seen = {};
+          try { seen = JSON.parse(raw); } catch(_e) { seen = {}; }
+          var name = 'Arda';
+          var url = '/ai/proactive?name=' + encodeURIComponent(name);
+          var res = await fetch(url, {method:'GET'});
+          var data = await res.json();
+          var pid = String((data && data.prompt_id) || '').trim();
+          if(!data || !data.needs_attention || !pid){ return; }
+          if(String(seen[day] || '') === pid){ return; }
+          seen[day] = pid;
+          localStorage.setItem(proactiveSeenKey, JSON.stringify(seen));
+          setProactiveBadge(false);
+          aiThread.push({
+            role:'assistant',
+            intent:'proactive_gap_check',
+            status:'needs_input',
+            text: String(data.message || ''),
+            meta:'proactive coach',
+            traces: [],
+            citations: [],
+            redirect_url: '',
+            _id: Date.now() + Math.floor(Math.random()*1000)
+          });
+          renderThread();
+        }catch(_e){}
+      }
+      async function maybeInjectMorningBrief(){
+        try{
+          var day = (new Date()).toISOString().slice(0,10);
+          var seen = localStorage.getItem(morningBriefKey) || '';
+          if(seen === day){ return; }
+          var res = await fetch('/ai/morning_brief', {method:'GET'});
+          var data = await res.json();
+          var bullets = Array.isArray(data && data.bullets) ? data.bullets : [];
+          if(!bullets.length){ return; }
+          var msg = 'Morning Brief\\n' + bullets.map(function(b){ return '- ' + String(b || ''); }).join('\\n');
+          aiThread.unshift({
+            role:'assistant',
+            intent:'morning_brief',
+            status:'ok',
+            text: msg,
+            meta:'proactive scout',
+            traces:[{step:'scout', detail:'top-5-holdings'}],
+            citations:[],
+            redirect_url:'',
+            _id: Date.now() - 1
+          });
+          if(aiThread.length > 60){ aiThread = aiThread.slice(-60); }
+          localStorage.setItem(morningBriefKey, day);
+          setProactiveBadge(true);
+          saveState();
+        }catch(_e){}
+      }
+      function openCmdk(){
+        if(!ov) return;
+        ov.style.display='block';
+        loadGeom();
+        if(aiThread.length){ renderThread(); } else { resetResult(); showEmpty(true); }
+        maybeAskProactive();
+        forceFocusInput();
+        requestAnimationFrame(forceFocusInput);
+      }
+      function closeCmdk(){
+        if(!ov) return;
+        ov.style.display='none';
+        stopSpeaking();
+        if(recognition && listening){
+          try{ recognition.stop(); }catch(_e){}
+        }
+      }
+      document.addEventListener('keydown', function(e){
+        if((e.metaKey||e.ctrlKey) && String(e.key||'').toLowerCase()==='k'){ e.preventDefault(); openCmdk(); }
+        if(ov && ov.style.display==='block' && e.key==='Enter'){
+          if(document.activeElement !== input){
+            e.preventDefault();
+            form && form.requestSubmit();
+          }
+        }
+        if(e.key==='Escape'){ closeCmdk(); }
+      });
+      if(openBtn){ openBtn.addEventListener('click', openCmdk); }
+      if(navBtn){ navBtn.addEventListener('click', openCmdk); }
+      document.querySelectorAll('#aiSuggestionRow [data-prompt]').forEach(function(ch){
+        ch.addEventListener('click', function(){
+          if(!input) return;
+          input.value = String(ch.getAttribute('data-prompt') || '');
+          forceFocusInput();
+        });
+      });
+      if(closeBtn){ closeBtn.addEventListener('click', closeCmdk); }
+      if(voiceBtn){
+        voiceBtn.addEventListener('click', function(){ toggleListening(); });
+      }
+      if(speakToggleBtn){
+        speakToggleBtn.addEventListener('click', function(){
+          autoReadAloud = !autoReadAloud;
+          updateVoiceUi();
+          saveState();
+          if(!autoReadAloud){ stopSpeaking(); }
+        });
+      }
+      if(voiceLoopToggleBtn){
+        voiceLoopToggleBtn.addEventListener('click', function(){
+          voiceLoopEnabled = !voiceLoopEnabled;
+          updateVoiceUi();
+          saveState();
+          if(voiceLoopEnabled){
+            showToast('Voice loop on. Speak naturally; I will listen continuously turn-by-turn.');
+            maybeResumeVoiceLoop(160);
+          } else {
+            if(voiceSubmitTimer){ clearTimeout(voiceSubmitTimer); voiceSubmitTimer = null; }
+          }
+        });
+      }
+      if(voiceRateSel){
+        voiceRateSel.addEventListener('change', function(){
+          var v = Number(voiceRateSel.value || '1.0');
+          if(!isFinite(v) || v < 0.7 || v > 1.6){ v = 1.0; }
+          voiceRate = v;
+          saveState();
+        });
+      }
+      if(imageBtn && imageInput){
+        imageBtn.addEventListener('click', function(){ imageInput.click(); });
+        imageInput.addEventListener('change', async function(){
+          var f = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
+          await attachImageFile(f);
+        });
+      }
+      if(form && input){
+        ['dragenter','dragover'].forEach(function(evt){
+          form.addEventListener(evt, function(e){
+            e.preventDefault();
+            e.stopPropagation();
+            input.parentElement && input.parentElement.classList.add('drop-active');
+          });
+        });
+        ['dragleave','drop'].forEach(function(evt){
+          form.addEventListener(evt, function(e){
+            e.preventDefault();
+            e.stopPropagation();
+            input.parentElement && input.parentElement.classList.remove('drop-active');
+          });
+        });
+        form.addEventListener('drop', async function(e){
+          var dt = e.dataTransfer;
+          var files = dt && dt.files ? dt.files : null;
+          if(!files || !files.length){ return; }
+          var f = files[0];
+          if(!f || !String(f.type || '').toLowerCase().startsWith('image/')){
+            showToast('Drop an image file.');
+            return;
+          }
+          await attachImageFile(f);
+        });
+      }
+      if(uploadClear){ uploadClear.addEventListener('click', clearUpload); }
+      if(smallerBtn){ smallerBtn.addEventListener('click', function(){
+        if(!card) return;
+        var r=card.getBoundingClientRect();
+        applyGeom({left:r.left+12, top:r.top+12, width:r.width*0.9, height:r.height*0.9});
+        saveGeom();
+      }); }
+      if(biggerBtn){ biggerBtn.addEventListener('click', function(){
+        if(!card) return;
+        var r=card.getBoundingClientRect();
+        applyGeom({left:r.left-12, top:r.top-12, width:r.width*1.1, height:r.height*1.1});
+        saveGeom();
+      }); }
+      if(resetBtn){ resetBtn.addEventListener('click', function(){ applyGeom(defaultGeom()); saveGeom(); }); }
+      if(card){
+        card.addEventListener('mouseup', saveGeom);
+      }
+      if(dragBar && card){
+        var dragging=false, sx=0, sy=0, sl=0, st=0;
+        dragBar.addEventListener('mousedown', function(e){
+          var t=e.target;
+          if(t && (t.tagName==='BUTTON' || t.closest('button'))){ return; }
+          dragging=true;
+          var r=card.getBoundingClientRect();
+          sx=e.clientX; sy=e.clientY; sl=r.left; st=r.top;
+          e.preventDefault();
+        });
+        window.addEventListener('mousemove', function(e){
+          if(!dragging || !card) return;
+          var r=card.getBoundingClientRect();
+          var left = clamp(sl + (e.clientX - sx), 6, window.innerWidth - r.width - 6);
+          var top = clamp(st + (e.clientY - sy), 6, window.innerHeight - r.height - 6);
+          card.style.transform='none';
+          card.style.left=left+'px';
+          card.style.top=top+'px';
+        });
+        window.addEventListener('mouseup', function(){
+          if(!dragging) return;
+          dragging=false;
+          saveGeom();
+        });
+      }
+      if(ov){ ov.addEventListener('click', function(e){ if(e.target===ov) closeCmdk(); }); }
+      if(form){
+        form.addEventListener('submit', async function(e){
+          e.preventDefault();
+          var q = (input && input.value ? input.value : '').trim();
+          var hasImage = !!pendingImageDataUrl;
+          if(!q && !hasImage){ if(input){ input.focus(); } return; }
+          stopSpeaking();
+          if(listening && recognition){
+            try{ recognition.stop(); }catch(_e){}
+          }
+          if(input){ input.value=''; }
+          var qLow = String(q || '').toLowerCase();
+          var isFreshCmd = /^(add task|task:|todo:|add note|note:|draft note|open |go to |take me|where is |what page |main page|report|reports|summarize|summary|search |find |daily log|add this to daily log)/.test(qLow);
+          if (isFreshCmd && !interviewPending) { pendingQuery = ''; }
+          setState('thinking');
+          try{
+            awaitingAssistant = true;
+            setState('running');
+            var ctx = {};
+            try {
+              var p = String(window.location.pathname || '');
+              var sp = new URLSearchParams(String(window.location.search || ''));
+              if (p === '/reports/view') {
+                var rn = String(sp.get('name') || '').trim();
+                if (rn) { ctx.current_report_name = rn; }
+              }
+              if (p.indexOf('/organizer/file/notes') === 0) {
+                try {
+                  var noteRows = document.querySelectorAll('table tr');
+                  var visible = [];
+                  for (var i = 1; i < noteRows.length && visible.length < 24; i++) {
+                    var cells = noteRows[i].querySelectorAll('td');
+                    if (!cells || cells.length < 6) { continue; }
+                    var ticker = String((cells[1].innerText || '').trim()).toUpperCase();
+                    var text = String((cells[4].innerText || '').trim());
+                    var state = String((cells[5].innerText || '').trim()).toLowerCase();
+                    if (!ticker && !text) { continue; }
+                    visible.push({ ticker: ticker || '-', text: text.slice(0, 180), state: state || '-' });
+                  }
+                  if (visible.length) { ctx.visible_notes = visible; }
+                } catch(_notesErr) {}
+              }
+              ctx.current_path = p;
+              ctx.current_query = String(window.location.search || '');
+              ctx.session_id = String(localStorage.getItem(sessionKey) || 'default');
+              if((!isFreshCmd && pendingQuery) || interviewPending){ ctx.pending_query = pendingQuery || 'interview_pending'; }
+              if(aiThread.length){
+                ctx.history = aiThread.slice(-30);
+                for(var li = aiThread.length - 1; li >= 0; li--){
+                  var last = aiThread[li];
+                  if(!last || last.role!=='assistant' || !last.intent){ continue; }
+                  var lint = String(last.intent || '');
+                  if(lint === 'proactive_gap_check'){ continue; }
+                  ctx.last_intent = lint;
+                  break;
+                }
+              }
+              if(interviewPending){
+                ctx.last_intent = 'portfolio_interview';
+              }
+              if(userPrefs){ ctx.user_prefs = userPrefs; }
+            } catch(_ctxErr) {}
+            // Save lightweight preference instruction for future turns.
+            if(/next time|from now on|be like that|always/i.test(q)){
+              userPrefs = q;
+            }
+            aiThread.push({role:'user', text:(q || ('[Image] ' + (pendingImageName || 'uploaded image'))), _id: Date.now()});
+            renderThread();
+            var res = await fetch('/ai/command/async', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({query:q, context: ctx, image_data_url: pendingImageDataUrl || ''})
+            });
+            clearUpload();
+            var queue = await res.json();
+            var data = (queue && queue.result && typeof queue.result === 'object') ? queue.result : null;
+            if(!data){
+              if(!queue || !queue.job_id){
+                throw new Error('queue_failed');
+              }
+              data = await new Promise(function(resolve, reject){
+                var done = false;
+                var es = null;
+                var timer = setTimeout(function(){
+                  if(done){ return; }
+                  done = true;
+                  try { if(es){ es.close(); } } catch(_e){}
+                  reject(new Error('sse_timeout'));
+                }, 50000);
+                function finishOk(payload){
+                  if(done){ return; }
+                  done = true;
+                  clearTimeout(timer);
+                  try { if(es){ es.close(); } } catch(_e){}
+                  resolve(payload || {});
+                }
+                function finishErr(err){
+                  if(done){ return; }
+                  done = true;
+                  clearTimeout(timer);
+                  try { if(es){ es.close(); } } catch(_e){}
+                  reject(err || new Error('sse_error'));
+                }
+                try {
+                  es = new EventSource('/ai/command/sse/' + encodeURIComponent(String(queue.job_id || '')));
+                } catch(_esCreateErr){
+                  finishErr(_esCreateErr);
+                  return;
+                }
+                es.addEventListener('result', function(ev){
+                  try{
+                    var obj = JSON.parse(String(ev.data || '{}'));
+                    finishOk((obj && typeof obj.result === 'object') ? obj.result : {});
+                  } catch(_parseErr){
+                    finishErr(_parseErr);
+                  }
+                });
+                es.addEventListener('error', function(ev){
+                  try{
+                    var obj = JSON.parse(String((ev && ev.data) || '{}'));
+                    if(obj && obj.result && typeof obj.result === 'object'){
+                      finishOk(obj.result);
+                    } else {
+                      finishErr(new Error(String(obj.error || 'sse_error')));
+                    }
+                  } catch(_e){
+                    finishErr(new Error('sse_error'));
+                  }
+                });
+                es.addEventListener('partial', function(_ev){
+                  setState('running');
+                });
+              });
+            }
+            setInterviewProgress(data ? data.interview_progress : null);
+            if(data.status === 'needs_clarification' || data.status === 'needs_confirmation' || data.status === 'needs_input'){
+              pendingQuery = q;
+            } else {
+              pendingQuery = '';
+            }
+            if(String(data.intent || '') === 'portfolio_interview'){
+              if(String(data.status || '') === 'needs_input' || String(data.status || '') === 'needs_confirmation' || String(data.status || '') === 'needs_clarification'){
+                interviewPending = true;
+              } else {
+                interviewPending = false;
+              }
+            }
+            var navIntents = {
+              open_page:true, app_map_route:true, open_notes:true, open_company:true,
+              open_sec_filings:true, maps_to:true
+            };
+            var intentNow = String(data.intent || '').trim().toLowerCase();
+            var action = (data && typeof data.action === 'object' && data.action) ? data.action : null;
+            var at = action ? String(action.type || '').trim().toUpperCase() : '';
+            var navTarget = '';
+            if(at === 'NAVIGATE'){
+              navTarget = String(action.payload || '').trim();
+            } else {
+              var rd = String(data.redirect_url || '').trim();
+              if(rd && data.status === 'ok' && (
+                intentNow === 'open_page' ||
+                intentNow === 'app_map_route' ||
+                intentNow === 'open_notes' ||
+                intentNow === 'open_company' ||
+                intentNow === 'open_sec_filings' ||
+                intentNow === 'maps_to'
+              )){
+                navTarget = rd;
+              }
+            }
+            if(navIntents[intentNow] && !navTarget){
+              showToast('Redirecting...');
+              setState('done');
+              awaitingAssistant = false;
+              voiceSubmitting = false;
+              return;
+            }
+            if(navTarget){
+              setState('done');
+              var label = navTarget.indexOf('/my_universe') === 0 ? 'Portfolio' : (navTarget.indexOf('/organizer')===0 ? 'Organizer' : (navTarget.indexOf('/reports')===0 ? 'Reports' : 'page'));
+              showToast('🚀 Redirecting to ' + label + '...');
+              awaitingAssistant = false;
+              voiceSubmitting = false;
+              setTimeout(function(){ window.location.assign(navTarget); }, 120);
+              return;
+            }
+            var assistantMsg = {
+              role:'assistant',
+              intent: String(data.intent || ''),
+              status: String(data.status || ''),
+              text: String(data.message || '-'),
+              ui: (data && typeof data.ui === 'object' && data.ui) ? data.ui : {},
+              meta: String((data.intent || 'unknown') + ' · confidence ' + (data.confidence || 0) + ' · ' + (data.status || 'ok')),
+              traces: Array.isArray(data.traces) ? data.traces : [],
+              citations: Array.isArray(data.citations) ? data.citations : [],
+              redirect_url: String(data.redirect_url || ''),
+              _id: Date.now() + 1
+            };
+            aiThread.push(assistantMsg);
+            renderThread();
+            setState('done');
+            awaitingAssistant = false;
+            voiceSubmitting = false;
+            if(autoReadAloud){
+              speakText(assistantMsg.text || '', function(){ maybeResumeVoiceLoop(200); });
+            } else {
+              maybeResumeVoiceLoop(200);
+            }
+            if(assistantMsg.intent === 'save_thesis'){
+              showToast('Saved to memory: thesis updated.');
+            } else if(assistantMsg.intent === 'add_daily_log'){
+              showToast('Saved to memory: daily log updated.');
+            } else if(assistantMsg.intent === 'add_task'){
+              showToast('Task created.');
+            } else if(assistantMsg.intent === 'add_note_draft'){
+              var undoText = q.replace(/^[^:]*:\s*/,'').trim().slice(0,50);
+              var tkUndo = (String(data.message||'').match(/\bfor\s+([A-Z]{1,6})\b/)||[])[1] || '';
+              showToast('Draft note saved.', {
+                onUndo: function(){
+                  var cmd = tkUndo ? ('delete AI notes for ' + tkUndo + (undoText ? (' containing ' + undoText) : '')) : ('delete AI notes' + (undoText ? (' containing ' + undoText) : ''));
+                  if(input){ input.value = cmd; form && form.requestSubmit(); }
+                },
+                ms: 6000
+              });
+            } else if(assistantMsg.intent === 'backfill_trade_history'){
+              showToast('Saved to history log.');
+            }
+          } catch(_e){
+            clearUpload();
+            awaitingAssistant = false;
+            voiceSubmitting = false;
+            aiThread.push({role:'assistant', intent:'error', status:'error', text:'Command failed. Please retry.', meta:'error', traces:[], citations:[], redirect_url:'', _id: Date.now()+2});
+            renderThread();
+            setState('failed');
+            maybeResumeVoiceLoop(260);
+            return;
+          }
+        });
+      }
+      if(phase2RunBtn){
+        phase2RunBtn.addEventListener('click', function(){ runPhase2MapReduce(); });
+      }
+      loadState();
+      loadVoicePrefs();
+      initSpeechRecognition();
+      updateVoiceUi();
+      maybeInjectMorningBrief();
+      pollPhase2Status();
+      pollProactiveBadge().finally(function(){ scheduleProactivePoll(proactivePollMs); });
+      pollWorkerHealth().finally(function(){ scheduleWorkerHealthPoll(workerHealthPollMs); });
+      document.addEventListener('visibilitychange', function(){
+        if(document.hidden){
+          try { if(proactivePollTimer){ clearTimeout(proactivePollTimer); proactivePollTimer = null; } } catch(_e) {}
+          try { if(workerHealthPollTimer){ clearTimeout(workerHealthPollTimer); workerHealthPollTimer = null; } } catch(_e) {}
+          stopPhase2Poll();
+          return;
+        }
+        pollPhase2Status();
+        pollProactiveBadge().finally(function(){ scheduleProactivePoll(8000); });
+        pollWorkerHealth().finally(function(){ scheduleWorkerHealthPoll(5000); });
+        if(phase2ReducerId){ phase2PollLoop(700); }
+      });
+      if(ghost){ ghost.className='ai-ghost show idle'; }
+    })();
+  </script>
+</body>
+</html>
