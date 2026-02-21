@@ -34,7 +34,18 @@ def _conn() -> sqlite3.Connection:
 
 
 def _queue_backend() -> str:
-    return str(os.getenv("AI_QUEUE_BACKEND", "sqlite")).strip().lower()
+    return str(os.getenv("AI_QUEUE_BACKEND", "postgres")).strip().lower()
+
+
+def _is_production() -> bool:
+    env = str(os.getenv("APP_ENV", os.getenv("ENVIRONMENT", ""))).strip().lower()
+    return env in {"prod", "production"}
+
+
+def _queue_policy_guard() -> None:
+    strict_prod = str(os.getenv("AI_QUEUE_STRICT_PROD", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    if strict_prod and _is_production() and _queue_backend() == "sqlite":
+        raise RuntimeError("sqlite_queue_forbidden_in_production")
 
 
 def _redis_client():
@@ -81,6 +92,7 @@ def _use_postgres() -> bool:
 
 
 def ensure_ai_job_queue_schema() -> None:
+    _queue_policy_guard()
     if _use_redis():
         # Redis backend has no SQL schema requirement.
         return
