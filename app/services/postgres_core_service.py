@@ -4,10 +4,12 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import threading
 from typing import Any
 
 from app.core.config import CORE_DB_PATH
 from app.core.sqlite_hardening import connect_sqlite
+from sqlalchemy.pool import QueuePool
 
 
 def core_backend() -> str:
@@ -20,6 +22,11 @@ def pg_enabled() -> bool:
 
 def strict_postgres_mode() -> bool:
     return str(os.getenv("CORE_DB_STRICT_POSTGRES", "1")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_non_dev_env() -> bool:
+    env = str(os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "dev"))).strip().lower()
+    return env in {"prod", "production", "staging"}
 
 
 def pg_dsn() -> str:
@@ -41,17 +48,92 @@ def _pg_client():
         return ("", None)
 
 
-def pg_connect():
+_PG_POOL_LOCK = threading.Lock()
+_PG_POOL: QueuePool | None = None
+
+
+def _pool_size() -> int:
+    try:
+        return max(1, int(os.getenv("POSTGRES_POOL_SIZE", "8")))
+    except Exception:
+        return 8
+
+
+def _max_overflow() -> int:
+    try:
+        return max(0, int(os.getenv("POSTGRES_MAX_OVERFLOW", "16")))
+    except Exception:
+        return 16
+
+
+def _pool_recycle_sec() -> int:
+    try:
+        return max(30, int(os.getenv("POSTGRES_POOL_RECYCLE_SEC", "1800")))
+    except Exception:
+        return 1800
+
+
+def _pg_creator():
+    dsn = pg_dsn()
+    if not dsn:
+        raise RuntimeError("missing_POSTGRES_DSN")
+    _name, mod = _pg_client()
+    if mod is None:
+        raise RuntimeError("pg_driver_unavailable")
+    return mod.connect(dsn)
+
+
+def pg_pool() -> QueuePool | None:
+    global _PG_POOL
     dsn = pg_dsn()
     if not dsn:
         return None
-    _name, mod = _pg_client()
-    if mod is None:
+    if _PG_POOL is not None:
+        return _PG_POOL
+    with _PG_POOL_LOCK:
+        if _PG_POOL is not None:
+            return _PG_POOL
+        try:
+            _PG_POOL = QueuePool(
+                _pg_creator,
+                pool_size=_pool_size(),
+                max_overflow=_max_overflow(),
+                recycle=_pool_recycle_sec(),
+                pre_ping=True,
+            )
+        except Exception:
+            _PG_POOL = None
+    return _PG_POOL
+
+
+def reset_pg_pool() -> None:
+    global _PG_POOL
+    with _PG_POOL_LOCK:
+        if _PG_POOL is not None:
+            try:
+                _PG_POOL.dispose()
+            except Exception:
+                pass
+        _PG_POOL = None
+
+
+def pg_connect():
+    pool = pg_pool()
+    if pool is None:
         return None
     try:
-        return mod.connect(dsn)
+        # SQLAlchemy pool proxy; .close() returns connection to pool.
+        return pool.connect()
     except Exception:
-        return None
+        # Self-heal stale/broken pool state (e.g., env/DSN changed at runtime).
+        reset_pg_pool()
+        pool2 = pg_pool()
+        if pool2 is None:
+            return None
+        try:
+            return pool2.connect()
+        except Exception:
+            return None
 
 
 def _sqlite_table_exists(con: sqlite3.Connection, table: str) -> bool:
@@ -269,6 +351,534 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_core_bucket ON memory_compact_core(bucket)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_core_status ON memory_compact_core(status)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_profile_cache_core (
+                ticker TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                industry TEXT NOT NULL DEFAULT '',
+                sector TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cpc_core_name ON company_profile_cache_core(name)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cpc_core_industry ON company_profile_cache_core(industry)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS companies_core (
+                ticker TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                cik TEXT NOT NULL DEFAULT '',
+                added_date TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_core_name ON companies_core(name)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_lists_core (
+                id BIGINT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_company_lists_core_name ON company_lists_core(name)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_list_items_core (
+                id BIGINT PRIMARY KEY,
+                list_id BIGINT NOT NULL,
+                ticker TEXT NOT NULL,
+                added_at TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                UNIQUE(list_id, ticker)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cli_core_list_id ON company_list_items_core(list_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cli_core_ticker ON company_list_items_core(ticker)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_moat_tags_core (
+                id BIGINT PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                moat_key TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                UNIQUE(ticker, moat_key)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moat_core_ticker ON company_moat_tags_core(ticker)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moat_core_key ON company_moat_tags_core(moat_key)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_sec_competitors_core (
+                id BIGINT PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                competitor_ticker TEXT NOT NULL DEFAULT '',
+                competitor_name TEXT NOT NULL DEFAULT '',
+                source_form TEXT NOT NULL DEFAULT '',
+                source_date TEXT NOT NULL DEFAULT '',
+                source_path TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'active',
+                updated_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(ticker, competitor_ticker)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_comp_core_ticker ON company_sec_competitors_core(ticker, status)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS blue_chips_core (
+                ticker TEXT PRIMARY KEY,
+                added_at TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_blue_chips_core_added ON blue_chips_core(added_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proactive_monitor_state_core (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_runs_core (
+                id BIGINT PRIMARY KEY,
+                run_uid TEXT NOT NULL UNIQUE,
+                agent_name TEXT NOT NULL,
+                trigger_type TEXT NOT NULL DEFAULT 'event_driven',
+                status TEXT NOT NULL DEFAULT 'running',
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL DEFAULT '',
+                duration_ms DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                trace_id TEXT NOT NULL DEFAULT '',
+                input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                error_text TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_core_created ON agent_runs_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reflexion_notes_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                query TEXT NOT NULL DEFAULT '',
+                detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                note_text TEXT NOT NULL DEFAULT '',
+                rule_key TEXT NOT NULL DEFAULT '',
+                rule_text TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reflexion_notes_core_created ON reflexion_notes_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS failure_patterns_core (
+                id BIGINT PRIMARY KEY,
+                pattern_key TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                total_count INTEGER NOT NULL DEFAULT 0,
+                open_count INTEGER NOT NULL DEFAULT 0,
+                resolved_count INTEGER NOT NULL DEFAULT 0,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_query TEXT NOT NULL DEFAULT '',
+                last_detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                last_reflexion TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_failure_patterns_core_last_seen ON failure_patterns_core(last_seen_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reflexion_policy_versions_core (
+                id BIGINT PRIMARY KEY,
+                version_tag TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                source_event_id BIGINT NOT NULL DEFAULT 0,
+                policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                rolled_back_from TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reflexion_policy_core_active ON reflexion_policy_versions_core(is_active, created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel24_snapshot_core (
+                ticker TEXT PRIMARY KEY,
+                asof TEXT NOT NULL,
+                day_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                insider_txt TEXT NOT NULL DEFAULT '',
+                sec_txt TEXT NOT NULL DEFAULT '',
+                happened TEXT NOT NULL DEFAULT '',
+                suggestion TEXT NOT NULL DEFAULT '',
+                event_score INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'scheduler'
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_intel24_core_asof ON intel24_snapshot_core(asof DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_feed_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                severity INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                unique_key TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_intel_feed_core_created ON intel_feed_core(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_intel_feed_core_ticker ON intel_feed_core(ticker)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS changes_core (
+                id BIGINT PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                filing_id BIGINT NOT NULL DEFAULT 0,
+                section_name TEXT NOT NULL DEFAULT '',
+                change_type TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                detected_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_changes_core_detected ON changes_core(detected_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_changes_core_ticker ON changes_core(ticker)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_notes_core (
+                day TEXT PRIMARY KEY,
+                content TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                locked INTEGER NOT NULL DEFAULT 0,
+                archived_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_note_tags_core (
+                id BIGINT PRIMARY KEY,
+                day TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_note_tags_core_day ON daily_note_tags_core(day)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_note_tags_core_ticker ON daily_note_tags_core(ticker)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_action_queue_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                tool_name TEXT NOT NULL,
+                params_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                reasoning TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                trace_id TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_action_queue_core_status ON ai_action_queue_core(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_action_queue_core_created ON ai_action_queue_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_action_log_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                query TEXT NOT NULL DEFAULT '',
+                intent TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_action_log_core_created ON ai_action_log_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_events_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                service TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                latency_ms DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                message TEXT NOT NULL DEFAULT '',
+                trace_id TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_system_events_core_created ON system_events_core(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_system_events_core_service ON system_events_core(service)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS decision_log_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                timestamp TEXT NOT NULL DEFAULT '',
+                ticker TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                reasoning TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                source TEXT NOT NULL DEFAULT '',
+                trace_id TEXT NOT NULL DEFAULT '',
+                quantity DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                price DOUBLE PRECISION NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_log_core_created ON decision_log_core(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_log_core_ticker ON decision_log_core(ticker, created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investor_question_overrides_core (
+                key TEXT PRIMARY KEY,
+                question TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_interview_queue_core (
+                id BIGINT PRIMARY KEY,
+                ticker TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                step INTEGER NOT NULL DEFAULT 0,
+                last_question TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                completed_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_piq_core_status ON portfolio_interview_queue_core(status)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS report_fact_ingest_state_core (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS morning_briefs_core (
+                id BIGINT PRIMARY KEY,
+                brief_day TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                brief_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_morning_briefs_core_day ON morning_briefs_core(brief_day)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_events_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_learning_events_core_created ON learning_events_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rule_candidates_core (
+                id BIGINT PRIMARY KEY,
+                rule_key TEXT NOT NULL UNIQUE,
+                rule_text TEXT NOT NULL DEFAULT '',
+                source_pattern TEXT NOT NULL DEFAULT '',
+                support_count INTEGER NOT NULL DEFAULT 0,
+                accept_count INTEGER NOT NULL DEFAULT 0,
+                reject_count INTEGER NOT NULL DEFAULT 0,
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                last_evaluated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rule_candidates_core_conf ON rule_candidates_core(confidence DESC, support_count DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS active_rules_core (
+                id BIGINT PRIMARY KEY,
+                rule_key TEXT NOT NULL UNIQUE,
+                rule_text TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                source_candidate_id BIGINT NOT NULL DEFAULT 0,
+                reuse_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                last_used_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_active_rules_core_status ON active_rules_core(status, confidence DESC, reuse_count DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_tool_log_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                query TEXT NOT NULL DEFAULT '',
+                tool_name TEXT NOT NULL DEFAULT '',
+                args_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                status TEXT NOT NULL DEFAULT '',
+                latency_ms DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                error TEXT NOT NULL DEFAULT '',
+                trace_id TEXT NOT NULL DEFAULT '',
+                model_name TEXT NOT NULL DEFAULT '',
+                capability TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_tool_log_core_created ON ai_tool_log_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_quality_log_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT '',
+                query TEXT NOT NULL DEFAULT '',
+                detail_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_quality_log_core_created ON ai_quality_log_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS risk_veto_decisions_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                trace_id TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '',
+                query TEXT NOT NULL DEFAULT '',
+                verdict TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                reason TEXT NOT NULL DEFAULT '',
+                metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                detail_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_risk_veto_decisions_core_created ON risk_veto_decisions_core(created_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS risk_veto_config_core (
+                id INTEGER PRIMARY KEY,
+                config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO risk_veto_config_core (id, config_json, updated_at)
+            VALUES (1, '{}'::jsonb, %s)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (dt.datetime.now().isoformat(),),
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_operator_state_core (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_operator_gap_prompts_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                prompt_id TEXT NOT NULL UNIQUE,
+                user_name TEXT NOT NULL DEFAULT '',
+                prompt_text TEXT NOT NULL DEFAULT '',
+                context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                context_fingerprint TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                answered_at TEXT NOT NULL DEFAULT '',
+                answer_text TEXT NOT NULL DEFAULT '',
+                resolved_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_operator_gap_status_core ON daily_operator_gap_prompts_core(status, id DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_preferences_core (
+                id BIGINT PRIMARY KEY,
+                pref_key TEXT NOT NULL UNIQUE,
+                pref_value TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'chat',
+                preference_key TEXT NOT NULL DEFAULT '',
+                preference_value TEXT NOT NULL DEFAULT '',
+                context_reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_core_updated ON user_preferences_core(updated_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_core_key ON user_preferences_core(preference_key)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_meta_suggestions_core (
+                id BIGINT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                priority DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                source TEXT NOT NULL DEFAULT 'heuristic',
+                status TEXT NOT NULL DEFAULT 'open'
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_created ON ai_meta_suggestions_core(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_status ON ai_meta_suggestions_core(status, priority DESC)")
         con.commit()
         return {"ok": True}
     except Exception as exc:
@@ -302,6 +912,41 @@ def sync_core_from_sqlite() -> dict[str, Any]:
         "investor_notes_core": 0,
         "company_reminders_core": 0,
         "memory_compact_core": 0,
+        "company_profile_cache_core": 0,
+        "companies_core": 0,
+        "company_lists_core": 0,
+        "company_list_items_core": 0,
+        "company_moat_tags_core": 0,
+        "company_sec_competitors_core": 0,
+        "blue_chips_core": 0,
+        "agent_runs_core": 0,
+        "reflexion_notes_core": 0,
+        "failure_patterns_core": 0,
+        "reflexion_policy_versions_core": 0,
+        "intel24_snapshot_core": 0,
+        "intel_feed_core": 0,
+        "changes_core": 0,
+        "daily_notes_core": 0,
+        "daily_note_tags_core": 0,
+        "ai_action_queue_core": 0,
+        "ai_action_log_core": 0,
+        "system_events_core": 0,
+        "decision_log_core": 0,
+        "investor_question_overrides_core": 0,
+        "portfolio_interview_queue_core": 0,
+        "report_fact_ingest_state_core": 0,
+        "morning_briefs_core": 0,
+        "learning_events_core": 0,
+        "rule_candidates_core": 0,
+        "active_rules_core": 0,
+        "ai_tool_log_core": 0,
+        "ai_quality_log_core": 0,
+        "risk_veto_decisions_core": 0,
+        "risk_veto_config_core": 0,
+        "daily_operator_state_core": 0,
+        "daily_operator_gap_prompts_core": 0,
+        "user_preferences_core": 0,
+        "ai_meta_suggestions_core": 0,
     }
     try:
         cp = con_pg.cursor()
@@ -608,6 +1253,805 @@ def sync_core_from_sqlite() -> dict[str, Any]:
                 )
                 counts["memory_compact_core"] += 1
 
+        if _sqlite_table_exists(con_sq, "company_profile_cache"):
+            for r in con_sq.execute(
+                "SELECT ticker, name, country, industry, sector, updated_at FROM company_profile_cache"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO company_profile_cache_core(ticker, name, country, industry, sector, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                      name=EXCLUDED.name, country=EXCLUDED.country, industry=EXCLUDED.industry,
+                      sector=EXCLUDED.sector, updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        str(r["ticker"] or "").upper(),
+                        str(r["name"] or ""),
+                        str(r["country"] or ""),
+                        str(r["industry"] or ""),
+                        str(r["sector"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["company_profile_cache_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "companies"):
+            for r in con_sq.execute("SELECT ticker, name, cik, added_date FROM companies").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO companies_core(ticker, name, cik, added_date)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                      name=EXCLUDED.name, cik=EXCLUDED.cik, added_date=EXCLUDED.added_date
+                    """,
+                    (
+                        str(r["ticker"] or "").upper(),
+                        str(r["name"] or ""),
+                        str(r["cik"] or ""),
+                        str(r["added_date"] or ""),
+                    ),
+                )
+                counts["companies_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "company_lists"):
+            for r in con_sq.execute("SELECT id, name, created_at, updated_at FROM company_lists").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO company_lists_core(id, name, created_at, updated_at)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      name=EXCLUDED.name, created_at=EXCLUDED.created_at, updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["name"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["company_lists_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "company_list_items"):
+            for r in con_sq.execute("SELECT id, list_id, ticker, added_at, source FROM company_list_items").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO company_list_items_core(id, list_id, ticker, added_at, source)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      list_id=EXCLUDED.list_id, ticker=EXCLUDED.ticker, added_at=EXCLUDED.added_at, source=EXCLUDED.source
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        int(r["list_id"] or 0),
+                        str(r["ticker"] or "").upper(),
+                        str(r["added_at"] or ""),
+                        str(r["source"] or ""),
+                    ),
+                )
+                counts["company_list_items_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "company_moat_tags"):
+            for r in con_sq.execute("SELECT id, ticker, moat_key, updated_at, note FROM company_moat_tags").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO company_moat_tags_core(id, ticker, moat_key, updated_at, note)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      ticker=EXCLUDED.ticker, moat_key=EXCLUDED.moat_key, updated_at=EXCLUDED.updated_at, note=EXCLUDED.note
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["ticker"] or "").upper(),
+                        str(r["moat_key"] or "").lower(),
+                        str(r["updated_at"] or ""),
+                        str(r["note"] or ""),
+                    ),
+                )
+                counts["company_moat_tags_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "company_sec_competitors"):
+            for r in con_sq.execute(
+                "SELECT id, ticker, competitor_ticker, competitor_name, source_form, source_date, source_path, evidence, confidence, status, updated_at FROM company_sec_competitors"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO company_sec_competitors_core
+                    (id, ticker, competitor_ticker, competitor_name, source_form, source_date, source_path, evidence, confidence, status, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      ticker=EXCLUDED.ticker, competitor_ticker=EXCLUDED.competitor_ticker, competitor_name=EXCLUDED.competitor_name,
+                      source_form=EXCLUDED.source_form, source_date=EXCLUDED.source_date, source_path=EXCLUDED.source_path,
+                      evidence=EXCLUDED.evidence, confidence=EXCLUDED.confidence, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["ticker"] or "").upper(),
+                        str(r["competitor_ticker"] or "").upper(),
+                        str(r["competitor_name"] or ""),
+                        str(r["source_form"] or ""),
+                        str(r["source_date"] or ""),
+                        str(r["source_path"] or ""),
+                        str(r["evidence"] or ""),
+                        float(r["confidence"] or 0.0),
+                        str(r["status"] or "active"),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["company_sec_competitors_core"] += 1
+        if _sqlite_table_exists(con_sq, "blue_chips"):
+            for r in con_sq.execute("SELECT ticker, added_at, reason FROM blue_chips").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO blue_chips_core(ticker, added_at, reason)
+                    VALUES (%s,%s,%s)
+                    ON CONFLICT(ticker) DO UPDATE SET added_at=EXCLUDED.added_at, reason=EXCLUDED.reason
+                    """,
+                    (str(r["ticker"] or "").upper(), str(r["added_at"] or ""), str(r["reason"] or "")),
+                )
+                counts["blue_chips_core"] += 1
+        if _sqlite_table_exists(con_sq, "agent_runs"):
+            for r in con_sq.execute(
+                "SELECT id, run_uid, agent_name, trigger_type, status, started_at, finished_at, duration_ms, trace_id, input_json, output_json, error_text, created_at, updated_at FROM agent_runs"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO agent_runs_core
+                    (id, run_uid, agent_name, trigger_type, status, started_at, finished_at, duration_ms, trace_id, input_json, output_json, error_text, created_at, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      run_uid=EXCLUDED.run_uid, agent_name=EXCLUDED.agent_name, trigger_type=EXCLUDED.trigger_type, status=EXCLUDED.status,
+                      started_at=EXCLUDED.started_at, finished_at=EXCLUDED.finished_at, duration_ms=EXCLUDED.duration_ms,
+                      trace_id=EXCLUDED.trace_id, input_json=EXCLUDED.input_json, output_json=EXCLUDED.output_json,
+                      error_text=EXCLUDED.error_text, created_at=EXCLUDED.created_at, updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["run_uid"] or ""),
+                        str(r["agent_name"] or ""),
+                        str(r["trigger_type"] or ""),
+                        str(r["status"] or ""),
+                        str(r["started_at"] or ""),
+                        str(r["finished_at"] or ""),
+                        float(r["duration_ms"] or 0.0),
+                        str(r["trace_id"] or ""),
+                        json.dumps(json.loads(str(r["input_json"] or "{}")), ensure_ascii=True),
+                        json.dumps(json.loads(str(r["output_json"] or "{}")), ensure_ascii=True),
+                        str(r["error_text"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["agent_runs_core"] += 1
+        if _sqlite_table_exists(con_sq, "reflexion_notes"):
+            for r in con_sq.execute(
+                "SELECT id, created_at, event_type, query, detail_json, note_text, rule_key, rule_text, confidence FROM reflexion_notes"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO reflexion_notes_core(id, created_at, event_type, query, detail_json, note_text, rule_key, rule_text, confidence)
+                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at, event_type=EXCLUDED.event_type, query=EXCLUDED.query, detail_json=EXCLUDED.detail_json,
+                      note_text=EXCLUDED.note_text, rule_key=EXCLUDED.rule_key, rule_text=EXCLUDED.rule_text, confidence=EXCLUDED.confidence
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["event_type"] or ""),
+                        str(r["query"] or ""),
+                        json.dumps(json.loads(str(r["detail_json"] or "{}")), ensure_ascii=True),
+                        str(r["note_text"] or ""),
+                        str(r["rule_key"] or ""),
+                        str(r["rule_text"] or ""),
+                        float(r["confidence"] or 0.0),
+                    ),
+                )
+                counts["reflexion_notes_core"] += 1
+        if _sqlite_table_exists(con_sq, "failure_patterns"):
+            for r in con_sq.execute(
+                "SELECT id, pattern_key, event_type, total_count, open_count, resolved_count, first_seen_at, last_seen_at, last_query, last_detail_json, last_reflexion FROM failure_patterns"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO failure_patterns_core
+                    (id, pattern_key, event_type, total_count, open_count, resolved_count, first_seen_at, last_seen_at, last_query, last_detail_json, last_reflexion)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      pattern_key=EXCLUDED.pattern_key, event_type=EXCLUDED.event_type, total_count=EXCLUDED.total_count,
+                      open_count=EXCLUDED.open_count, resolved_count=EXCLUDED.resolved_count, first_seen_at=EXCLUDED.first_seen_at,
+                      last_seen_at=EXCLUDED.last_seen_at, last_query=EXCLUDED.last_query, last_detail_json=EXCLUDED.last_detail_json,
+                      last_reflexion=EXCLUDED.last_reflexion
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["pattern_key"] or ""),
+                        str(r["event_type"] or ""),
+                        int(r["total_count"] or 0),
+                        int(r["open_count"] or 0),
+                        int(r["resolved_count"] or 0),
+                        str(r["first_seen_at"] or ""),
+                        str(r["last_seen_at"] or ""),
+                        str(r["last_query"] or ""),
+                        json.dumps(json.loads(str(r["last_detail_json"] or "{}")), ensure_ascii=True),
+                        str(r["last_reflexion"] or ""),
+                    ),
+                )
+                counts["failure_patterns_core"] += 1
+        if _sqlite_table_exists(con_sq, "reflexion_policy_versions"):
+            for r in con_sq.execute(
+                "SELECT id, version_tag, created_at, source_event_id, policy_json, is_active, rolled_back_from FROM reflexion_policy_versions"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO reflexion_policy_versions_core(id, version_tag, created_at, source_event_id, policy_json, is_active, rolled_back_from)
+                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      version_tag=EXCLUDED.version_tag, created_at=EXCLUDED.created_at, source_event_id=EXCLUDED.source_event_id,
+                      policy_json=EXCLUDED.policy_json, is_active=EXCLUDED.is_active, rolled_back_from=EXCLUDED.rolled_back_from
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["version_tag"] or ""),
+                        str(r["created_at"] or ""),
+                        int(r["source_event_id"] or 0),
+                        json.dumps(json.loads(str(r["policy_json"] or "{}")), ensure_ascii=True),
+                        int(r["is_active"] or 0),
+                        str(r["rolled_back_from"] or ""),
+                    ),
+                )
+                counts["reflexion_policy_versions_core"] += 1
+        if _sqlite_table_exists(con_sq, "intel24_snapshot"):
+            for r in con_sq.execute(
+                "SELECT ticker, asof, day_pct, insider_txt, sec_txt, happened, suggestion, event_score, source FROM intel24_snapshot"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO intel24_snapshot_core(ticker, asof, day_pct, insider_txt, sec_txt, happened, suggestion, event_score, source)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                      asof=EXCLUDED.asof, day_pct=EXCLUDED.day_pct, insider_txt=EXCLUDED.insider_txt, sec_txt=EXCLUDED.sec_txt,
+                      happened=EXCLUDED.happened, suggestion=EXCLUDED.suggestion, event_score=EXCLUDED.event_score, source=EXCLUDED.source
+                    """,
+                    (
+                        str(r["ticker"] or "").upper(),
+                        str(r["asof"] or ""),
+                        float(r["day_pct"] or 0.0),
+                        str(r["insider_txt"] or ""),
+                        str(r["sec_txt"] or ""),
+                        str(r["happened"] or ""),
+                        str(r["suggestion"] or ""),
+                        int(r["event_score"] or 0),
+                        str(r["source"] or ""),
+                    ),
+                )
+                counts["intel24_snapshot_core"] += 1
+        if _sqlite_table_exists(con_sq, "intel_feed"):
+            for r in con_sq.execute(
+                "SELECT id, created_at, ticker, category, title, summary, detail, severity, source, model, unique_key FROM intel_feed"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO intel_feed_core
+                    (id, created_at, ticker, category, title, summary, detail, severity, source, model, unique_key)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at, ticker=EXCLUDED.ticker, category=EXCLUDED.category, title=EXCLUDED.title,
+                      summary=EXCLUDED.summary, detail=EXCLUDED.detail, severity=EXCLUDED.severity, source=EXCLUDED.source,
+                      model=EXCLUDED.model, unique_key=EXCLUDED.unique_key
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["ticker"] or "").upper(),
+                        str(r["category"] or ""),
+                        str(r["title"] or ""),
+                        str(r["summary"] or ""),
+                        str(r["detail"] or ""),
+                        int(r["severity"] or 0),
+                        str(r["source"] or ""),
+                        str(r["model"] or ""),
+                        str(r["unique_key"] or ""),
+                    ),
+                )
+                counts["intel_feed_core"] += 1
+        if _sqlite_table_exists(con_sq, "changes"):
+            for r in con_sq.execute(
+                "SELECT id, ticker, filing_id, section_name, change_type, summary, detected_at FROM changes"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO changes_core(id, ticker, filing_id, section_name, change_type, summary, detected_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      ticker=EXCLUDED.ticker, filing_id=EXCLUDED.filing_id, section_name=EXCLUDED.section_name,
+                      change_type=EXCLUDED.change_type, summary=EXCLUDED.summary, detected_at=EXCLUDED.detected_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["ticker"] or "").upper(),
+                        int(r["filing_id"] or 0),
+                        str(r["section_name"] or ""),
+                        str(r["change_type"] or ""),
+                        str(r["summary"] or ""),
+                        str(r["detected_at"] or ""),
+                    ),
+                )
+                counts["changes_core"] += 1
+        if _sqlite_table_exists(con_sq, "daily_notes"):
+            for r in con_sq.execute("SELECT day, content, updated_at, locked, archived_at FROM daily_notes").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO daily_notes_core(day, content, updated_at, locked, archived_at)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT(day) DO UPDATE SET
+                      content=EXCLUDED.content, updated_at=EXCLUDED.updated_at, locked=EXCLUDED.locked, archived_at=EXCLUDED.archived_at
+                    """,
+                    (
+                        str(r["day"] or ""),
+                        str(r["content"] or ""),
+                        str(r["updated_at"] or ""),
+                        int(r["locked"] or 0),
+                        str(r["archived_at"] or ""),
+                    ),
+                )
+                counts["daily_notes_core"] += 1
+        if _sqlite_table_exists(con_sq, "daily_note_tags"):
+            for r in con_sq.execute("SELECT id, day, ticker, created_at FROM daily_note_tags").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO daily_note_tags_core(id, day, ticker, created_at)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      day=EXCLUDED.day, ticker=EXCLUDED.ticker, created_at=EXCLUDED.created_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["day"] or ""),
+                        str(r["ticker"] or "").upper(),
+                        str(r["created_at"] or ""),
+                    ),
+                )
+                counts["daily_note_tags_core"] += 1
+        if _sqlite_table_exists(con_sq, "ai_action_queue"):
+            for r in con_sq.execute(
+                "SELECT id, created_at, status, tool_name, params_json, reasoning, confidence, trace_id FROM ai_action_queue"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO ai_action_queue_core(id, created_at, status, tool_name, params_json, reasoning, confidence, trace_id)
+                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at, status=EXCLUDED.status, tool_name=EXCLUDED.tool_name,
+                      params_json=EXCLUDED.params_json, reasoning=EXCLUDED.reasoning, confidence=EXCLUDED.confidence, trace_id=EXCLUDED.trace_id
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["status"] or "pending"),
+                        str(r["tool_name"] or ""),
+                        json.dumps(json.loads(str(r["params_json"] or "{}")), ensure_ascii=True),
+                        str(r["reasoning"] or ""),
+                        float(r["confidence"] or 0.0),
+                        str(r["trace_id"] or ""),
+                    ),
+                )
+                counts["ai_action_queue_core"] += 1
+        if _sqlite_table_exists(con_sq, "ai_action_log"):
+            for r in con_sq.execute(
+                "SELECT id, created_at, query, intent, status, confidence, payload_json FROM ai_action_log"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO ai_action_log_core(id, created_at, query, intent, status, confidence, payload_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at, query=EXCLUDED.query, intent=EXCLUDED.intent,
+                      status=EXCLUDED.status, confidence=EXCLUDED.confidence, payload_json=EXCLUDED.payload_json
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["query"] or ""),
+                        str(r["intent"] or ""),
+                        str(r["status"] or ""),
+                        float(r["confidence"] or 0.0),
+                        json.dumps(json.loads(str(r["payload_json"] or "{}")), ensure_ascii=True),
+                    ),
+                )
+                counts["ai_action_log_core"] += 1
+        if _sqlite_table_exists(con_sq, "system_events"):
+            for r in con_sq.execute(
+                "SELECT id, created_at, service, status, latency_ms, message, trace_id FROM system_events"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO system_events_core(id, created_at, service, status, latency_ms, message, trace_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at, service=EXCLUDED.service, status=EXCLUDED.status,
+                      latency_ms=EXCLUDED.latency_ms, message=EXCLUDED.message, trace_id=EXCLUDED.trace_id
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["service"] or ""),
+                        str(r["status"] or ""),
+                        float(r["latency_ms"] or 0.0),
+                        str(r["message"] or ""),
+                        str(r["trace_id"] or ""),
+                    ),
+                )
+                counts["system_events_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "decision_log"):
+            for r in con_sq.execute("SELECT * FROM decision_log").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO decision_log_core
+                    (id, created_at, timestamp, ticker, action, reason, reasoning, confidence, source, trace_id, quantity, price)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at,timestamp=EXCLUDED.timestamp,ticker=EXCLUDED.ticker,action=EXCLUDED.action,
+                      reason=EXCLUDED.reason,reasoning=EXCLUDED.reasoning,confidence=EXCLUDED.confidence,source=EXCLUDED.source,
+                      trace_id=EXCLUDED.trace_id,quantity=EXCLUDED.quantity,price=EXCLUDED.price
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["timestamp"] or ""),
+                        str(r["ticker"] or ""),
+                        str(r["action"] or ""),
+                        str(r["reason"] or ""),
+                        str(r["reasoning"] or ""),
+                        float(r["confidence"] or 0.0),
+                        str(r["source"] or ""),
+                        str(r["trace_id"] or ""),
+                        float(r["quantity"] or 0.0),
+                        float(r["price"] or 0.0),
+                    ),
+                )
+                counts["decision_log_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "investor_question_overrides"):
+            for r in con_sq.execute("SELECT * FROM investor_question_overrides").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO investor_question_overrides_core (key, question, created_at, updated_at)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT(key) DO UPDATE SET
+                      question=EXCLUDED.question,updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        str(r["key"] or ""),
+                        str(r["question"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["investor_question_overrides_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "portfolio_interview_queue"):
+            for r in con_sq.execute("SELECT * FROM portfolio_interview_queue").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO portfolio_interview_queue_core
+                    (id, ticker, status, step, last_question, session_id, completed_at, created_at, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                      status=EXCLUDED.status,step=EXCLUDED.step,last_question=EXCLUDED.last_question,session_id=EXCLUDED.session_id,
+                      completed_at=EXCLUDED.completed_at,updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["ticker"] or ""),
+                        str(r["status"] or "pending"),
+                        int(r["step"] or 0),
+                        str(r["last_question"] or ""),
+                        str(r["session_id"] or ""),
+                        str(r["completed_at"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["portfolio_interview_queue_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "report_fact_ingest_state"):
+            for r in con_sq.execute("SELECT * FROM report_fact_ingest_state").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO report_fact_ingest_state_core (state_key, state_value)
+                    VALUES (%s,%s)
+                    ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value
+                    """,
+                    (
+                        str(r["state_key"] or ""),
+                        str(r["state_value"] or ""),
+                    ),
+                )
+                counts["report_fact_ingest_state_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "morning_briefs"):
+            for r in con_sq.execute("SELECT * FROM morning_briefs").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO morning_briefs_core (id, brief_day, created_at, source, brief_json)
+                    VALUES (%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT(brief_day) DO UPDATE SET
+                      created_at=EXCLUDED.created_at,source=EXCLUDED.source,brief_json=EXCLUDED.brief_json
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["brief_day"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["source"] or ""),
+                        json.dumps(json.loads(str(r["brief_json"] or "{}")), ensure_ascii=True),
+                    ),
+                )
+                counts["morning_briefs_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "learning_events"):
+            for r in con_sq.execute("SELECT * FROM learning_events").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO learning_events_core (id, created_at, event_type, source, payload_json)
+                    VALUES (%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at,event_type=EXCLUDED.event_type,source=EXCLUDED.source,payload_json=EXCLUDED.payload_json
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["event_type"] or ""),
+                        str(r["source"] or ""),
+                        json.dumps(json.loads(str(r["payload_json"] or "{}")), ensure_ascii=True),
+                    ),
+                )
+                counts["learning_events_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "rule_candidates"):
+            for r in con_sq.execute("SELECT * FROM rule_candidates").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO rule_candidates_core
+                    (id, rule_key, rule_text, source_pattern, support_count, accept_count, reject_count, confidence, status, created_at, updated_at, last_evaluated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(rule_key) DO UPDATE SET
+                      rule_text=EXCLUDED.rule_text,source_pattern=EXCLUDED.source_pattern,support_count=EXCLUDED.support_count,
+                      accept_count=EXCLUDED.accept_count,reject_count=EXCLUDED.reject_count,confidence=EXCLUDED.confidence,
+                      status=EXCLUDED.status,updated_at=EXCLUDED.updated_at,last_evaluated_at=EXCLUDED.last_evaluated_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["rule_key"] or ""),
+                        str(r["rule_text"] or ""),
+                        str(r["source_pattern"] or ""),
+                        int(r["support_count"] or 0),
+                        int(r["accept_count"] or 0),
+                        int(r["reject_count"] or 0),
+                        float(r["confidence"] or 0.0),
+                        str(r["status"] or "candidate"),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                        str(r["last_evaluated_at"] or ""),
+                    ),
+                )
+                counts["rule_candidates_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "active_rules"):
+            for r in con_sq.execute("SELECT * FROM active_rules").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO active_rules_core
+                    (id, rule_key, rule_text, confidence, source_candidate_id, reuse_count, status, created_at, updated_at, last_used_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(rule_key) DO UPDATE SET
+                      rule_text=EXCLUDED.rule_text,confidence=EXCLUDED.confidence,source_candidate_id=EXCLUDED.source_candidate_id,
+                      reuse_count=EXCLUDED.reuse_count,status=EXCLUDED.status,updated_at=EXCLUDED.updated_at,last_used_at=EXCLUDED.last_used_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["rule_key"] or ""),
+                        str(r["rule_text"] or ""),
+                        float(r["confidence"] or 0.0),
+                        int(r["source_candidate_id"] or 0),
+                        int(r["reuse_count"] or 0),
+                        str(r["status"] or "active"),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                        str(r["last_used_at"] or ""),
+                    ),
+                )
+                counts["active_rules_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "ai_tool_log"):
+            for r in con_sq.execute("SELECT * FROM ai_tool_log").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO ai_tool_log_core
+                    (id, created_at, query, tool_name, args_json, status, latency_ms, error, trace_id, model_name, capability)
+                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at,query=EXCLUDED.query,tool_name=EXCLUDED.tool_name,args_json=EXCLUDED.args_json,
+                      status=EXCLUDED.status,latency_ms=EXCLUDED.latency_ms,error=EXCLUDED.error,trace_id=EXCLUDED.trace_id,
+                      model_name=EXCLUDED.model_name,capability=EXCLUDED.capability
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["query"] or ""),
+                        str(r["tool_name"] or ""),
+                        json.dumps(json.loads(str(r["args_json"] or "{}")), ensure_ascii=True),
+                        str(r["status"] or ""),
+                        float(r["latency_ms"] or 0.0),
+                        str(r["error"] or ""),
+                        str(r["trace_id"] or ""),
+                        str(r["model_name"] or ""),
+                        str(r["capability"] or ""),
+                    ),
+                )
+                counts["ai_tool_log_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "ai_quality_log"):
+            for r in con_sq.execute("SELECT * FROM ai_quality_log").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO ai_quality_log_core (id, created_at, event_type, query, detail_json)
+                    VALUES (%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at,event_type=EXCLUDED.event_type,query=EXCLUDED.query,detail_json=EXCLUDED.detail_json
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["event_type"] or ""),
+                        str(r["query"] or ""),
+                        json.dumps(json.loads(str(r["detail_json"] or "{}")), ensure_ascii=True),
+                    ),
+                )
+                counts["ai_quality_log_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "risk_veto_decisions"):
+            for r in con_sq.execute("SELECT * FROM risk_veto_decisions").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO risk_veto_decisions_core
+                    (id, created_at, trace_id, action, query, verdict, confidence, reason, metrics_json, detail_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at,trace_id=EXCLUDED.trace_id,action=EXCLUDED.action,query=EXCLUDED.query,
+                      verdict=EXCLUDED.verdict,confidence=EXCLUDED.confidence,reason=EXCLUDED.reason,metrics_json=EXCLUDED.metrics_json,
+                      detail_json=EXCLUDED.detail_json
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["trace_id"] or ""),
+                        str(r["action"] or ""),
+                        str(r["query"] or ""),
+                        str(r["verdict"] or ""),
+                        float(r["confidence"] or 0.0),
+                        str(r["reason"] or ""),
+                        json.dumps(json.loads(str(r["metrics_json"] or "{}")), ensure_ascii=True),
+                        json.dumps(json.loads(str(r["detail_json"] or "{}")), ensure_ascii=True),
+                    ),
+                )
+                counts["risk_veto_decisions_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "risk_veto_config"):
+            for r in con_sq.execute("SELECT * FROM risk_veto_config").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO risk_veto_config_core (id, config_json, updated_at)
+                    VALUES (%s,%s::jsonb,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      config_json=EXCLUDED.config_json,updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        int(r["id"] or 1),
+                        json.dumps(json.loads(str(r["config_json"] or "{}")), ensure_ascii=True),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["risk_veto_config_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "daily_operator_state"):
+            for r in con_sq.execute("SELECT * FROM daily_operator_state").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO daily_operator_state_core (state_key, state_value, updated_at)
+                    VALUES (%s,%s,%s)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                      state_value=EXCLUDED.state_value,updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        str(r["state_key"] or ""),
+                        str(r["state_value"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["daily_operator_state_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "daily_operator_gap_prompts"):
+            for r in con_sq.execute("SELECT * FROM daily_operator_gap_prompts").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO daily_operator_gap_prompts_core
+                    (id, created_at, updated_at, prompt_id, user_name, prompt_text, context_json, context_fingerprint, status, answered_at, answer_text, resolved_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT(prompt_id) DO UPDATE SET
+                      updated_at=EXCLUDED.updated_at,user_name=EXCLUDED.user_name,prompt_text=EXCLUDED.prompt_text,
+                      context_json=EXCLUDED.context_json,context_fingerprint=EXCLUDED.context_fingerprint,status=EXCLUDED.status,
+                      answered_at=EXCLUDED.answered_at,answer_text=EXCLUDED.answer_text,resolved_json=EXCLUDED.resolved_json
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                        str(r["prompt_id"] or ""),
+                        str(r["user_name"] or ""),
+                        str(r["prompt_text"] or ""),
+                        json.dumps(json.loads(str(r["context_json"] or "{}")), ensure_ascii=True),
+                        str(r["context_fingerprint"] or ""),
+                        str(r["status"] or "open"),
+                        str(r["answered_at"] or ""),
+                        str(r["answer_text"] or ""),
+                        json.dumps(json.loads(str(r["resolved_json"] or "{}")), ensure_ascii=True),
+                    ),
+                )
+                counts["daily_operator_gap_prompts_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "user_preferences"):
+            for r in con_sq.execute("SELECT * FROM user_preferences").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO user_preferences_core
+                    (id, pref_key, pref_value, source, preference_key, preference_value, context_reason, created_at, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(pref_key) DO UPDATE SET
+                      pref_value=EXCLUDED.pref_value,source=EXCLUDED.source,preference_key=EXCLUDED.preference_key,
+                      preference_value=EXCLUDED.preference_value,context_reason=EXCLUDED.context_reason,updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["pref_key"] or ""),
+                        str(r["pref_value"] or ""),
+                        str(r["source"] or "chat"),
+                        str(r["preference_key"] or ""),
+                        str(r["preference_value"] or ""),
+                        str(r["context_reason"] or ""),
+                        str(r["created_at"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["user_preferences_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "ai_meta_suggestions"):
+            for r in con_sq.execute("SELECT * FROM ai_meta_suggestions").fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO ai_meta_suggestions_core
+                    (id, created_at, category, title, summary, detail_json, priority, source, status)
+                    VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)
+                    ON CONFLICT(id) DO UPDATE SET
+                      created_at=EXCLUDED.created_at,category=EXCLUDED.category,title=EXCLUDED.title,
+                      summary=EXCLUDED.summary,detail_json=EXCLUDED.detail_json,priority=EXCLUDED.priority,
+                      source=EXCLUDED.source,status=EXCLUDED.status
+                    """,
+                    (
+                        int(r["id"] or 0),
+                        str(r["created_at"] or ""),
+                        str(r["category"] or ""),
+                        str(r["title"] or ""),
+                        str(r["summary"] or ""),
+                        json.dumps(json.loads(str(r["detail_json"] or "{}")), ensure_ascii=True),
+                        float(r["priority"] or 0.0),
+                        str(r["source"] or "heuristic"),
+                        str(r["status"] or "open"),
+                    ),
+                )
+                counts["ai_meta_suggestions_core"] += 1
+
         con_pg.commit()
         return {"ok": True, "synced": counts}
     except Exception as exc:
@@ -642,6 +2086,41 @@ def verify_core_counts() -> dict[str, Any]:
             ("investor_notes", "investor_notes_core"),
             ("company_reminders", "company_reminders_core"),
             ("memory_compact", "memory_compact_core"),
+            ("company_profile_cache", "company_profile_cache_core"),
+            ("companies", "companies_core"),
+            ("company_lists", "company_lists_core"),
+            ("company_list_items", "company_list_items_core"),
+            ("company_moat_tags", "company_moat_tags_core"),
+            ("company_sec_competitors", "company_sec_competitors_core"),
+            ("blue_chips", "blue_chips_core"),
+            ("agent_runs", "agent_runs_core"),
+            ("reflexion_notes", "reflexion_notes_core"),
+            ("failure_patterns", "failure_patterns_core"),
+            ("reflexion_policy_versions", "reflexion_policy_versions_core"),
+            ("intel24_snapshot", "intel24_snapshot_core"),
+            ("intel_feed", "intel_feed_core"),
+            ("changes", "changes_core"),
+            ("daily_notes", "daily_notes_core"),
+            ("daily_note_tags", "daily_note_tags_core"),
+            ("ai_action_queue", "ai_action_queue_core"),
+            ("ai_action_log", "ai_action_log_core"),
+            ("system_events", "system_events_core"),
+            ("decision_log", "decision_log_core"),
+            ("investor_question_overrides", "investor_question_overrides_core"),
+            ("portfolio_interview_queue", "portfolio_interview_queue_core"),
+            ("report_fact_ingest_state", "report_fact_ingest_state_core"),
+            ("morning_briefs", "morning_briefs_core"),
+            ("learning_events", "learning_events_core"),
+            ("rule_candidates", "rule_candidates_core"),
+            ("active_rules", "active_rules_core"),
+            ("ai_tool_log", "ai_tool_log_core"),
+            ("ai_quality_log", "ai_quality_log_core"),
+            ("risk_veto_decisions", "risk_veto_decisions_core"),
+            ("risk_veto_config", "risk_veto_config_core"),
+            ("daily_operator_state", "daily_operator_state_core"),
+            ("daily_operator_gap_prompts", "daily_operator_gap_prompts_core"),
+            ("user_preferences", "user_preferences_core"),
+            ("ai_meta_suggestions", "ai_meta_suggestions_core"),
         ]
         for sq, pg in pairs:
             if _sqlite_table_exists(con_sq, sq):
@@ -659,6 +2138,88 @@ def verify_core_counts() -> dict[str, Any]:
         con_pg.close()
 
 
+def verify_postgres_core_ready() -> dict[str, Any]:
+    dsn = pg_dsn()
+    if not dsn:
+        return {"ok": False, "error": "missing_POSTGRES_DSN"}
+    _name, mod = _pg_client()
+    if mod is None:
+        return {"ok": False, "error": "pg_driver_unavailable"}
+    try:
+        con_pg = mod.connect(dsn)
+    except Exception as exc:
+        return {"ok": False, "error": f"pg_connect_failed:{exc}"}
+    required = [
+        "action_proposals_core",
+        "portfolio_transactions_core",
+        "watchlist_thesis_core",
+        "investor_style_memory_core",
+        "filings_core",
+        "report_facts_core",
+        "todos_core",
+        "workspace_journal_core",
+        "investor_notes_core",
+        "company_reminders_core",
+        "company_profile_cache_core",
+        "companies_core",
+        "company_lists_core",
+        "company_list_items_core",
+        "company_moat_tags_core",
+        "company_sec_competitors_core",
+        "blue_chips_core",
+        "agent_runs_core",
+        "reflexion_notes_core",
+        "failure_patterns_core",
+        "reflexion_policy_versions_core",
+        "intel24_snapshot_core",
+        "intel_feed_core",
+        "changes_core",
+        "daily_notes_core",
+        "daily_note_tags_core",
+        "ai_action_queue_core",
+        "ai_action_log_core",
+        "system_events_core",
+        "decision_log_core",
+        "investor_question_overrides_core",
+        "portfolio_interview_queue_core",
+        "report_fact_ingest_state_core",
+        "morning_briefs_core",
+        "learning_events_core",
+        "rule_candidates_core",
+        "active_rules_core",
+        "ai_tool_log_core",
+        "ai_quality_log_core",
+        "risk_veto_decisions_core",
+        "risk_veto_config_core",
+        "daily_operator_state_core",
+        "daily_operator_gap_prompts_core",
+        "user_preferences_core",
+        "ai_meta_suggestions_core",
+    ]
+    try:
+        cur = con_pg.cursor()
+        cur.execute("SELECT 1")
+        _ = cur.fetchone()
+        missing: list[str] = []
+        for t in required:
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=%s LIMIT 1",
+                (t,),
+            )
+            if not cur.fetchone():
+                missing.append(t)
+        if missing:
+            return {"ok": False, "error": "missing_tables", "missing": missing}
+        return {"ok": True, "backend": "postgres", "required_tables": required}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        try:
+            con_pg.close()
+        except Exception:
+            pass
+
+
 def guard_core_backend_cutover() -> dict[str, Any]:
     backend = core_backend()
     enforce = str(os.getenv("CORE_DB_GUARD_ENFORCE", "1")).strip().lower() in {"1", "true", "yes", "on"}
@@ -666,10 +2227,20 @@ def guard_core_backend_cutover() -> dict[str, Any]:
         return {"ok": True, "backend": backend, "guard_enforced": enforce, "switched": False, "reason": "backend_not_postgres"}
     if not enforce:
         return {"ok": True, "backend": backend, "guard_enforced": False, "switched": False, "reason": "guard_disabled"}
+    # In non-dev, never auto-downgrade to sqlite. Keep postgres as source of truth.
+    if _is_non_dev_env():
+        v_pg = verify_postgres_core_ready()
+        return {
+            "ok": bool(v_pg.get("ok")),
+            "backend": "postgres",
+            "guard_enforced": True,
+            "switched": False,
+            "reason": "non_dev_no_downgrade",
+            "verify": v_pg,
+        }
     v = verify_core_counts()
     if not bool(v.get("ok")):
-        os.environ["CORE_DB_BACKEND"] = "sqlite"
-        return {"ok": False, "backend": "sqlite", "guard_enforced": True, "switched": True, "reason": "verify_failed", "verify": v}
+        return {"ok": False, "backend": "postgres", "guard_enforced": True, "switched": False, "reason": "verify_failed", "verify": v}
     counts = dict(v.get("counts") or {})
     all_match = True
     for _, meta in counts.items():
@@ -678,8 +2249,7 @@ def guard_core_backend_cutover() -> dict[str, Any]:
             break
     if all_match:
         return {"ok": True, "backend": "postgres", "guard_enforced": True, "switched": False, "reason": "verified_match", "verify": v}
-    os.environ["CORE_DB_BACKEND"] = "sqlite"
-    return {"ok": False, "backend": "sqlite", "guard_enforced": True, "switched": True, "reason": "count_mismatch", "verify": v}
+    return {"ok": False, "backend": "postgres", "guard_enforced": True, "switched": False, "reason": "count_mismatch", "verify": v}
 
 
 def enforce_strict_postgres_ready() -> dict[str, Any]:
@@ -687,14 +2257,10 @@ def enforce_strict_postgres_ready() -> dict[str, Any]:
         return {"ok": True, "strict": False, "enforced": False, "reason": "strict_disabled"}
     if core_backend() != "postgres":
         raise RuntimeError("strict_postgres_requires_core_db_backend_postgres")
-    v = verify_core_counts()
+    v = verify_postgres_core_ready()
     if not bool(v.get("ok")):
-        raise RuntimeError("strict_postgres_verify_failed")
-    counts = dict(v.get("counts") or {})
-    bad = [k for k, meta in counts.items() if not bool((meta or {}).get("match"))]
-    if bad:
-        raise RuntimeError("strict_postgres_count_mismatch:" + ",".join(bad))
-    return {"ok": True, "strict": True, "enforced": True, "reason": "verified_match", "verify": v}
+        raise RuntimeError("strict_postgres_verify_failed:" + str(v.get("error") or "unknown"))
+    return {"ok": True, "strict": True, "enforced": True, "reason": "postgres_ready", "verify": v}
 
 
 def list_action_proposals_pg(status: str = "open", limit: int = 96) -> list[dict[str, Any]]:
@@ -1480,6 +3046,109 @@ def add_investor_note_pg(
         con.close()
 
 
+def approve_investor_note_draft_pg(note_id: int, ticker: str = "") -> bool:
+    rid = int(note_id or 0)
+    if rid <= 0:
+        return False
+    tk = str(ticker or "").strip().upper()[:16]
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE investor_notes_core SET status='approved', ticker=%s WHERE id=%s AND status='pending'",
+            (tk, rid),
+        )
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def discard_investor_note_draft_pg(note_id: int) -> bool:
+    rid = int(note_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM investor_notes_core WHERE id=%s AND status='pending'", (rid,))
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def delete_notes_pg(
+    *,
+    ticker: str = "",
+    text_contains: str = "",
+    created_by: str = "",
+    include_company_journal: bool = True,
+) -> dict[str, int]:
+    tk = str(ticker or "").strip().upper()[:16]
+    txt = str(text_contains or "").strip()
+    cb = str(created_by or "").strip().lower()
+    if cb not in {"", "ai", "human"}:
+        cb = ""
+    out = {"investor_notes": 0, "workspace_journal": 0, "total": 0}
+    con = pg_connect()
+    if con is None:
+        return out
+    try:
+        cur = con.cursor()
+        where = ["1=1"]
+        vals: list[Any] = []
+        if tk:
+            where.append("ticker = %s")
+            vals.append(tk)
+        if txt:
+            where.append("LOWER(note) LIKE %s")
+            vals.append("%" + txt.lower() + "%")
+        if cb:
+            where.append("LOWER(created_by) = %s")
+            vals.append(cb)
+        cur.execute("DELETE FROM investor_notes_core WHERE " + " AND ".join(where), tuple(vals))
+        out["investor_notes"] = int(cur.rowcount or 0)
+        if include_company_journal:
+            where2 = ["1=1"]
+            vals2: list[Any] = []
+            if tk:
+                where2.append("ticker = %s")
+                vals2.append(tk)
+            if txt:
+                where2.append("LOWER(note) LIKE %s")
+                vals2.append("%" + txt.lower() + "%")
+            cur.execute("DELETE FROM workspace_journal_core WHERE " + " AND ".join(where2), tuple(vals2))
+            out["workspace_journal"] = int(cur.rowcount or 0)
+        out["total"] = out["investor_notes"] + out["workspace_journal"]
+        con.commit()
+        return out
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return out
+    finally:
+        con.close()
+
+
 def add_workspace_journal_note_pg(ticker: str, note: str, action: str = "Note", emotion: str = "Calm") -> bool:
     con = pg_connect()
     if con is None:
@@ -1687,6 +3356,84 @@ def delete_company_reminder_pg(reminder_id: int) -> bool:
         cur.execute("DELETE FROM company_reminders_core WHERE id=%s", (rid,))
         con.commit()
         return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def list_blue_chips_pg(limit: int = 500) -> list[dict[str, str]]:
+    con = pg_connect()
+    if con is None:
+        return []
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT ticker, added_at, reason FROM blue_chips_core ORDER BY added_at DESC, ticker ASC LIMIT %s", (max(1, min(5000, int(limit or 500))),))
+        out: list[dict[str, str]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "ticker": str(r[0] or "").strip().upper(),
+                    "added_at": str(r[1] or "").strip(),
+                    "reason": str(r[2] or "").strip(),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def upsert_blue_chip_pg(ticker: str, reason: str = "") -> bool:
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        cur.execute(
+            """
+            INSERT INTO blue_chips_core(ticker, added_at, reason)
+            VALUES (%s,%s,%s)
+            ON CONFLICT(ticker) DO UPDATE SET
+              added_at=EXCLUDED.added_at,
+              reason=EXCLUDED.reason
+            """,
+            (tk, now, str(reason or "").strip()[:240]),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def remove_blue_chip_pg(ticker: str) -> bool:
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM blue_chips_core WHERE ticker=%s", (tk,))
+        ok = cur.rowcount > 0
+        con.commit()
+        return bool(ok)
     except Exception:
         try:
             con.rollback()

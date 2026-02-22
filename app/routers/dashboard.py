@@ -6,7 +6,6 @@ import datetime as dt
 import difflib
 import json
 import os
-import sqlite3
 import re
 import time
 from pathlib import Path
@@ -44,7 +43,14 @@ from app.services.proactive_ai_service import (
     simulate_macro_shock_batch,
 )
 from app.services.sec_ingest_pipeline_service import process_new_filings_pipeline
-from app.services.postgres_core_service import core_backend, pg_connect, strict_postgres_mode
+from app.services.postgres_core_service import (
+    core_backend,
+    list_blue_chips_pg,
+    pg_connect,
+    remove_blue_chip_pg,
+    strict_postgres_mode,
+    upsert_blue_chip_pg,
+)
 
 
 router = APIRouter()
@@ -93,120 +99,73 @@ def _safe_ticker(raw: str) -> str:
     return re.sub(r"[^A-Z0-9.\-]", "", str(raw or "").strip().upper())[:12]
 
 
-def _ensure_blue_chips_schema() -> None:
-    con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-    try:
-        con.execute(
-            """CREATE TABLE IF NOT EXISTS blue_chips (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL UNIQUE,
-                added_at TEXT NOT NULL,
-                reason TEXT NOT NULL DEFAULT ''
-            )"""
-        )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_blue_chips_ticker ON blue_chips(ticker)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_blue_chips_added ON blue_chips(added_at DESC)")
-        con.commit()
-    finally:
-        con.close()
-
-
 def _read_blue_chips_rows() -> list[dict[str, str]]:
-    _ensure_blue_chips_schema()
-    con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-    try:
-        rows = con.execute(
-            "SELECT ticker, added_at, reason FROM blue_chips ORDER BY added_at DESC, ticker ASC"
-        ).fetchall()
-        out: list[dict[str, str]] = []
-        for r in rows:
-            t = _safe_ticker(str(r["ticker"] or ""))
-            if not t:
-                continue
-            out.append(
-                {
-                    "ticker": t,
-                    "added_at": str(r["added_at"] or ""),
-                    "reason": str(r["reason"] or ""),
-                }
-            )
+    out: list[dict[str, str]] = []
+    if core_backend() != "postgres":
         return out
-    finally:
-        con.close()
+    for r in list_blue_chips_pg(limit=5000):
+        t = _safe_ticker(str(r.get("ticker") or ""))
+        if not t:
+            continue
+        out.append(
+            {
+                "ticker": t,
+                "added_at": str(r.get("added_at") or ""),
+                "reason": str(r.get("reason") or ""),
+            }
+        )
+    return out
 
 
 def _company_name_map(tickers: list[str]) -> dict[str, str]:
     wanted = sorted({_safe_ticker(t) for t in (tickers or []) if _safe_ticker(t)})
     if not wanted:
         return {}
-    marks = ",".join("?" for _ in wanted)
     out: dict[str, str] = {}
-    con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
+    if core_backend() != "postgres":
+        return out
+    con_pg = pg_connect()
+    if con_pg is None:
+        return out
     try:
-        try:
-            rows = con.execute(
-                f"SELECT UPPER(ticker) AS ticker, name FROM companies WHERE UPPER(ticker) IN ({marks})",
-                tuple(wanted),
-            ).fetchall()
-            for r in rows:
-                tk = _safe_ticker(str(r["ticker"] or ""))
-                nm = str(r["name"] or "").strip()
-                if tk and nm and tk not in out:
-                    out[tk] = nm
-        except Exception:
-            pass
-        try:
-            miss = [t for t in wanted if t not in out]
-            if miss:
-                marks2 = ",".join("?" for _ in miss)
-                rows2 = con.execute(
-                    f"SELECT UPPER(ticker) AS ticker, name FROM company_profile_cache WHERE UPPER(ticker) IN ({marks2})",
-                    tuple(miss),
-                ).fetchall()
-                for r in rows2:
-                    tk = _safe_ticker(str(r["ticker"] or ""))
-                    nm = str(r["name"] or "").strip()
-                    if tk and nm and tk not in out:
-                        out[tk] = nm
-        except Exception:
-            pass
+        marks = ",".join("%s" for _ in wanted)
+        cur = con_pg.cursor()
+        cur.execute("SELECT to_regclass('public.company_profile_cache_core')")
+        exists = cur.fetchone()
+        if not exists or not exists[0]:
+            return out
+        cur.execute(
+            f"SELECT UPPER(ticker) AS ticker, name FROM company_profile_cache_core WHERE UPPER(ticker) IN ({marks})",
+            tuple(wanted),
+        )
+        for r in cur.fetchall() or []:
+            tk = _safe_ticker(str(r[0] or ""))
+            nm = str(r[1] or "").strip()
+            if tk and nm and tk not in out:
+                out[tk] = nm
+    except Exception:
+        return {}
     finally:
-        con.close()
+        con_pg.close()
     return out
 
 
 def _upsert_blue_chip(ticker: str, reason: str = "") -> bool:
-    _ensure_blue_chips_schema()
+    if core_backend() != "postgres":
+        return False
     t = _safe_ticker(ticker)
     if not t:
         return False
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-    try:
-        con.execute(
-            "INSERT INTO blue_chips(ticker, added_at, reason) VALUES (?, ?, ?) "
-            "ON CONFLICT(ticker) DO UPDATE SET added_at=excluded.added_at, reason=excluded.reason",
-            (t, now, str(reason or "").strip()[:240]),
-        )
-        con.commit()
-        return True
-    finally:
-        con.close()
+    return upsert_blue_chip_pg(t, reason=str(reason or ""))
 
 
 def _remove_blue_chip(ticker: str) -> bool:
-    _ensure_blue_chips_schema()
+    if core_backend() != "postgres":
+        return False
     t = _safe_ticker(ticker)
     if not t:
         return False
-    con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-    try:
-        con.execute("DELETE FROM blue_chips WHERE ticker=?", (t,))
-        ok = con.total_changes > 0
-        con.commit()
-        return bool(ok)
-    finally:
-        con.close()
+    return remove_blue_chip_pg(t)
 
 
 def _read_portfolio_file() -> list[dict[str, str]]:
@@ -948,30 +907,7 @@ def _verify_reported_earnings_with_sec(rows: list[dict[str, str]]) -> list[dict[
             finally:
                 con_pg.close()
     if not used_pg:
-        con = connect_sqlite(CORE_DB_PATH)
-        try:
-            marks = ",".join("?" for _ in tickers)
-            q = (
-                f"SELECT ticker, form, date FROM filings "
-                f"WHERE ticker IN ({marks}) AND date IS NOT NULL AND date != '' "
-                f"ORDER BY date DESC LIMIT 5000"
-            )
-            db_rows = con.execute(q, tuple(tickers)).fetchall()
-            for r in db_rows:
-                tk = _safe_ticker(str(r["ticker"] or ""))
-                fm = str(r["form"] or "").strip().upper()
-                ds = str(r["date"] or "").strip()
-                if not tk or not fm or fm not in forms or not ds:
-                    continue
-                try:
-                    fd = dt.datetime.strptime(ds, "%Y-%m-%d").date()
-                except Exception:
-                    continue
-                filing_map.setdefault((tk, fm), []).append((fd, ds))
-        except Exception:
-            return rows
-        finally:
-            con.close()
+        return rows
 
     out: list[dict[str, str]] = []
     for rr in rows:
@@ -1299,32 +1235,61 @@ def _my_companies_metrics(home: dict) -> dict[str, object]:
 
     # 24h intelligence rows from intel24 snapshot.
     intel24: list[dict[str, object]] = []
-    con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-    try:
-        marks = ",".join("?" for _ in tks if _)
-        if marks:
-            rows = con.execute(
-                f"""
-                SELECT ticker, day_pct, insider_txt, sec_txt, happened, suggestion
-                FROM intel24_snapshot
-                WHERE ticker IN ({marks})
-                ORDER BY ABS(COALESCE(day_pct,0)) DESC
-                """,
-                tuple([t for t in tks if t]),
-            ).fetchall()
-            intel24 = [
-                {
-                    "ticker": str(r["ticker"] or "").strip().upper(),
-                    "day_pct": float(r["day_pct"] or 0.0),
-                    "insider_txt": str(r["insider_txt"] or "-"),
-                    "sec_txt": str(r["sec_txt"] or "-"),
-                    "happened": str(r["happened"] or "-"),
-                    "suggestion": str(r["suggestion"] or "-"),
-                }
-                for r in rows
-            ]
-    finally:
-        con.close()
+    tickers = [t for t in tks if t]
+    if tickers:
+        if core_backend() == "postgres":
+            con_pg = pg_connect()
+            if con_pg is not None:
+                try:
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        """
+                        SELECT ticker, day_pct, insider_txt, sec_txt, happened, suggestion
+                        FROM intel24_snapshot_core
+                        WHERE ticker = ANY(%s)
+                        ORDER BY ABS(COALESCE(day_pct,0)) DESC
+                        """,
+                        (tickers,),
+                    )
+                    for r in cur.fetchall() or []:
+                        intel24.append(
+                            {
+                                "ticker": str(r[0] or "").strip().upper(),
+                                "day_pct": float(r[1] or 0.0),
+                                "insider_txt": str(r[2] or "-"),
+                                "sec_txt": str(r[3] or "-"),
+                                "happened": str(r[4] or "-"),
+                                "suggestion": str(r[5] or "-"),
+                            }
+                        )
+                finally:
+                    con_pg.close()
+        else:
+            con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
+            try:
+                marks = ",".join("?" for _ in tickers)
+                rows = con.execute(
+                    f"""
+                    SELECT ticker, day_pct, insider_txt, sec_txt, happened, suggestion
+                    FROM intel24_snapshot
+                    WHERE ticker IN ({marks})
+                    ORDER BY ABS(COALESCE(day_pct,0)) DESC
+                    """,
+                    tuple(tickers),
+                ).fetchall()
+                intel24 = [
+                    {
+                        "ticker": str(r["ticker"] or "").strip().upper(),
+                        "day_pct": float(r["day_pct"] or 0.0),
+                        "insider_txt": str(r["insider_txt"] or "-"),
+                        "sec_txt": str(r["sec_txt"] or "-"),
+                        "happened": str(r["happened"] or "-"),
+                        "suggestion": str(r["suggestion"] or "-"),
+                    }
+                    for r in rows
+                ]
+            finally:
+                con.close()
 
     return {
         "portfolio_rows": enriched,
@@ -2028,15 +1993,21 @@ def _infer_ticker(text: str, user_ticker: str = "") -> str:
         if tk:
             tokens.append(tk)
 
-    con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
+    if core_backend() != "postgres":
+        return ""
+    con_pg = pg_connect()
+    if con_pg is None:
+        return ""
     try:
+        cur = con_pg.cursor()
         for tk in tokens[:6]:
-            row = con.execute(
-                "SELECT ticker FROM company_profile_cache WHERE ticker = ? LIMIT 1",
+            cur.execute(
+                "SELECT ticker FROM company_profile_cache_core WHERE ticker = %s LIMIT 1",
                 (tk,),
-            ).fetchone()
+            )
+            row = cur.fetchone()
             if row:
-                return str(row["ticker"] or "").strip().upper()
+                return str(row[0] or "").strip().upper()
         # 1b) Probable ticker fallback when DB cache doesn't contain it yet.
         stop_tickers = {
             "ADD",
@@ -2067,12 +2038,13 @@ def _infer_ticker(text: str, user_ticker: str = "") -> str:
 
         # 2) Fallback by company-name mention.
         low = q.lower()
-        row = con.execute(
-            "SELECT ticker FROM company_profile_cache WHERE INSTR(?, LOWER(name)) > 0 ORDER BY LENGTH(name) DESC LIMIT 1",
+        cur.execute(
+            "SELECT ticker FROM company_profile_cache_core WHERE POSITION(lower(name) IN %s) > 0 ORDER BY LENGTH(name) DESC LIMIT 1",
             (low,),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         if row:
-            return str(row["ticker"] or "").strip().upper()
+            return str(row[0] or "").strip().upper()
         # 3) Token-based fallback for short company mentions (e.g., "salesforce", "hubspot").
         stop = {
             "please",
@@ -2109,15 +2081,16 @@ def _infer_ticker(text: str, user_ticker: str = "") -> str:
         }
         words = [w for w in re.findall(r"[a-z][a-z0-9]{2,}", low) if w not in stop and len(w) >= 4]
         for w in words[:8]:
-            row = con.execute(
-                "SELECT ticker FROM company_profile_cache WHERE INSTR(LOWER(name), ?) > 0 ORDER BY LENGTH(name) ASC LIMIT 1",
+            cur.execute(
+                "SELECT ticker FROM company_profile_cache_core WHERE POSITION(%s IN LOWER(name)) > 0 ORDER BY LENGTH(name) ASC LIMIT 1",
                 (w,),
-            ).fetchone()
+            )
+            row = cur.fetchone()
             if row:
-                return str(row["ticker"] or "").strip().upper()
+                return str(row[0] or "").strip().upper()
         return ""
     finally:
-        con.close()
+        con_pg.close()
 
 
 @router.get("/")

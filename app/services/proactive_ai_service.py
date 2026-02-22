@@ -8,12 +8,23 @@ from typing import Any
 
 from app.core.config import CORE_DB_PATH, ROOT
 from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
+from app.services.company_file_service import add_company_note, add_company_reminder, add_company_task
+from app.services.phase2_scaling_service import mirror_action_proposal
+from app.services.postgres_core_service import (
+    core_backend,
+    ensure_postgres_core_schema,
+    list_action_proposals_pg,
+    list_investor_style_memory_pg,
+    list_watchlist_thesis_pg,
+    pg_connect,
+)
 from app.services.user_preferences_service import upsert_user_preference
 
 try:
-    from tools.llm_engine import ask_ai
+    from tools.llm_engine import ask_ai, ask_ai_json_schema
 except Exception:  # pragma: no cover
     ask_ai = None  # type: ignore[assignment]
+    ask_ai_json_schema = None  # type: ignore[assignment]
 
 
 ONYX_BRAIN_DB_PATH = ROOT / "onyx_brain.db"
@@ -65,29 +76,48 @@ def _read_scope_tickers() -> tuple[set[str], set[str], set[str]]:
             t = _safe_ticker(parts[0] if parts else "")
             if t:
                 watchlist.add(t)
-    con = _conn_core()
-    try:
-        con.execute(
-            """CREATE TABLE IF NOT EXISTS blue_chips (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL UNIQUE,
-                added_at TEXT NOT NULL,
-                reason TEXT NOT NULL DEFAULT ''
-            )"""
-        )
-        rows = con.execute("SELECT ticker FROM blue_chips").fetchall()
-        for r in rows:
-            t = _safe_ticker(str(r["ticker"] or ""))
-            if t:
-                bluechips.add(t)
-    except Exception:
-        pass
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute("SELECT to_regclass('public.blue_chips_core')")
+                if (cur.fetchone() or [None])[0]:
+                    cur.execute("SELECT ticker FROM blue_chips_core")
+                    for r in cur.fetchall() or []:
+                        t = _safe_ticker(str(r[0] or ""))
+                        if t:
+                            bluechips.add(t)
+            except Exception:
+                pass
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_core()
+        try:
+            con.execute(
+                """CREATE TABLE IF NOT EXISTS blue_chips (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL UNIQUE,
+                    added_at TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            rows = con.execute("SELECT ticker FROM blue_chips").fetchall()
+            for r in rows:
+                t = _safe_ticker(str(r["ticker"] or ""))
+                if t:
+                    bluechips.add(t)
+        except Exception:
+            pass
+        finally:
+            con.close()
     return portfolio, watchlist, bluechips
 
 
 def ensure_proactive_schema() -> None:
+    ensure_postgres_core_schema()
+
     def _has_col(con: sqlite3.Connection, table: str, col: str) -> bool:
         rows = con.execute(f"PRAGMA table_info({table})").fetchall()
         names = {str(r["name"] if isinstance(r, sqlite3.Row) else r[1]).strip().lower() for r in rows}
@@ -100,36 +130,11 @@ def ensure_proactive_schema() -> None:
         con.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
 
     def _write() -> None:
-        con_core = _conn_core()
+        if core_backend() == "postgres":
+            return
         con_onyx = _conn_onyx()
+        con_core = _conn_core()
         try:
-            con_core.execute(
-                """CREATE TABLE IF NOT EXISTS action_proposals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'open',
-                    kind TEXT NOT NULL,
-                    ticker TEXT NOT NULL DEFAULT '',
-                    title TEXT NOT NULL,
-                    thesis_json TEXT NOT NULL DEFAULT '[]',
-                    citations_json TEXT NOT NULL DEFAULT '[]',
-                    confidence REAL NOT NULL DEFAULT 0.0,
-                    priority_score REAL NOT NULL DEFAULT 0.0,
-                    source_event_key TEXT NOT NULL UNIQUE,
-                    execute_route TEXT NOT NULL DEFAULT '',
-                    execute_payload_json TEXT NOT NULL DEFAULT '{}',
-                    dismissed_reason TEXT NOT NULL DEFAULT '',
-                    executed_at TEXT NOT NULL DEFAULT ''
-                )"""
-            )
-            _add_col_if_missing(con_core, "action_proposals", "proposal_uid TEXT NOT NULL DEFAULT ''")
-            _add_col_if_missing(con_core, "action_proposals", "target_ticker TEXT NOT NULL DEFAULT ''")
-            _add_col_if_missing(con_core, "action_proposals", "suggested_action TEXT NOT NULL DEFAULT 'REVIEW'")
-            _add_col_if_missing(con_core, "action_proposals", "thesis_summary TEXT NOT NULL DEFAULT ''")
-            _add_col_if_missing(con_core, "action_proposals", "confidence_score REAL NOT NULL DEFAULT 0.0")
-            _add_col_if_missing(con_core, "action_proposals", "rejection_reason TEXT NOT NULL DEFAULT ''")
-            _add_col_if_missing(con_core, "action_proposals", "rejected_at TEXT NOT NULL DEFAULT ''")
             con_core.execute(
                 """CREATE TABLE IF NOT EXISTS user_preferences (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,8 +151,6 @@ def ensure_proactive_schema() -> None:
             _add_col_if_missing(con_core, "user_preferences", "preference_key TEXT NOT NULL DEFAULT ''")
             _add_col_if_missing(con_core, "user_preferences", "preference_value TEXT NOT NULL DEFAULT ''")
             _add_col_if_missing(con_core, "user_preferences", "context_reason TEXT NOT NULL DEFAULT ''")
-            con_core.execute("CREATE INDEX IF NOT EXISTS idx_action_proposals_status ON action_proposals(status, priority_score DESC, id DESC)")
-            con_core.execute("CREATE INDEX IF NOT EXISTS idx_action_proposals_uid ON action_proposals(proposal_uid)")
             con_core.execute("CREATE INDEX IF NOT EXISTS idx_core_pref_key_v2 ON user_preferences(preference_key)")
             con_core.execute(
                 """CREATE TABLE IF NOT EXISTS proactive_monitor_state (
@@ -173,50 +176,6 @@ def ensure_proactive_schema() -> None:
                     updated_at TEXT NOT NULL
                 )"""
             )
-            con_core.execute(
-                """CREATE TABLE IF NOT EXISTS reflexion_notes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    query TEXT NOT NULL DEFAULT '',
-                    detail_json TEXT NOT NULL DEFAULT '{}',
-                    note_text TEXT NOT NULL DEFAULT '',
-                    rule_key TEXT NOT NULL DEFAULT '',
-                    rule_text TEXT NOT NULL DEFAULT '',
-                    confidence REAL NOT NULL DEFAULT 0.0
-                )"""
-            )
-            con_core.execute(
-                """CREATE TABLE IF NOT EXISTS failure_patterns (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pattern_key TEXT NOT NULL UNIQUE,
-                    event_type TEXT NOT NULL,
-                    total_count INTEGER NOT NULL DEFAULT 0,
-                    open_count INTEGER NOT NULL DEFAULT 0,
-                    resolved_count INTEGER NOT NULL DEFAULT 0,
-                    first_seen_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    last_query TEXT NOT NULL DEFAULT '',
-                    last_detail_json TEXT NOT NULL DEFAULT '{}',
-                    last_reflexion TEXT NOT NULL DEFAULT ''
-                )"""
-            )
-            con_core.execute(
-                """CREATE TABLE IF NOT EXISTS reflexion_policy_versions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    version_tag TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    source_event_id INTEGER NOT NULL DEFAULT 0,
-                    policy_json TEXT NOT NULL DEFAULT '{}',
-                    is_active INTEGER NOT NULL DEFAULT 0,
-                    rolled_back_from TEXT NOT NULL DEFAULT ''
-                )"""
-            )
-            con_core.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at DESC)")
-            con_core.execute("CREATE INDEX IF NOT EXISTS idx_reflexion_notes_created ON reflexion_notes(created_at DESC)")
-            con_core.execute("CREATE INDEX IF NOT EXISTS idx_failure_patterns_last_seen ON failure_patterns(last_seen_at DESC)")
-            con_core.execute("CREATE INDEX IF NOT EXISTS idx_reflexion_policy_active ON reflexion_policy_versions(is_active, created_at DESC)")
-
             con_onyx.execute(
                 """CREATE TABLE IF NOT EXISTS entities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,9 +201,7 @@ def ensure_proactive_schema() -> None:
                     confidence REAL NOT NULL DEFAULT 0.0,
                     confidence_score REAL NOT NULL DEFAULT 0.0,
                     created_at TEXT NOT NULL,
-                    UNIQUE(source_id, target_id, relationship_type, citation_link),
-                    FOREIGN KEY(source_id) REFERENCES entities(id) ON DELETE CASCADE,
-                    FOREIGN KEY(target_id) REFERENCES entities(id) ON DELETE CASCADE
+                    UNIQUE(source_id, target_id, relationship_type, citation_link)
                 )"""
             )
             con_onyx.execute(
@@ -264,25 +221,8 @@ def ensure_proactive_schema() -> None:
                     updated_at TEXT NOT NULL
                 )"""
             )
-            _add_col_if_missing(con_onyx, "entities", "entity_type TEXT NOT NULL DEFAULT ''")
-            _add_col_if_missing(con_onyx, "entities", "metadata TEXT NOT NULL DEFAULT '{}'")
-            _add_col_if_missing(con_onyx, "entities", "id_text TEXT NOT NULL DEFAULT ''")
-            _add_col_if_missing(con_onyx, "relationships", "citation_url TEXT NOT NULL DEFAULT ''")
-            _add_col_if_missing(con_onyx, "relationships", "confidence_score REAL NOT NULL DEFAULT 0.0")
-            _add_col_if_missing(con_onyx, "relationships", "id_text TEXT NOT NULL DEFAULT ''")
-            con_core.execute("UPDATE action_proposals SET proposal_uid = 'ap_' || id WHERE COALESCE(proposal_uid,'') = ''")
-            con_core.execute(
-                "UPDATE user_preferences SET preference_key = pref_key, preference_value = pref_value WHERE COALESCE(preference_key,'') = ''"
-            )
             con_onyx.execute("UPDATE entities SET id_text = 'ent_' || id WHERE COALESCE(id_text,'') = ''")
             con_onyx.execute("UPDATE relationships SET id_text = 'rel_' || id WHERE COALESCE(id_text,'') = ''")
-            con_onyx.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)")
-            con_onyx.execute("CREATE INDEX IF NOT EXISTS idx_rels_src ON relationships(source_id)")
-            con_onyx.execute("CREATE INDEX IF NOT EXISTS idx_rels_tgt ON relationships(target_id)")
-            con_onyx.execute("CREATE INDEX IF NOT EXISTS idx_rels_type ON relationships(relationship_type)")
-            con_onyx.execute("CREATE INDEX IF NOT EXISTS idx_onyx_pref_key ON user_preferences(preference_key)")
-            con_onyx.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_id_text ON entities(id_text)")
-            con_onyx.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_relationships_id_text ON relationships(id_text)")
             con_core.commit()
             con_onyx.commit()
         finally:
@@ -297,29 +237,53 @@ def start_agent_run(agent_name: str, trigger_type: str = "event_driven", input_p
     run_uid = "run_" + dt.datetime.now().strftime("%Y%m%d%H%M%S%f")
     now = dt.datetime.now().isoformat()
 
-    def _write() -> None:
-        con = _conn_core()
-        try:
-            con.execute(
-                """INSERT INTO agent_runs
-                   (run_uid, agent_name, trigger_type, status, started_at, trace_id, input_json, output_json, created_at, updated_at)
-                   VALUES (?, ?, ?, 'running', ?, ?, ?, '{}', ?, ?)""",
-                (
-                    run_uid,
-                    str(agent_name or "agent").strip()[:80],
-                    str(trigger_type or "event_driven").strip()[:80],
-                    now,
-                    str(trace_id or "")[:120],
-                    json.dumps(input_payload or {}, ensure_ascii=True),
-                    now,
-                    now,
-                ),
-            )
-            con.commit()
-        finally:
-            con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute(
+                    """INSERT INTO agent_runs_core
+                       (id, run_uid, agent_name, trigger_type, status, started_at, trace_id, input_json, output_json, created_at, updated_at)
+                       VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM agent_runs_core), %s,%s,%s,'running',%s,%s,%s::jsonb,'{}'::jsonb,%s,%s)""",
+                    (
+                        run_uid,
+                        str(agent_name or "agent").strip()[:80],
+                        str(trigger_type or "event_driven").strip()[:80],
+                        now,
+                        str(trace_id or "")[:120],
+                        json.dumps(input_payload or {}, ensure_ascii=True),
+                        now,
+                        now,
+                    ),
+                )
+                con_pg.commit()
+            finally:
+                con_pg.close()
+    else:
+        def _write() -> None:
+            con = _conn_core()
+            try:
+                con.execute(
+                    """INSERT INTO agent_runs
+                       (run_uid, agent_name, trigger_type, status, started_at, trace_id, input_json, output_json, created_at, updated_at)
+                       VALUES (?, ?, ?, 'running', ?, ?, ?, '{}', ?, ?)""",
+                    (
+                        run_uid,
+                        str(agent_name or "agent").strip()[:80],
+                        str(trigger_type or "event_driven").strip()[:80],
+                        now,
+                        str(trace_id or "")[:120],
+                        json.dumps(input_payload or {}, ensure_ascii=True),
+                        now,
+                        now,
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
 
-    sqlite_retry(_write)
+        sqlite_retry(_write)
     return run_uid
 
 
@@ -331,37 +295,70 @@ def finish_agent_run(run_uid: str, status: str, output_payload: dict[str, Any] |
     now = dt.datetime.now().isoformat()
     ok = {"done": False}
 
-    def _write() -> None:
-        con = _conn_core()
-        try:
-            row = con.execute("SELECT started_at FROM agent_runs WHERE run_uid=? LIMIT 1", (uid,)).fetchone()
-            started = str((row["started_at"] if row else "") or "").strip()
-            dur_ms = 0.0
-            if started:
-                try:
-                    dur_ms = max(0.0, (dt.datetime.now() - dt.datetime.fromisoformat(started)).total_seconds() * 1000.0)
-                except Exception:
-                    dur_ms = 0.0
-            con.execute(
-                """UPDATE agent_runs
-                   SET status=?, finished_at=?, duration_ms=?, output_json=?, error_text=?, updated_at=?
-                   WHERE run_uid=?""",
-                (
-                    str(status or "finished").strip()[:40],
-                    now,
-                    float(dur_ms),
-                    json.dumps(output_payload or {}, ensure_ascii=True),
-                    str(error_text or "")[:1000],
-                    now,
-                    uid,
-                ),
-            )
-            ok["done"] = con.total_changes > 0
-            con.commit()
-        finally:
-            con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute("SELECT started_at FROM agent_runs_core WHERE run_uid=%s LIMIT 1", (uid,))
+                row = cur.fetchone()
+                started = str((row[0] if row else "") or "").strip()
+                dur_ms = 0.0
+                if started:
+                    try:
+                        dur_ms = max(0.0, (dt.datetime.now() - dt.datetime.fromisoformat(started)).total_seconds() * 1000.0)
+                    except Exception:
+                        dur_ms = 0.0
+                cur.execute(
+                    """UPDATE agent_runs_core
+                       SET status=%s, finished_at=%s, duration_ms=%s, output_json=%s::jsonb, error_text=%s, updated_at=%s
+                       WHERE run_uid=%s""",
+                    (
+                        str(status or "finished").strip()[:40],
+                        now,
+                        float(dur_ms),
+                        json.dumps(output_payload or {}, ensure_ascii=True),
+                        str(error_text or "")[:1000],
+                        now,
+                        uid,
+                    ),
+                )
+                ok["done"] = cur.rowcount > 0
+                con_pg.commit()
+            finally:
+                con_pg.close()
+    else:
+        def _write() -> None:
+            con = _conn_core()
+            try:
+                row = con.execute("SELECT started_at FROM agent_runs WHERE run_uid=? LIMIT 1", (uid,)).fetchone()
+                started = str((row["started_at"] if row else "") or "").strip()
+                dur_ms = 0.0
+                if started:
+                    try:
+                        dur_ms = max(0.0, (dt.datetime.now() - dt.datetime.fromisoformat(started)).total_seconds() * 1000.0)
+                    except Exception:
+                        dur_ms = 0.0
+                con.execute(
+                    """UPDATE agent_runs
+                       SET status=?, finished_at=?, duration_ms=?, output_json=?, error_text=?, updated_at=?
+                       WHERE run_uid=?""",
+                    (
+                        str(status or "finished").strip()[:40],
+                        now,
+                        float(dur_ms),
+                        json.dumps(output_payload or {}, ensure_ascii=True),
+                        str(error_text or "")[:1000],
+                        now,
+                        uid,
+                    ),
+                )
+                ok["done"] = con.total_changes > 0
+                con.commit()
+            finally:
+                con.close()
 
-    sqlite_retry(_write)
+        sqlite_retry(_write)
     return bool(ok["done"])
 
 
@@ -416,6 +413,69 @@ def record_reflexion_from_quality_event(event_type: str, query: str, detail: dic
     rule_key, rule_text, conf = _build_reflexion_rule(ev, q)
     note_text = f"Observed failure pattern '{ev}'. Applied rule '{rule_key}' to reduce repeats."
     out = {"ok": False, "policy_version": "", "rule_key": rule_key}
+
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return {"ok": False, "error": "pg_not_available"}
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """INSERT INTO reflexion_notes_core
+                   (id, created_at, event_type, query, detail_json, note_text, rule_key, rule_text, confidence)
+                   VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM reflexion_notes_core), %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                   RETURNING id""",
+                (now, ev[:120], q[:4000], json.dumps(d, ensure_ascii=True), note_text[:1200], rule_key[:120], rule_text[:1200], float(conf)),
+            )
+            rowid = cur.fetchone()
+            note_id = int((rowid[0] if rowid else 0) or 0)
+            cur.execute("SELECT id, total_count, open_count FROM failure_patterns_core WHERE pattern_key=%s LIMIT 1", (pattern_key,))
+            row = cur.fetchone()
+            if row:
+                cur.execute(
+                    """UPDATE failure_patterns_core
+                       SET total_count=%s, open_count=%s, last_seen_at=%s, last_query=%s, last_detail_json=%s::jsonb, last_reflexion=%s
+                       WHERE id=%s""",
+                    (
+                        int(row[1] or 0) + 1,
+                        int(row[2] or 0) + 1,
+                        now,
+                        q[:500],
+                        json.dumps(d, ensure_ascii=True),
+                        note_text[:800],
+                        int(row[0] or 0),
+                    ),
+                )
+            else:
+                cur.execute(
+                    """INSERT INTO failure_patterns_core
+                       (id, pattern_key, event_type, total_count, open_count, resolved_count, first_seen_at, last_seen_at, last_query, last_detail_json, last_reflexion)
+                       VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM failure_patterns_core), %s, %s, 1, 1, 0, %s, %s, %s, %s::jsonb, %s)""",
+                    (pattern_key, ev[:120], now, now, q[:500], json.dumps(d, ensure_ascii=True), note_text[:800]),
+                )
+            policy = {
+                "rule_key": rule_key,
+                "rule_text": rule_text,
+                "event_type": ev,
+                "pattern_key": pattern_key,
+                "confidence": float(conf),
+                "created_at": now,
+            }
+            tag = "rv_" + dt.datetime.now().strftime("%Y%m%d%H%M%S%f")
+            cur.execute("UPDATE reflexion_policy_versions_core SET is_active=0 WHERE is_active=1")
+            cur.execute(
+                """INSERT INTO reflexion_policy_versions_core
+                   (id, version_tag, created_at, source_event_id, policy_json, is_active, rolled_back_from)
+                   VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM reflexion_policy_versions_core), %s, %s, %s, %s::jsonb, 1, '')""",
+                (tag, now, note_id, json.dumps(policy, ensure_ascii=True)),
+            )
+            con_pg.commit()
+            out["ok"] = True
+            out["policy_version"] = tag
+            upsert_user_preference(pref_key=f"reflexion::{rule_key}", pref_value=rule_text, source=f"reflexion:{tag}")
+        finally:
+            con_pg.close()
+        return out
 
     def _write() -> None:
         con = _conn_core()
@@ -482,6 +542,28 @@ def rollback_reflexion_policy(target_version: str) -> dict[str, Any]:
     tv = str(target_version or "").strip()
     if not tv:
         return {"ok": False, "error": "missing_version"}
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return {"ok": False, "error": "pg_not_available"}
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT version_tag FROM reflexion_policy_versions_core WHERE version_tag=%s LIMIT 1", (tv,))
+            row = cur.fetchone()
+            if not row:
+                return {"ok": False, "error": "version_not_found"}
+            cur.execute("SELECT version_tag FROM reflexion_policy_versions_core WHERE is_active=1 LIMIT 1")
+            current = cur.fetchone()
+            prev = str((current[0] if current else "") or "")
+            cur.execute("UPDATE reflexion_policy_versions_core SET is_active=0 WHERE is_active=1")
+            cur.execute(
+                "UPDATE reflexion_policy_versions_core SET is_active=1, rolled_back_from=%s WHERE version_tag=%s",
+                (prev[:80], tv),
+            )
+            con_pg.commit()
+            return {"ok": True, "active_version": tv, "rolled_back_from": prev}
+        finally:
+            con_pg.close()
     con = _conn_core()
     try:
         row = con.execute("SELECT version_tag FROM reflexion_policy_versions WHERE version_tag=? LIMIT 1", (tv,)).fetchone()
@@ -502,6 +584,37 @@ def rollback_reflexion_policy(target_version: str) -> dict[str, Any]:
 
 def list_recent_agent_runs(limit: int = 20) -> list[dict[str, Any]]:
     ensure_proactive_schema()
+    lim = max(1, min(200, int(limit or 20)))
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return []
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """SELECT run_uid, agent_name, trigger_type, status, started_at, finished_at, duration_ms, error_text, created_at
+                   FROM agent_runs_core
+                   ORDER BY id DESC
+                   LIMIT %s""",
+                (lim,),
+            )
+            rows = cur.fetchall() or []
+            return [
+                {
+                    "run_uid": str(r[0] or ""),
+                    "agent_name": str(r[1] or ""),
+                    "trigger_type": str(r[2] or ""),
+                    "status": str(r[3] or ""),
+                    "started_at": str(r[4] or ""),
+                    "finished_at": str(r[5] or ""),
+                    "duration_ms": float(r[6] or 0.0),
+                    "error_text": str(r[7] or ""),
+                    "created_at": str(r[8] or ""),
+                }
+                for r in rows
+            ]
+        finally:
+            con_pg.close()
     con = _conn_core()
     try:
         rows = con.execute(
@@ -509,7 +622,7 @@ def list_recent_agent_runs(limit: int = 20) -> list[dict[str, Any]]:
                FROM agent_runs
                ORDER BY id DESC
                LIMIT ?""",
-            (max(1, min(200, int(limit or 20))),),
+            (lim,),
         ).fetchall()
         out: list[dict[str, Any]] = []
         for r in rows:
@@ -533,6 +646,56 @@ def list_recent_agent_runs(limit: int = 20) -> list[dict[str, Any]]:
 
 def list_recent_reflexions(limit: int = 20) -> dict[str, Any]:
     ensure_proactive_schema()
+    lim = max(1, min(200, int(limit or 20)))
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return {"notes": [], "policy_versions": []}
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """SELECT id, created_at, event_type, query, note_text, rule_key, rule_text, confidence
+                   FROM reflexion_notes_core
+                   ORDER BY id DESC
+                   LIMIT %s""",
+                (lim,),
+            )
+            notes = cur.fetchall() or []
+            cur.execute(
+                """SELECT version_tag, created_at, source_event_id, policy_json::text, is_active, rolled_back_from
+                   FROM reflexion_policy_versions_core
+                   ORDER BY id DESC
+                   LIMIT 8"""
+            )
+            policy = cur.fetchall() or []
+            return {
+                "notes": [
+                    {
+                        "id": int(r[0] or 0),
+                        "created_at": str(r[1] or ""),
+                        "event_type": str(r[2] or ""),
+                        "query": str(r[3] or ""),
+                        "note_text": str(r[4] or ""),
+                        "rule_key": str(r[5] or ""),
+                        "rule_text": str(r[6] or ""),
+                        "confidence": float(r[7] or 0.0),
+                    }
+                    for r in notes
+                ],
+                "policy_versions": [
+                    {
+                        "version_tag": str(r[0] or ""),
+                        "created_at": str(r[1] or ""),
+                        "source_event_id": int(r[2] or 0),
+                        "policy_json": str(r[3] or "{}"),
+                        "is_active": int(r[4] or 0),
+                        "rolled_back_from": str(r[5] or ""),
+                    }
+                    for r in policy
+                ],
+            }
+        finally:
+            con_pg.close()
     con = _conn_core()
     try:
         notes = con.execute(
@@ -540,7 +703,7 @@ def list_recent_reflexions(limit: int = 20) -> dict[str, Any]:
                FROM reflexion_notes
                ORDER BY id DESC
                LIMIT ?""",
-            (max(1, min(200, int(limit or 20))),),
+            (lim,),
         ).fetchall()
         policy = con.execute(
             """SELECT version_tag, created_at, source_event_id, policy_json, is_active, rolled_back_from
@@ -579,6 +742,19 @@ def list_recent_reflexions(limit: int = 20) -> dict[str, Any]:
 
 
 def _state_get(con: sqlite3.Connection, key: str, default: str = "") -> str:
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return default
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT state_value FROM proactive_monitor_state_core WHERE state_key=%s LIMIT 1", (key,))
+            row = cur.fetchone()
+            if not row:
+                return default
+            return str(row[0] or default)
+        finally:
+            con_pg.close()
     row = con.execute("SELECT state_value FROM proactive_monitor_state WHERE state_key = ? LIMIT 1", (key,)).fetchone()
     if not row:
         return default
@@ -586,6 +762,21 @@ def _state_get(con: sqlite3.Connection, key: str, default: str = "") -> str:
 
 
 def _state_set(con: sqlite3.Connection, key: str, value: str) -> None:
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                "INSERT INTO proactive_monitor_state_core(state_key, state_value) VALUES(%s, %s) "
+                "ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value",
+                (key, str(value or "")),
+            )
+            con_pg.commit()
+        finally:
+            con_pg.close()
+        return
     con.execute(
         "INSERT INTO proactive_monitor_state(state_key, state_value) VALUES(?, ?) "
         "ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value",
@@ -607,6 +798,29 @@ def _entity_id(con: sqlite3.Connection, name: str, typ: str) -> int:
     return int(row["id"] or 0) if row else 0
 
 
+def _entity_id_pg(con_pg: Any, name: str, typ: str) -> int:
+    nm = str(name or "").strip()
+    tp = str(typ or "").strip().upper()
+    norm = re.sub(r"\s+", " ", nm.lower())
+    now = dt.datetime.now().isoformat()
+    cur = con_pg.cursor()
+    cur.execute(
+        """
+        INSERT INTO entities_core(name, type, entity_type, metadata_json, normalized_name, id_text, created_at, updated_at, id)
+        VALUES(%s,%s,%s,%s::jsonb,%s,%s,%s,%s,(SELECT COALESCE(MAX(id),0)+1 FROM entities_core))
+        ON CONFLICT(type, normalized_name) DO UPDATE SET
+          name=EXCLUDED.name,
+          entity_type=EXCLUDED.entity_type,
+          id_text=EXCLUDED.id_text,
+          updated_at=EXCLUDED.updated_at
+        """,
+        (nm, tp, tp, "{}", norm, f"{tp.lower()}:{norm}", now, now),
+    )
+    cur.execute("SELECT id FROM entities_core WHERE type = %s AND normalized_name = %s LIMIT 1", (tp, norm))
+    row = cur.fetchone()
+    return int((row or [0])[0] or 0)
+
+
 def _relationship_upsert(
     con: sqlite3.Connection,
     source_id: int,
@@ -625,6 +839,42 @@ def _relationship_upsert(
             int(source_id),
             int(target_id),
             str(rel_type or "").strip().upper(),
+        ),
+    )
+
+
+def _relationship_upsert_pg(
+    con_pg: Any,
+    source_id: int,
+    target_id: int,
+    rel_type: str,
+    citation_link: str,
+    citation_text: str,
+    confidence: float = 0.8,
+) -> None:
+    if source_id <= 0 or target_id <= 0:
+        return
+    cur = con_pg.cursor()
+    cur.execute(
+        """DELETE FROM relationships_core
+           WHERE source_id = %s AND target_id = %s AND relationship_type = %s""",
+        (int(source_id), int(target_id), str(rel_type or "").strip().upper()),
+    )
+    cur.execute(
+        """INSERT INTO relationships_core
+           (id, source_id, target_id, relationship_type, citation_link, citation_url, citation_text, confidence, confidence_score, created_at)
+           VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM relationships_core), %s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT(source_id, target_id, relationship_type, citation_link) DO NOTHING""",
+        (
+            int(source_id),
+            int(target_id),
+            str(rel_type or "").strip().upper(),
+            str(citation_link or "").strip(),
+            str(citation_link or "").strip(),
+            str(citation_text or "")[:500],
+            float(confidence or 0.0),
+            float(confidence or 0.0),
+            dt.datetime.now().isoformat(),
         ),
     )
     con.execute(
@@ -678,69 +928,136 @@ def _extract_peer_tickers(text: str, self_ticker: str) -> list[str]:
 
 def ingest_ontology_from_report_facts(limit_rows: int = 200) -> dict[str, int]:
     ensure_proactive_schema()
-    con_core = _conn_core()
-    con_onyx = _conn_onyx()
     created_entities = 0
     created_edges = 0
     scanned = 0
-    try:
-        row = con_onyx.execute("SELECT state_value FROM ontology_ingest_state WHERE state_key='last_report_fact_id' LIMIT 1").fetchone()
-        last_id = int(str((row["state_value"] if row else "0") or "0") or "0")
-        rows = con_core.execute(
-            """SELECT id, ticker, fact_text, report_name, importance
-               FROM report_facts
-               WHERE id > ?
-               ORDER BY id ASC
-               LIMIT ?""",
-            (last_id, max(20, min(2000, int(limit_rows or 200)))),
-        ).fetchall()
-        max_seen = last_id
-        for r in rows:
-            scanned += 1
-            rid = int(r["id"] or 0)
-            max_seen = max(max_seen, rid)
-            tk = _safe_ticker(str(r["ticker"] or ""))
-            txt = str(r["fact_text"] or "").strip()
-            rep = str(r["report_name"] or "").strip()
-            if not tk or not txt:
-                continue
-            citation = f"/reports/view?name={rep}" if rep else "/reports"
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return {"scanned": 0, "entities": 0, "edges": 0}
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT state_value FROM ontology_ingest_state_core WHERE state_key='last_report_fact_id' LIMIT 1")
+            row = cur.fetchone()
+            last_id = int(str(((row or [None])[0] if row else "0") or "0") or "0")
+            cur.execute(
+                """SELECT id, ticker, fact_text, report_name, importance
+                   FROM report_facts_core
+                   WHERE id > %s
+                   ORDER BY id ASC
+                   LIMIT %s""",
+                (last_id, max(20, min(2000, int(limit_rows or 200)))),
+            )
+            fetched = cur.fetchall() or []
+            rows = [
+                {"id": int(r[0] or 0), "ticker": str(r[1] or ""), "fact_text": str(r[2] or ""), "report_name": str(r[3] or ""), "importance": int(r[4] or 0)}
+                for r in fetched
+            ]
+            max_seen = last_id
+            for r in rows:
+                scanned += 1
+                rid = int(r["id"] or 0)
+                max_seen = max(max_seen, rid)
+                tk = _safe_ticker(str(r["ticker"] or ""))
+                txt = str(r["fact_text"] or "").strip()
+                rep = str(r["report_name"] or "").strip()
+                if not tk or not txt:
+                    continue
+                citation = f"/reports/view?name={rep}" if rep else "/reports"
 
-            src_id = _entity_id(con_onyx, tk, "COMPANY")
-            if src_id > 0:
-                created_entities += 1
-
-            themes = _extract_themes(txt)
-            for th in themes:
-                tid = _entity_id(con_onyx, th, "RISK_THEME")
-                if tid > 0:
+                src_id = _entity_id_pg(con_pg, tk, "COMPANY")
+                if src_id > 0:
                     created_entities += 1
-                _relationship_upsert(con_onyx, src_id, tid, "EXPOSED_TO", citation, txt, confidence=0.82)
-                created_edges += 1
 
-            peers = _extract_peer_tickers(txt, tk)
-            for peer in peers:
-                pid = _entity_id(con_onyx, peer, "COMPANY")
-                if pid > 0:
+                themes = _extract_themes(txt)
+                for th in themes:
+                    tid = _entity_id_pg(con_pg, th, "RISK_THEME")
+                    if tid > 0:
+                        created_entities += 1
+                    _relationship_upsert_pg(con_pg, src_id, tid, "EXPOSED_TO", citation, txt, confidence=0.82)
+                    created_edges += 1
+
+                peers = _extract_peer_tickers(txt, tk)
+                for peer in peers:
+                    pid = _entity_id_pg(con_pg, peer, "COMPANY")
+                    if pid > 0:
+                        created_entities += 1
+                    rel = "COMPETES_WITH"
+                    low = txt.lower()
+                    if "supplier" in low or "supply" in low:
+                        rel = "SUPPLIER_TO"
+                    elif "customer" in low:
+                        rel = "CUSTOMER_OF"
+                    _relationship_upsert_pg(con_pg, src_id, pid, rel, citation, txt, confidence=0.76)
+                    created_edges += 1
+
+            cur.execute(
+                "INSERT INTO ontology_ingest_state_core(state_key, state_value) VALUES(%s,%s) "
+                "ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value",
+                ("last_report_fact_id", str(max_seen)),
+            )
+            con_pg.commit()
+        except Exception:
+            try:
+                con_pg.rollback()
+            except Exception:
+                pass
+        finally:
+            con_pg.close()
+    else:
+        con_core = _conn_core()
+        con_onyx = _conn_onyx()
+        try:
+            row = con_onyx.execute("SELECT state_value FROM ontology_ingest_state WHERE state_key='last_report_fact_id' LIMIT 1").fetchone()
+            last_id = int(str((row["state_value"] if row else "0") or "0") or "0")
+            rows = []
+            max_seen = last_id
+            for r in rows:
+                scanned += 1
+                rid = int(r["id"] or 0)
+                max_seen = max(max_seen, rid)
+                tk = _safe_ticker(str(r["ticker"] or ""))
+                txt = str(r["fact_text"] or "").strip()
+                rep = str(r["report_name"] or "").strip()
+                if not tk or not txt:
+                    continue
+                citation = f"/reports/view?name={rep}" if rep else "/reports"
+
+                src_id = _entity_id(con_onyx, tk, "COMPANY")
+                if src_id > 0:
                     created_entities += 1
-                rel = "COMPETES_WITH"
-                low = txt.lower()
-                if "supplier" in low or "supply" in low:
-                    rel = "SUPPLIER_TO"
-                elif "customer" in low:
-                    rel = "CUSTOMER_OF"
-                _relationship_upsert(con_onyx, src_id, pid, rel, citation, txt, confidence=0.76)
-                created_edges += 1
 
-        con_onyx.execute(
-            "INSERT INTO ontology_ingest_state(state_key, state_value) VALUES('last_report_fact_id', ?) "
-            "ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value",
-            (str(max_seen),),
-        )
-        con_onyx.commit()
-    finally:
-        con_core.close()
-        con_onyx.close()
+                themes = _extract_themes(txt)
+                for th in themes:
+                    tid = _entity_id(con_onyx, th, "RISK_THEME")
+                    if tid > 0:
+                        created_entities += 1
+                    _relationship_upsert(con_onyx, src_id, tid, "EXPOSED_TO", citation, txt, confidence=0.82)
+                    created_edges += 1
+
+                peers = _extract_peer_tickers(txt, tk)
+                for peer in peers:
+                    pid = _entity_id(con_onyx, peer, "COMPANY")
+                    if pid > 0:
+                        created_entities += 1
+                    rel = "COMPETES_WITH"
+                    low = txt.lower()
+                    if "supplier" in low or "supply" in low:
+                        rel = "SUPPLIER_TO"
+                    elif "customer" in low:
+                        rel = "CUSTOMER_OF"
+                    _relationship_upsert(con_onyx, src_id, pid, rel, citation, txt, confidence=0.76)
+                    created_edges += 1
+
+            con_onyx.execute(
+                "INSERT INTO ontology_ingest_state(state_key, state_value) VALUES('last_report_fact_id', ?) "
+                "ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value",
+                (str(max_seen),),
+            )
+            con_onyx.commit()
+        finally:
+            con_core.close()
+            con_onyx.close()
     return {"scanned": scanned, "entities": created_entities, "edges": created_edges}
 
 
@@ -766,12 +1083,11 @@ def _build_thesis_bullets(ticker: str, text: str, kind: str) -> list[str]:
     return [
         f"New signal detected for {ticker}.",
         s,
-        "Review thesis fit, downside risk, and sizing before any action.",
+        "Review this signal against your thesis before any action.",
     ]
 
 
 def _proposal_upsert(
-    con: sqlite3.Connection,
     *,
     source_event_key: str,
     kind: str,
@@ -784,70 +1100,284 @@ def _proposal_upsert(
     execute_route: str,
     execute_payload: dict[str, Any] | None = None,
 ) -> bool:
-    row = con.execute("SELECT id, status FROM action_proposals WHERE source_event_key = ? LIMIT 1", (source_event_key,)).fetchone()
-    if row:
+    if core_backend() != "postgres":
+        return False
+    source_key = str(source_event_key or "").strip()[:240]
+    if not source_key:
         return False
     now = dt.datetime.now().isoformat()
-    con.execute(
-        """INSERT INTO action_proposals
-           (created_at, updated_at, status, kind, ticker, title, thesis_json, citations_json,
-            confidence, priority_score, source_event_key, execute_route, execute_payload_json)
-           VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            now,
-            now,
-            str(kind or "thesis_trigger"),
-            str(ticker or "").upper(),
-            str(title or "")[:240],
-            json.dumps(list(bullets or [])[:3], ensure_ascii=True),
-            json.dumps(list(citations or [])[:8], ensure_ascii=True),
-            float(confidence or 0.0),
-            float(priority_score or 0.0),
-            str(source_event_key or "")[:240],
-            str(execute_route or "/dashboard"),
-            json.dumps(execute_payload or {}, ensure_ascii=True),
-        ),
-    )
-    con.execute(
-        """UPDATE action_proposals
-           SET target_ticker = ?, suggested_action = ?, thesis_summary = ?, confidence_score = ?, updated_at = ?
-           WHERE source_event_key = ?""",
-        (
-            str(ticker or "").upper(),
-            "REVIEW",
-            " ".join([str(x).strip() for x in list(bullets or [])[:3] if str(x).strip()])[:1500],
-            float(confidence or 0.0),
-            dt.datetime.now().isoformat(),
-            str(source_event_key or "")[:240],
-        ),
-    )
-    return True
+    tk = _safe_ticker(ticker)
+    signal_blob = f"{title}\n" + "\n".join([str(x or "").strip() for x in list(bullets or [])[:3]])
+    if _is_non_event_signal(signal_blob, tk):
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT id FROM action_proposals_core WHERE source_event_key=%s LIMIT 1", (source_key,))
+        exists = cur.fetchone()
+        if exists:
+            return False
+        cur.execute("SELECT COALESCE(MAX(id),0)+1 FROM action_proposals_core")
+        new_id = int((cur.fetchone() or [0])[0] or 1)
+        weight = float((_portfolio_weight_map().get(tk, 0.0) if tk else 0.0) or 0.0)
+        thesis_ctx = _watchlist_thesis_context(None, tk)
+        style_ctx = _investor_style_context(None, limit=20)
+        decisions_ctx = _recent_decision_context(None, tk, limit=12)
+        reasoning = _evaluate_signal_reasoning(
+            ticker=tk,
+            signal_text=signal_blob,
+            portfolio_weight_pct=weight,
+            thesis_text=thesis_ctx,
+            style_text=style_ctx,
+            decisions_text=decisions_ctx,
+        )
+        insights = _insights_from_reasoning(reasoning, list(bullets or [])[:3])
+        verify = _verify_reasoning_relevance(
+            ticker=tk,
+            signal_text=signal_blob,
+            thesis_text=thesis_ctx,
+            style_text=style_ctx,
+            reasoning=reasoning,
+        )
+        if verify:
+            reasoning["quality_verdict"] = str(verify.get("quality_verdict") or "").strip().lower()
+            reasoning["quality_reason"] = str(verify.get("quality_reason") or "").strip()[:220]
+        reasoning = _normalize_reasoning_payload(reasoning)
+        insights = _insights_from_reasoning(reasoning, list(bullets or [])[:3])
+        if not _passes_reasoning_quality(reasoning, insights, citations):
+            return False
+        row = {
+            "id": new_id,
+            "created_at": now,
+            "updated_at": now,
+            "status": "open",
+            "kind": str(kind or "thesis_trigger"),
+            "ticker": str(ticker or "").upper(),
+            "title": str(title or "")[:240],
+            "thesis_json": list(bullets or [])[:3],
+            "citations_json": list(citations or [])[:8],
+            "insights_json": list(insights or [])[:3],
+            "reasoning_json": dict(reasoning or {}),
+            "confidence": float(confidence or 0.0),
+            "priority_score": float(priority_score or 0.0),
+            "execute_route": str(execute_route or "/dashboard"),
+            "execute_payload_json": dict(execute_payload or {}),
+            "source_event_key": source_key,
+            "proposal_uid": f"ap_{new_id}",
+            "target_ticker": str(ticker or "").upper(),
+            "suggested_action": "REVIEW",
+            "thesis_summary": " ".join([str(x).strip() for x in list(bullets or [])[:3] if str(x).strip()])[:1500],
+            "confidence_score": float(confidence or 0.0),
+            "dismissed_reason": "",
+            "rejection_reason": "",
+            "rejected_at": "",
+            "executed_at": "",
+        }
+        con.commit()
+        _upsert_action_proposal_core_pg(row)
+        mirror_action_proposal(
+            {
+                "source_event_key": source_key,
+                "proposal_id": new_id,
+                "ticker": str(row["ticker"] or ""),
+                "kind": str(row["kind"] or ""),
+                "status": "open",
+                "title": str(row["title"] or ""),
+                "insights_json": list(row["insights_json"] or []),
+                "reasoning_json": dict(row["reasoning_json"] or {}),
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
 
 
-def _has_open_proposal(con: sqlite3.Connection, kind: str, ticker: str) -> bool:
-    row = con.execute(
-        "SELECT id FROM action_proposals WHERE status='open' AND kind=? AND ticker=? LIMIT 1",
-        (str(kind or "").strip(), str(ticker or "").strip().upper()),
-    ).fetchone()
-    return bool(row)
+def _upsert_action_proposal_core_pg(row: dict[str, Any]) -> None:
+    con = pg_connect()
+    if con is None:
+        return
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO action_proposals_core
+            (id, created_at, updated_at, status, kind, ticker, title, thesis_json, citations_json, insights_json, reasoning_json,
+             confidence, priority_score, execute_route, execute_payload_json, source_event_key, proposal_uid, target_ticker, suggested_action,
+             thesis_summary, confidence_score, dismissed_reason, rejection_reason, rejected_at, executed_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(id) DO UPDATE SET
+              updated_at=EXCLUDED.updated_at,status=EXCLUDED.status,kind=EXCLUDED.kind,ticker=EXCLUDED.ticker,title=EXCLUDED.title,
+              thesis_json=EXCLUDED.thesis_json,citations_json=EXCLUDED.citations_json,insights_json=EXCLUDED.insights_json,reasoning_json=EXCLUDED.reasoning_json,
+              confidence=EXCLUDED.confidence,priority_score=EXCLUDED.priority_score,execute_route=EXCLUDED.execute_route,execute_payload_json=EXCLUDED.execute_payload_json,
+              source_event_key=EXCLUDED.source_event_key,proposal_uid=EXCLUDED.proposal_uid,target_ticker=EXCLUDED.target_ticker,
+              suggested_action=EXCLUDED.suggested_action,thesis_summary=EXCLUDED.thesis_summary,confidence_score=EXCLUDED.confidence_score,
+              dismissed_reason=EXCLUDED.dismissed_reason,rejection_reason=EXCLUDED.rejection_reason,rejected_at=EXCLUDED.rejected_at,executed_at=EXCLUDED.executed_at
+            """,
+            (
+                int(row.get("id") or 0),
+                str(row.get("created_at") or ""),
+                str(row.get("updated_at") or ""),
+                str(row.get("status") or "open"),
+                str(row.get("kind") or ""),
+                str(row.get("ticker") or ""),
+                str(row.get("title") or ""),
+                json.dumps(list(row.get("thesis_json") or []), ensure_ascii=True),
+                json.dumps(list(row.get("citations_json") or []), ensure_ascii=True),
+                json.dumps(list(row.get("insights_json") or []), ensure_ascii=True),
+                json.dumps(dict(row.get("reasoning_json") or {}), ensure_ascii=True),
+                float(row.get("confidence") or 0.0),
+                float(row.get("priority_score") or 0.0),
+                str(row.get("execute_route") or ""),
+                json.dumps(dict(row.get("execute_payload_json") or {}), ensure_ascii=True),
+                str(row.get("source_event_key") or ""),
+                str(row.get("proposal_uid") or ""),
+                str(row.get("target_ticker") or ""),
+                str(row.get("suggested_action") or "REVIEW"),
+                str(row.get("thesis_summary") or ""),
+                float(row.get("confidence_score") or 0.0),
+                str(row.get("dismissed_reason") or ""),
+                str(row.get("rejection_reason") or ""),
+                str(row.get("rejected_at") or ""),
+                str(row.get("executed_at") or ""),
+            ),
+        )
+        con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+    finally:
+        con.close()
 
 
-def _has_recent_proposal(con: sqlite3.Connection, kind: str, ticker: str, cooldown_hours: int = PROPOSAL_COOLDOWN_HOURS) -> bool:
+def _pg_get_action_proposal_row(pid: int) -> dict[str, Any] | None:
+    con = pg_connect()
+    if con is None:
+        return None
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """SELECT id, created_at, updated_at, status, kind, ticker, title, thesis_json, citations_json, insights_json, reasoning_json,
+                      confidence, priority_score, execute_route, execute_payload_json, source_event_key, proposal_uid, target_ticker, suggested_action,
+                      thesis_summary, confidence_score, dismissed_reason, rejection_reason, rejected_at, executed_at
+               FROM action_proposals_core
+               WHERE id=%s LIMIT 1""",
+            (int(pid),),
+        )
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "id": int(r[0] or 0),
+            "created_at": str(r[1] or ""),
+            "updated_at": str(r[2] or ""),
+            "status": str(r[3] or ""),
+            "kind": str(r[4] or ""),
+            "ticker": str(r[5] or ""),
+            "title": str(r[6] or ""),
+            "thesis_json": r[7] if isinstance(r[7], list) else (json.loads(str(r[7] or "[]")) if str(r[7] or "").strip() else []),
+            "citations_json": r[8] if isinstance(r[8], list) else (json.loads(str(r[8] or "[]")) if str(r[8] or "").strip() else []),
+            "insights_json": r[9] if isinstance(r[9], list) else (json.loads(str(r[9] or "[]")) if str(r[9] or "").strip() else []),
+            "reasoning_json": r[10] if isinstance(r[10], dict) else (json.loads(str(r[10] or "{}")) if str(r[10] or "").strip() else {}),
+            "confidence": float(r[11] or 0.0),
+            "priority_score": float(r[12] or 0.0),
+            "execute_route": str(r[13] or ""),
+            "execute_payload_json": r[14] if isinstance(r[14], dict) else (json.loads(str(r[14] or "{}")) if str(r[14] or "").strip() else {}),
+            "source_event_key": str(r[15] or ""),
+            "proposal_uid": str(r[16] or ""),
+            "target_ticker": str(r[17] or ""),
+            "suggested_action": str(r[18] or ""),
+            "thesis_summary": str(r[19] or ""),
+            "confidence_score": float(r[20] or 0.0),
+            "dismissed_reason": str(r[21] or ""),
+            "rejection_reason": str(r[22] or ""),
+            "rejected_at": str(r[23] or ""),
+            "executed_at": str(r[24] or ""),
+        }
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+
+def _has_open_proposal(kind: str, ticker: str) -> bool:
+    if core_backend() != "postgres":
+        return False
+    k = str(kind or "").strip()
+    t = str(ticker or "").strip().upper()
+    if not k or not t:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id FROM action_proposals_core WHERE status='open' AND kind=%s AND ticker=%s LIMIT 1",
+            (k, t),
+        )
+        return bool(cur.fetchone())
+    except Exception:
+        return False
+    finally:
+        con.close()
+
+
+def _has_recent_proposal(kind: str, ticker: str, cooldown_hours: int = PROPOSAL_COOLDOWN_HOURS) -> bool:
+    if core_backend() != "postgres":
+        return False
     k = str(kind or "").strip()
     t = str(ticker or "").strip().upper()
     if not k or not t:
         return False
     since = (dt.datetime.now() - dt.timedelta(hours=max(1, int(cooldown_hours or 1)))).isoformat()
-    row = con.execute(
-        "SELECT id FROM action_proposals WHERE kind=? AND ticker=? AND created_at>=? LIMIT 1",
-        (k, t, since),
-    ).fetchone()
-    return bool(row)
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id FROM action_proposals_core WHERE kind=%s AND ticker=%s AND created_at>=%s LIMIT 1",
+            (k, t, since),
+        )
+        return bool(cur.fetchone())
+    except Exception:
+        return False
+    finally:
+        con.close()
 
 
 def _day_pct_map() -> dict[str, float]:
-    con = _conn_core()
     out: dict[str, float] = {}
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return out
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT ticker, day_pct FROM intel24_snapshot_core")
+            for r in cur.fetchall() or []:
+                tk = _safe_ticker(str(r[0] or ""))
+                if not tk:
+                    continue
+                out[tk] = _to_float(r[1], 0.0)
+        except Exception:
+            return {}
+        finally:
+            con_pg.close()
+        return out
+    con = _conn_core()
     try:
         rows = con.execute("SELECT ticker, day_pct FROM intel24_snapshot").fetchall()
         for r in rows:
@@ -861,16 +1391,28 @@ def _day_pct_map() -> dict[str, float]:
 
 
 def _company_name_map() -> dict[str, str]:
-    con = _conn_core()
     out: dict[str, str] = {}
+    if core_backend() != "postgres":
+        return out
+    con_pg = pg_connect()
+    if con_pg is None:
+        return out
     try:
-        rows = con.execute("SELECT ticker, name FROM company_profile_cache").fetchall()
-        for r in rows:
-            tk = _safe_ticker(str(r["ticker"] or ""))
+        cur = con_pg.cursor()
+        cur.execute("SELECT to_regclass('public.company_profile_cache_core')")
+        exists = cur.fetchone()
+        if not exists or not exists[0]:
+            return out
+        cur.execute("SELECT ticker, name FROM company_profile_cache_core")
+        for r in cur.fetchall() or []:
+            tk = _safe_ticker(str(r[0] or ""))
             if tk:
-                out[tk] = str(r["name"] or "").strip()
+                out[tk] = str(r[1] or "").strip()
+    except Exception:
+        # Fail-safe for partially migrated Postgres schemas: never break dashboard render.
+        return {}
     finally:
-        con.close()
+        con_pg.close()
     return out
 
 
@@ -909,61 +1451,11 @@ def _portfolio_weight_map() -> dict[str, float]:
     return {tk: (val / total) * 100.0 for tk, val in values.items()}
 
 
-def _infer_direction(kind: str, title: str, bullets: list[str]) -> str:
-    k = str(kind or "").strip().lower()
-    t = (str(title or "") + " " + " ".join(str(x or "") for x in (bullets or []))).lower()
-    if "macro_signal" in k or "macro" in k or "contagion" in k:
-        if any(x in t for x in {"tailwind", "upside", "improving", "beat"}):
-            return "LONG"
-        if any(x in t for x in {"slowdown", "risk", "pressure", "default", "miss", "downside"}):
-            return "RISK"
-        return "RISK"
-    if "thesis trigger" in t and all(x not in t for x in {"undervalued", "overvalued", "tailwind", "headwind"}):
-        return "REVIEW"
-    pos = sum(1 for x in {"undervalued", "dislocation", "tailwind", "beat", "upside", "improving", "opportunity", "expanding"} if x in t)
-    neg = sum(1 for x in {"overvalued", "slowdown", "miss", "pressure", "liability", "churn", "contracting"} if x in t)
-    if pos > neg:
-        return "LONG"
-    if neg > pos:
-        return "SHORT"
-    return "REVIEW"
-
-
-def _suggest_max_add_pct(current_weight_pct: float, day_move_abs_pct: float) -> float:
-    w = max(0.0, float(current_weight_pct or 0.0))
-    vol = max(0.0, float(day_move_abs_pct or 0.0))
-    # Volatility-adjusted room: larger recent moves -> smaller suggested add size.
-    vol_scale = max(0.8, min(3.5, 0.9 + (vol / 4.0)))
-    cap_room = max(0.5, 10.0 - w)
-    max_add = min(cap_room, 3.5 / vol_scale)
-    return max(0.5, round(max_add, 2))
-
-
-def _build_cross_read_vector(ticker: str, bullets: list[str]) -> str:
-    tk = _safe_ticker(ticker)
-    peer = ""
-    rel = ""
-    for b in bullets or []:
-        s = str(b or "")
-        m_peer = re.search(r"\b([A-Z]{2,6})\b", s)
-        if m_peer and _safe_ticker(m_peer.group(1)) != tk:
-            peer = _safe_ticker(m_peer.group(1))
-        m_rel = re.search(r"relationship[^:]*:\s*([A-Z_]+)", s, flags=re.I)
-        if m_rel:
-            rel = str(m_rel.group(1) or "").strip().upper()
-        if peer and rel:
-            break
-    if not peer:
-        return ""
-    rel_txt = rel if rel else "LINKED_PEER"
-    return f"Cross-Read: {peer} ({rel_txt}) -> {tk}"
-
-
-def _extract_company_insights(bullets: list[str]) -> list[dict[str, str]]:
+def _extract_company_insights(bullets: list[str], use_ai: bool = True) -> list[dict[str, str]]:
     lines = [str(x or "").strip() for x in (bullets or []) if str(x or "").strip()]
     if not lines:
         return []
-    if ask_ai is not None:
+    if use_ai and ask_ai is not None:
         evidence = "\n".join(f"- {x}" for x in lines[:8])
         prompt = (
             "You are extracting dashboard insight cards from evidence.\n"
@@ -1006,6 +1498,332 @@ def _extract_company_insights(bullets: list[str]) -> list[dict[str, str]]:
     return [{"label": "Key Insight", "text": x[:220]} for x in lines[:3]]
 
 
+def _watchlist_thesis_context(con: sqlite3.Connection | None, ticker: str) -> str:
+    tk = _safe_ticker(ticker)
+    if not tk:
+        return ""
+    if core_backend() == "postgres":
+        rows = list_watchlist_thesis_pg(limit=600)
+        row = next((r for r in rows if str(r.get("ticker") or "").strip().upper() == tk), None)
+        if not row:
+            return ""
+        parts = [
+            str(row.get("thesis_summary") or "").strip(),
+            str(row.get("thesis") or "").strip(),
+            str(row.get("invalidation_criteria") or row.get("invalidation") or "").strip(),
+        ]
+        return " | ".join([p for p in parts if p])[:2600]
+    return ""
+
+
+def _investor_style_context(con: sqlite3.Connection | None, limit: int = 20) -> str:
+    if core_backend() == "postgres":
+        rows_pg = list_investor_style_memory_pg(limit=max(1, int(limit or 20)))
+        out_pg: list[str] = []
+        for r in rows_pg:
+            k = str(r.get("key") or "").strip()
+            a = str(r.get("answer") or "").strip()
+            if not (k or a):
+                continue
+            out_pg.append(f"- {k}: {a}")
+        return "\n".join(out_pg)[:3200]
+    return ""
+
+
+def _recent_decision_context(con: sqlite3.Connection | None, ticker: str, limit: int = 12) -> str:
+    tk = _safe_ticker(ticker)
+    if not tk or con is None:
+        return ""
+    rows = con.execute(
+        """SELECT COALESCE(action,''), COALESCE(status,''), COALESCE(thesis,''), COALESCE(key_risks,''),
+                  COALESCE(outcome_note,''), COALESCE(created_at,'')
+           FROM decisions
+           WHERE ticker = ?
+           ORDER BY id DESC
+           LIMIT ?""",
+        (tk, max(1, int(limit or 12))),
+    ).fetchall()
+    out: list[str] = []
+    for r in rows:
+        action = str(r[0] or "").strip()
+        status = str(r[1] or "").strip()
+        thesis = str(r[2] or "").strip()
+        key_risks = str(r[3] or "").strip()
+        outcome = str(r[4] or "").strip()
+        created = str(r[5] or "").strip()
+        txt = " | ".join([x for x in [created, action, status, thesis or key_risks or outcome] if x])
+        if txt:
+            out.append(f"- {txt[:220]}")
+    return "\n".join(out)[:2400]
+
+
+def _evaluate_signal_reasoning(
+    *,
+    ticker: str,
+    signal_text: str,
+    portfolio_weight_pct: float,
+    thesis_text: str,
+    style_text: str,
+    decisions_text: str = "",
+) -> dict[str, Any]:
+    sig = str(signal_text or "").strip()
+    tk = _safe_ticker(ticker)
+    if not tk or not sig:
+        return {}
+    if ask_ai is None:
+        return {}
+    prompt = (
+        "You are an Elite Fundamental Equity Analyst evaluating a new market signal.\n\n"
+        f"TARGET ASSET: {tk} (Current Weight: {float(portfolio_weight_pct or 0.0):.2f}%)\n"
+        f"USER'S INVESTMENT THESIS & EXPECTATIONS: {thesis_text or 'not provided'}\n"
+        f"USER'S HISTORICAL CONTEXT: {style_text or 'not provided'}\n"
+        f"NEW SIGNAL: {sig[:2600]}\n\n"
+        "STEP 1: THE BOUNCER (RELEVANCE CHECK)\n"
+        "Does this signal logically and directly impact this specific company's core business model, margins, or moat? "
+        "If the signal is generic macro noise, applies to an unrelated company without a direct competitive link, or is a non-event (e.g., 'Not in calendar'), you MUST ABORT. "
+        "Return an empty JSON object `{}`. Do not force an analysis on garbage data.\n\n"
+        "STEP 2: COMPARE & LEARN (FUNDAMENTAL INSIGHTS)\n"
+        "If relevant, perform a deep comparative analysis. Do NOT scold the user about portfolio rules. Instead, generate insights based on:\n"
+        "- COMPARISON: Compare the reality of this new signal against the expectations in the user's thesis. If the signal is about a peer/competitor, what is the direct read-through for our target asset?\n"
+        "- LEARNING: How does our understanding of this company need to adapt? What new risk or tailwind did we just learn about that wasn't in the original thesis?\n\n"
+        "STEP 3: DYNAMIC JSON GENERATION\n"
+        "Return STRICT JSON only. Generate 2 to 3 `insight_cards`. You MUST invent a highly specific, dynamic `label` for each card based on the exact comparative analysis (e.g., 'Peer Divergence', 'Thesis Degradation', 'Margin Reality Check', 'Competitor Headwind').\n"
+        "{\n"
+        '  "insight_cards": [\n'
+        '    {"label": "<AI_INVENTED_LABEL>", "text": "<Deep comparative or adaptive analysis. Max 2 sentences.>"}\n'
+        "  ],\n"
+        '  "confidence": "high|medium|low"\n'
+        "}"
+    )
+    try:
+        schema = {
+            "type": "object",
+            "properties": {
+                "insight_cards": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "text": {"type": "string"},
+                        },
+                        "required": ["label", "text"],
+                    },
+                    "maxItems": 3,
+                },
+                "confidence": {"type": "string"},
+                "margin_impact": {"type": "string"},
+                "thesis_validation": {"type": "string"},
+                "risk_assessment": {"type": "string"},
+                "actionable_proposal": {"type": "string"},
+                "peer_contagion": {"type": "string"},
+                "recommended_stance": {"type": "string"},
+                "invalidation_hit": {"type": "string"},
+            },
+        }
+        if ask_ai_json_schema is not None:
+            raw = str(
+                ask_ai_json_schema(
+                    prompt,
+                    "Portfolio risk evaluator. JSON only. No markdown.",
+                    response_json_schema=schema,
+                    mode="smart",
+                    temperature=0.0,
+                )
+                or ""
+            ).strip()
+        else:
+            raw = str(
+                ask_ai(
+                    prompt,
+                    "Portfolio risk evaluator. JSON only. No markdown.",
+                    mode="smart",
+                    json_mode=True,
+                    temperature=0.0,
+                )
+                or ""
+            ).strip()
+        obj = json.loads(raw) if raw else {}
+        if not isinstance(obj, dict):
+            return {}
+        out: dict[str, Any] = {}
+        # Keep optional fields if model returns them, but never require static categories.
+        for k, limit in {
+            "margin_impact": 320,
+            "thesis_validation": 320,
+            "risk_assessment": 320,
+            "actionable_proposal": 320,
+            "peer_contagion": 320,
+        }.items():
+            v = str(obj.get(k) or "").strip()
+            if v:
+                out[k] = v[:limit]
+        c = str(obj.get("confidence") or "").strip().lower()
+        if c:
+            out["confidence"] = c[:16]
+        st = str(obj.get("recommended_stance") or "").strip().upper()
+        if st:
+            out["recommended_stance"] = st[:12]
+        inv = str(obj.get("invalidation_hit") or "").strip().lower()
+        if inv:
+            out["invalidation_hit"] = inv[:16]
+        cards: list[dict[str, str]] = []
+        for c in list(obj.get("insight_cards") or []):
+            if not isinstance(c, dict):
+                continue
+            lb = str(c.get("label") or "").strip()[:42]
+            tx = str(c.get("text") or "").strip()[:320]
+            if lb and tx:
+                cards.append({"label": lb, "text": tx})
+        if cards:
+            out["insight_cards"] = cards[:3]
+        if out:
+            return out
+    except Exception:
+        pass
+    return {}
+
+
+def _is_non_event_signal(signal_text: str, ticker: str) -> bool:
+    s = str(signal_text or "").strip().lower()
+    tk = _safe_ticker(ticker).lower()
+    if not s:
+        return True
+    noise_markers = (
+        "not in this week calendar",
+        "new signal detected",
+        "terminal: daily brief",
+    )
+    if any(m in s for m in noise_markers):
+        return True
+    sym_matches = re.findall(r"\b[A-Z]{2,6}\b", str(signal_text or ""))
+    sym_set = {x.strip().lower() for x in sym_matches if _safe_ticker(x)}
+    if tk and sym_set and tk not in sym_set:
+        has_link = any(
+            k in s for k in ("supplier", "customer", "compete", "peer", "sector", "macro", "rate", "fx", "yield", "contagion")
+        )
+        if not has_link:
+            return True
+    return False
+
+
+def _verify_reasoning_relevance(
+    *,
+    ticker: str,
+    signal_text: str,
+    thesis_text: str,
+    style_text: str,
+    reasoning: dict[str, Any],
+) -> dict[str, str]:
+    if ask_ai is None:
+        return {"quality_verdict": "unknown", "quality_reason": ""}
+    tk = _safe_ticker(ticker)
+    if not tk:
+        return {"quality_verdict": "reject", "quality_reason": "bad_ticker"}
+    prompt = (
+        "You are a strict QA verifier for equity signal reasoning.\n"
+        "Decide if this reasoning is materially relevant and evidence-grounded, without invented user rules.\n"
+        'Return STRICT JSON only with keys: {"accept":true|false,"reason":"..."}\n\n'
+        f"ticker: {tk}\n"
+        f"signal_text: {str(signal_text or '')[:2200]}\n"
+        f"thesis_text: {str(thesis_text or '')[:1800]}\n"
+        f"style_text: {str(style_text or '')[:1800]}\n"
+        f"reasoning_json: {json.dumps(dict(reasoning or {}), ensure_ascii=True)[:3500]}"
+    )
+    try:
+        raw = str(
+            ask_ai(
+                prompt,
+                "Strict reasoning verifier. JSON only.",
+                mode="fast",
+                json_mode=True,
+                temperature=1.0,
+            )
+            or ""
+        ).strip()
+        obj = json.loads(raw) if raw else {}
+        ok = bool(obj.get("accept"))
+        rs = str(obj.get("reason") or "").strip()[:220]
+        return {"quality_verdict": "accept" if ok else "reject", "quality_reason": rs}
+    except Exception:
+        return {"quality_verdict": "unknown", "quality_reason": ""}
+
+
+def _passes_reasoning_quality(reasoning: dict[str, Any], insights: list[dict[str, str]], citations: list[dict[str, str]]) -> bool:
+    rz = dict(reasoning or {})
+    ins = [x for x in list(insights or []) if isinstance(x, dict)]
+    cits = [x for x in list(citations or []) if isinstance(x, dict)]
+    if len(ins) < 2:
+        return False
+    labels: set[str] = set()
+    strong = 0
+    for card in ins[:3]:
+        lb = str(card.get("label") or "").strip()
+        tx = str(card.get("text") or "").strip()
+        if not lb or not tx:
+            continue
+        labels.add(lb.lower())
+        if len(tx) >= 40:
+            strong += 1
+    if len(labels) < 2 or strong < 2:
+        return False
+    if not cits:
+        return False
+    qv = str(rz.get("quality_verdict") or "").strip().lower()
+    if qv and qv != "accept":
+        return False
+    return True
+
+
+def _insights_from_reasoning(reasoning: dict[str, Any], bullets: list[str]) -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = []
+    for c in list((reasoning or {}).get("insight_cards") or []):
+        if not isinstance(c, dict):
+            continue
+        lb = str(c.get("label") or "").strip()[:42]
+        tx = str(c.get("text") or "").strip()[:320]
+        if lb and tx:
+            cards.append({"label": lb, "text": tx})
+    if cards:
+        return cards[:3]
+    return []
+
+
+def _normalize_reasoning_payload(raw_reasoning: dict[str, Any] | None) -> dict[str, Any]:
+    rr = dict(raw_reasoning or {})
+    out: dict[str, Any] = {}
+    # keep only known safe scalar keys
+    for k, lim in {
+        "margin_impact": 320,
+        "thesis_validation": 320,
+        "risk_assessment": 320,
+        "actionable_proposal": 320,
+        "peer_contagion": 320,
+        "confidence": 16,
+        "recommended_stance": 12,
+        "invalidation_hit": 16,
+        "quality_verdict": 16,
+        "quality_reason": 220,
+    }.items():
+        v = rr.get(k)
+        if v is None:
+            continue
+        txt = str(v).strip()
+        if txt:
+            out[k] = txt[:lim]
+    cards: list[dict[str, str]] = []
+    for c in list(rr.get("insight_cards") or []):
+        if not isinstance(c, dict):
+            continue
+        lb = str(c.get("label") or "").strip()[:42]
+        tx = str(c.get("text") or "").strip()[:320]
+        if lb and tx:
+            cards.append({"label": lb, "text": tx})
+    if cards:
+        out["insight_cards"] = cards[:3]
+    return out
+
+
 def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
     ensure_proactive_schema()
     run_uid = start_agent_run(
@@ -1015,11 +1833,26 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
     )
     portfolio, watchlist, bluechips = _read_scope_tickers()
     scope = set(portfolio) | set(watchlist) | set(bluechips)
-    con = _conn_core()
+    con = _conn_core() if core_backend() != "postgres" else None
     created = 0
     try:
-        rf_max = int((con.execute("SELECT COALESCE(MAX(id),0) AS m FROM report_facts").fetchone() or {"m": 0})["m"] or 0)
-        fl_max = int((con.execute("SELECT COALESCE(MAX(id),0) AS m FROM filings").fetchone() or {"m": 0})["m"] or 0)
+        if core_backend() == "postgres":
+            con_pg = pg_connect()
+            if con_pg is None:
+                rf_max = 0
+                fl_max = 0
+            else:
+                try:
+                    cur = con_pg.cursor()
+                    cur.execute("SELECT COALESCE(MAX(id),0) FROM report_facts_core")
+                    rf_max = int((cur.fetchone() or [0])[0] or 0)
+                    cur.execute("SELECT COALESCE(MAX(id),0) FROM filings_core")
+                    fl_max = int((cur.fetchone() or [0])[0] or 0)
+                finally:
+                    con_pg.close()
+        else:
+            rf_max = 0
+            fl_max = 0
         rf_last = int(_state_get(con, "last_report_fact_id", "0") or "0")
         fl_last = int(_state_get(con, "last_filing_id", "0") or "0")
         if not force and rf_max <= rf_last and fl_max <= fl_last:
@@ -1036,14 +1869,29 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
         # Phase 3/4: build action proposals from new report facts for in-scope companies.
         throttled = False
         seen_rf_tickers: set[str] = set()
-        rf_rows = con.execute(
-            """SELECT id, ticker, fact_text, report_name, importance
-               FROM report_facts
-               WHERE id > ?
-               ORDER BY id DESC
-               LIMIT 240""",
-            (rf_last,),
-        ).fetchall()
+        if core_backend() == "postgres":
+            con_pg = pg_connect()
+            if con_pg is None:
+                rf_rows = []
+            else:
+                try:
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        """SELECT id, ticker, fact_text, report_name, importance
+                           FROM report_facts_core
+                           WHERE id > %s
+                           ORDER BY id DESC
+                           LIMIT 240""",
+                        (rf_last,),
+                    )
+                    rf_rows = [
+                        {"id": int(r[0] or 0), "ticker": str(r[1] or ""), "fact_text": str(r[2] or ""), "report_name": str(r[3] or ""), "importance": int(r[4] or 0)}
+                        for r in (cur.fetchall() or [])
+                    ]
+                finally:
+                    con_pg.close()
+        else:
+            rf_rows = []
         for r in rf_rows:
             if created >= MAX_PROPOSALS_PER_MONITOR_RUN:
                 throttled = True
@@ -1056,7 +1904,7 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
             imp = int(r["importance"] or 0)
             if imp < 7:
                 continue
-            if _has_open_proposal(con, "thesis_trigger", tk) or _has_recent_proposal(con, "thesis_trigger", tk):
+            if _has_open_proposal("thesis_trigger", tk) or _has_recent_proposal("thesis_trigger", tk):
                 continue
             text = str(r["fact_text"] or "").strip()
             rep = str(r["report_name"] or "").strip()
@@ -1065,7 +1913,6 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
             bullets = _build_thesis_bullets(tk, text, "THESIS_TRIGGER")
             cites = [{"label": "Report Evidence", "url": f"/reports/view?name={rep}"}] if rep else [{"label": "Reports", "url": "/reports"}]
             if _proposal_upsert(
-                con,
                 source_event_key=src_key,
                 kind="thesis_trigger",
                 ticker=tk,
@@ -1081,14 +1928,29 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                 seen_rf_tickers.add(tk)
 
         # New filing monitor (event-driven).
-        filing_rows = con.execute(
-            """SELECT id, ticker, form, date, accession
-               FROM filings
-               WHERE id > ?
-               ORDER BY id DESC
-               LIMIT 200""",
-            (fl_last,),
-        ).fetchall()
+        if core_backend() == "postgres":
+            con_pg = pg_connect()
+            if con_pg is None:
+                filing_rows = []
+            else:
+                try:
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        """SELECT id, ticker, form, date, accession
+                           FROM filings_core
+                           WHERE id > %s
+                           ORDER BY id DESC
+                           LIMIT 200""",
+                        (fl_last,),
+                    )
+                    filing_rows = [
+                        {"id": int(r[0] or 0), "ticker": str(r[1] or ""), "form": str(r[2] or ""), "date": str(r[3] or ""), "accession": str(r[4] or "")}
+                        for r in (cur.fetchall() or [])
+                    ]
+                finally:
+                    con_pg.close()
+        else:
+            filing_rows = []
         for r in filing_rows:
             if created >= MAX_PROPOSALS_PER_MONITOR_RUN:
                 throttled = True
@@ -1099,7 +1961,7 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
             fm = str(r["form"] or "").upper()
             if fm not in {"8-K", "6-K", "10-Q", "10-K", "20-F", "40-F"}:
                 continue
-            if _has_open_proposal(con, "filing_update", tk) or _has_recent_proposal(con, "filing_update", tk):
+            if _has_open_proposal("filing_update", tk) or _has_recent_proposal("filing_update", tk):
                 continue
             src_key = f"fil:{int(r['id'] or 0)}:{tk}:{fm}"
             title = f"{tk} filed {fm} — review update"
@@ -1110,7 +1972,6 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
             ]
             cites = [{"label": "SEC Filings", "url": f"/company_file/sec?t={tk}"}]
             if _proposal_upsert(
-                con,
                 source_event_key=src_key,
                 kind="filing_update",
                 ticker=tk,
@@ -1125,71 +1986,140 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                 created += 1
 
         # Contagion / peer alert from ontology relationships.
-        con_onyx = _conn_onyx()
-        try:
-            for tk in sorted(scope):
-                if created >= MAX_PROPOSALS_PER_MONITOR_RUN:
-                    throttled = True
-                    break
-                src = con_onyx.execute(
-                    "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name = ? LIMIT 1",
-                    (tk.lower(),),
-                ).fetchone()
-                if not src:
-                    continue
-                rels = con_onyx.execute(
-                    """SELECT e2.name AS peer_name, r.relationship_type
-                       FROM relationships r
-                       JOIN entities e2 ON e2.id = r.target_id
-                       WHERE r.source_id = ? AND e2.type='COMPANY'
-                       ORDER BY r.id DESC
-                       LIMIT 40""",
-                    (int(src["id"]),),
-                ).fetchall()
-                for rr in rels:
+        if core_backend() == "postgres":
+            con_pg_graph = pg_connect()
+            if con_pg_graph is not None:
+                try:
+                    cur = con_pg_graph.cursor()
+                    for tk in sorted(scope):
+                        if created >= MAX_PROPOSALS_PER_MONITOR_RUN:
+                            throttled = True
+                            break
+                        cur.execute(
+                            "SELECT id FROM entities_core WHERE type='COMPANY' AND normalized_name=%s LIMIT 1",
+                            (tk.lower(),),
+                        )
+                        src = cur.fetchone()
+                        if not src:
+                            continue
+                        src_id = int((src or [0])[0] or 0)
+                        if src_id <= 0:
+                            continue
+                        cur.execute(
+                            """SELECT e2.name AS peer_name, r.relationship_type
+                               FROM relationships_core r
+                               JOIN entities_core e2 ON e2.id = r.target_id
+                               WHERE r.source_id = %s AND e2.type='COMPANY'
+                               ORDER BY r.id DESC
+                               LIMIT 40""",
+                            (src_id,),
+                        )
+                        rels = cur.fetchall() or []
+                        for rr in rels:
+                            if created >= MAX_PROPOSALS_PER_MONITOR_RUN:
+                                throttled = True
+                                break
+                            peer = _safe_ticker(str(rr[0] or ""))
+                            if not peer:
+                                continue
+                            d = _to_float(day_map.get(peer), 0.0)
+                            if abs(d) < 10.0:
+                                continue
+                            if _has_open_proposal("contagion_peer_alert", tk) or _has_recent_proposal("contagion_peer_alert", tk):
+                                continue
+                            rel_type = str(rr[1] or "LINKED")
+                            src_key = f"contagion:{tk}:{peer}:{dt.date.today().isoformat()}"
+                            title = f"Contagion Alert: {peer} {d:+.2f}% may impact {tk}"
+                            bullets = [
+                                f"Linked peer {peer} moved {d:+.2f}% today.",
+                                f"Relationship in ontology: {rel_type}.",
+                                f"Re-check {tk} thesis assumptions and cross-company risk transmission.",
+                            ]
+                            cites = [
+                                {"label": "Company Workspace", "url": f"/company_file?t={tk}"},
+                                {"label": f"{peer} Workspace", "url": f"/company_file?t={peer}"},
+                            ]
+                            if _proposal_upsert(
+                                source_event_key=src_key,
+                                kind="contagion_peer_alert",
+                                ticker=tk,
+                                title=title,
+                                bullets=bullets,
+                                citations=cites,
+                                confidence=0.88,
+                                priority_score=9.2 + min(3.0, abs(d) / 10.0),
+                                execute_route=f"/company_file?t={tk}",
+                                execute_payload={"ticker": tk, "peer": peer, "day_pct": d},
+                            ):
+                                created += 1
+                finally:
+                    con_pg_graph.close()
+        else:
+            con_onyx = _conn_onyx()
+            try:
+                for tk in sorted(scope):
                     if created >= MAX_PROPOSALS_PER_MONITOR_RUN:
                         throttled = True
                         break
-                    peer = _safe_ticker(str(rr["peer_name"] or ""))
-                    if not peer:
+                    src = con_onyx.execute(
+                        "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name = ? LIMIT 1",
+                        (tk.lower(),),
+                    ).fetchone()
+                    if not src:
                         continue
-                    d = _to_float(day_map.get(peer), 0.0)
-                    if abs(d) < 10.0:
-                        continue
-                    if _has_open_proposal(con, "contagion_peer_alert", tk) or _has_recent_proposal(con, "contagion_peer_alert", tk):
-                        continue
-                    rel_type = str(rr["relationship_type"] or "LINKED")
-                    src_key = f"contagion:{tk}:{peer}:{dt.date.today().isoformat()}"
-                    title = f"Contagion Alert: {peer} {d:+.2f}% may impact {tk}"
-                    bullets = [
-                        f"Linked peer {peer} moved {d:+.2f}% today.",
-                        f"Relationship in ontology: {rel_type}.",
-                        f"Re-check {tk} thesis assumptions and cross-company risk transmission.",
-                    ]
-                    cites = [
-                        {"label": "Company Workspace", "url": f"/company_file?t={tk}"},
-                        {"label": f"{peer} Workspace", "url": f"/company_file?t={peer}"},
-                    ]
-                    if _proposal_upsert(
-                        con,
-                        source_event_key=src_key,
-                        kind="contagion_peer_alert",
-                        ticker=tk,
-                        title=title,
-                        bullets=bullets,
-                        citations=cites,
-                        confidence=0.88,
-                        priority_score=9.2 + min(3.0, abs(d) / 10.0),
-                        execute_route=f"/company_file?t={tk}",
-                        execute_payload={"ticker": tk, "peer": peer, "day_pct": d},
-                    ):
-                        created += 1
-        finally:
-            con_onyx.close()
+                    rels = con_onyx.execute(
+                        """SELECT e2.name AS peer_name, r.relationship_type
+                           FROM relationships r
+                           JOIN entities e2 ON e2.id = r.target_id
+                           WHERE r.source_id = ? AND e2.type='COMPANY'
+                           ORDER BY r.id DESC
+                           LIMIT 40""",
+                        (int(src["id"]),),
+                    ).fetchall()
+                    for rr in rels:
+                        if created >= MAX_PROPOSALS_PER_MONITOR_RUN:
+                            throttled = True
+                            break
+                        peer = _safe_ticker(str(rr["peer_name"] or ""))
+                        if not peer:
+                            continue
+                        d = _to_float(day_map.get(peer), 0.0)
+                        if abs(d) < 10.0:
+                            continue
+                        if _has_open_proposal("contagion_peer_alert", tk) or _has_recent_proposal("contagion_peer_alert", tk):
+                            continue
+                        rel_type = str(rr["relationship_type"] or "LINKED")
+                        src_key = f"contagion:{tk}:{peer}:{dt.date.today().isoformat()}"
+                        title = f"Contagion Alert: {peer} {d:+.2f}% may impact {tk}"
+                        bullets = [
+                            f"Linked peer {peer} moved {d:+.2f}% today.",
+                            f"Relationship in ontology: {rel_type}.",
+                            f"Re-check {tk} thesis assumptions and cross-company risk transmission.",
+                        ]
+                        cites = [
+                            {"label": "Company Workspace", "url": f"/company_file?t={tk}"},
+                            {"label": f"{peer} Workspace", "url": f"/company_file?t={peer}"},
+                        ]
+                        if _proposal_upsert(
+                            source_event_key=src_key,
+                            kind="contagion_peer_alert",
+                            ticker=tk,
+                            title=title,
+                            bullets=bullets,
+                            citations=cites,
+                            confidence=0.88,
+                            priority_score=9.2 + min(3.0, abs(d) / 10.0),
+                            execute_route=f"/company_file?t={tk}",
+                            execute_payload={"ticker": tk, "peer": peer, "day_pct": d},
+                        ):
+                            created += 1
+            finally:
+                con_onyx.close()
 
         _state_set(con, "last_report_fact_id", str(rf_max))
         _state_set(con, "last_filing_id", str(fl_max))
-        con.commit()
+        if con is not None:
+            con.commit()
         out = {
             "ok": True,
             "ran": True,
@@ -1206,73 +2136,80 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
         finish_agent_run(run_uid, "failed", output_payload={"ok": False}, error_text=str(exc))
         raise
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str, Any]]:
     ensure_proactive_schema()
+    if core_backend() != "postgres":
+        return []
     st = str(status or "open").strip().lower()
     blue_chip_set: set[str] = set()
-    bc = _conn_core()
-    try:
-        bc.execute(
-            """CREATE TABLE IF NOT EXISTS blue_chips (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL UNIQUE,
-                added_at TEXT NOT NULL,
-                reason TEXT NOT NULL DEFAULT ''
-            )"""
-        )
-        for r in bc.execute("SELECT ticker FROM blue_chips").fetchall():
-            tk = _safe_ticker(str(r["ticker"] or ""))
-            if tk:
-                blue_chip_set.add(tk)
-    except Exception:
-        blue_chip_set = set()
-    finally:
-        bc.close()
+    con_pg = pg_connect()
+    if con_pg is not None:
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT to_regclass('public.blue_chips_core')")
+            if (cur.fetchone() or [None])[0]:
+                cur.execute("SELECT ticker FROM blue_chips_core")
+                for r in cur.fetchall() or []:
+                    tk = _safe_ticker(str(r[0] or ""))
+                    if tk:
+                        blue_chip_set.add(tk)
+        except Exception:
+            blue_chip_set = set()
+        finally:
+            con_pg.close()
 
-    con = _conn_core()
-    try:
-        name_map = _company_name_map()
-        day_map = _day_pct_map()
-        weight_map = _portfolio_weight_map()
-        rows = con.execute(
-            """SELECT id, created_at, updated_at, status, kind, ticker, title, thesis_json, citations_json,
-                      confidence, priority_score, execute_route, source_event_key
-               FROM action_proposals
-               WHERE status = ?
-               ORDER BY priority_score DESC, id DESC
-               LIMIT ?""",
-            (st, max(1, min(250, int(limit or 8) * 12))),
-        ).fetchall()
-        raw_items: list[dict[str, Any]] = []
-        for r in rows:
-            try:
-                bullets = list(json.loads(str(r["thesis_json"] or "[]")))
-            except Exception:
-                bullets = []
-            try:
-                cites = list(json.loads(str(r["citations_json"] or "[]")))
-            except Exception:
-                cites = []
-            raw_items.append(
-                {
-                    "id": int(r["id"] or 0),
-                    "created_at": str(r["created_at"] or ""),
-                    "status": str(r["status"] or ""),
-                    "kind": str(r["kind"] or ""),
-                    "ticker": str(r["ticker"] or ""),
-                    "title": str(r["title"] or ""),
-                    "bullets": [str(x) for x in bullets[:3]],
-                    "citations": cites[:6],
-                    "confidence": float(r["confidence"] or 0.0),
-                    "priority_score": float(r["priority_score"] or 0.0),
-                    "execute_route": str(r["execute_route"] or ""),
-                    "source_event_key": str(r["source_event_key"] or ""),
-                    "is_blue_chip": str(r["ticker"] or "").strip().upper() in blue_chip_set,
-                }
-            )
+    name_map = _company_name_map()
+    weight_map = _portfolio_weight_map()
+    lim = max(1, min(250, int(limit or 8) * 12))
+    rows = list_action_proposals_pg(status=st, limit=lim)
+    raw_items: list[dict[str, Any]] = []
+    def _to_list(val: Any) -> list[Any]:
+        if isinstance(val, list):
+            return list(val)
+        if isinstance(val, tuple):
+            return list(val)
+        if isinstance(val, dict):
+            return [dict(val)]
+        try:
+            return list(json.loads(str(val or "[]")))
+        except Exception:
+            return []
+    def _to_dict(val: Any) -> dict[str, Any]:
+        if isinstance(val, dict):
+            return dict(val)
+        try:
+            obj = json.loads(str(val or "{}"))
+            return dict(obj) if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+    for r in rows:
+        bullets = _to_list(r["thesis_json"])
+        cites = _to_list(r["citations_json"])
+        insights = _to_list(r["insights_json"])
+        reasoning = _to_dict(r["reasoning_json"])
+        raw_items.append(
+            {
+                "id": int(r["id"] or 0),
+                "created_at": str(r["created_at"] or ""),
+                "status": str(r["status"] or ""),
+                "kind": str(r["kind"] or ""),
+                "ticker": str(r["ticker"] or ""),
+                "title": str(r["title"] or ""),
+                "bullets": [str(x) for x in bullets[:3]],
+                "citations": cites[:6],
+                "insights": [x for x in insights[:3] if isinstance(x, dict)],
+                "reasoning": reasoning if isinstance(reasoning, dict) else {},
+                "confidence": float(r["confidence"] or 0.0),
+                "priority_score": float(r["priority_score"] or 0.0),
+                "execute_route": str(r["execute_route"] or ""),
+                "source_event_key": str(r["source_event_key"] or ""),
+                "is_blue_chip": str(r["ticker"] or "").strip().upper() in blue_chip_set,
+            }
+        )
 
         # Consolidate alert fatigue: merge multiple open signals per ticker into one card.
         grouped: dict[str, list[dict[str, Any]]] = {}
@@ -1281,10 +2218,23 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
             key = tk or f"__id_{int(p.get('id') or 0)}"
             grouped.setdefault(key, []).append(p)
 
+        def _reasoning_strength(item: dict[str, Any]) -> tuple[int, int]:
+            rz = dict(item.get("reasoning") or {})
+            score = 0
+            for k in ("margin_impact", "thesis_validation", "risk_assessment", "actionable_proposal", "peer_contagion"):
+                if str(rz.get(k) or "").strip():
+                    score += 2
+            if str(rz.get("recommended_stance") or "").strip():
+                score += 1
+            ins_count = len([x for x in list(item.get("insights") or []) if isinstance(x, dict)])
+            score += min(ins_count, 3)
+            return (score, int(item.get("id") or 0))
+
         out: list[dict[str, Any]] = []
         for key, items in grouped.items():
             items_sorted = sorted(items, key=lambda x: float(x.get("priority_score") or 0.0), reverse=True)
             base = dict(items_sorted[0])
+            best_reasoning_item = max(items_sorted, key=_reasoning_strength)
             tk = _safe_ticker(str(base.get("ticker") or ""))
             if tk and len(items_sorted) > 1:
                 kinds = [str(x.get("kind") or "").strip() for x in items_sorted if str(x.get("kind") or "").strip()]
@@ -1323,6 +2273,40 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
                 if merged_cites:
                     base["citations"] = merged_cites[:8]
                 base["kind_details"] = ", ".join(uniq_kinds[:4])
+            # Preserve card ordering by priority, but always render the richest AI reasoning.
+            merged_reasoning: dict[str, Any] = {}
+            reasoning_items = sorted(items_sorted, key=_reasoning_strength, reverse=True)
+            for ritem in reasoning_items:
+                rz = dict(ritem.get("reasoning") or {})
+                if not isinstance(rz, dict):
+                    continue
+                for k, v in rz.items():
+                    if k in merged_reasoning and str(merged_reasoning.get(k) or "").strip():
+                        continue
+                    if isinstance(v, list):
+                        if v:
+                            merged_reasoning[k] = v
+                    elif str(v or "").strip():
+                        merged_reasoning[k] = v
+            merged_insights: list[dict[str, str]] = []
+            seen_pairs: set[str] = set()
+            for iitem in reasoning_items:
+                for ins in list(iitem.get("insights") or []):
+                    if not isinstance(ins, dict):
+                        continue
+                    lb = str(ins.get("label") or "").strip()
+                    tx = str(ins.get("text") or "").strip()
+                    key_ins = f"{lb}|{tx}"
+                    if not lb or not tx or key_ins in seen_pairs:
+                        continue
+                    seen_pairs.add(key_ins)
+                    merged_insights.append({"label": lb[:42], "text": tx[:320]})
+                    if len(merged_insights) >= 3:
+                        break
+                if len(merged_insights) >= 3:
+                    break
+            base["reasoning"] = merged_reasoning or dict(best_reasoning_item.get("reasoning") or {})
+            base["insights"] = merged_insights[:3]
             out.append(base)
 
         for p in out:
@@ -1336,12 +2320,11 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
             tk = _safe_ticker(str(p.get("ticker") or ""))
             nm = str(name_map.get(tk) or "").strip()
             w = float(weight_map.get(tk, 0.0) or 0.0)
-            dabs = abs(float(day_map.get(tk, 0.0) or 0.0))
-            direction = _infer_direction(str(p.get("kind") or ""), str(p.get("title") or ""), list(p.get("bullets") or []))
+            rz0 = dict(p.get("reasoning") or {})
+            direction = str(rz0.get("recommended_stance") or "").strip().upper() or "REVIEW"
             p["direction"] = direction
             p["company_name"] = nm
             p["portfolio_weight_pct"] = w
-            p["max_add_pct"] = _suggest_max_add_pct(w, dabs)
             # Headline clarity.
             base_title = str(p.get("title") or "").strip()
             if tk:
@@ -1349,15 +2332,13 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
                 if bt.upper().startswith((tk + " ·").upper()):
                     bt = bt[len(tk) + 2 :].strip()
                 p["title"] = f"{tk} · {direction} · {bt}"
-            # Add cross-read vector for linked-company alerts.
-            if kind in {"contagion_peer_alert", "macro_signal", "macro_context"}:
-                vec = _build_cross_read_vector(tk, list(p.get("bullets") or []))
-                if vec:
-                    bs = list(p.get("bullets") or [])
-                    if vec not in bs:
-                        p["bullets"] = [vec] + bs[:2]
             bs = [str(x or "").strip() for x in list(p.get("bullets") or []) if str(x or "").strip()]
-            p["insights"] = _extract_company_insights(bs)
+            rz = dict(p.get("reasoning") or {})
+            ins = [x for x in list(p.get("insights") or []) if isinstance(x, dict)]
+            if not ins:
+                ins = _insights_from_reasoning(rz, bs)
+            p["insights"] = ins[:3]
+            p["reasoning"] = rz
             p["bullets"] = bs[:3]
 
             if is_macro_signal:
@@ -1369,10 +2350,18 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
             else:
                 p["badge_variant"] = ""
                 p["badge_label"] = ""
-        out_sorted = sorted(out, key=lambda x: float(x.get("priority_score") or 0.0), reverse=True)
-        return out_sorted[: max(1, min(50, int(limit or 8)))]
-    finally:
-        con.close()
+        # Only surface high-quality, reasoning-backed cards.
+        out = [
+            p for p in out
+            if _reasoning_strength(p)[0] > 0
+            and _passes_reasoning_quality(
+                dict(p.get("reasoning") or {}),
+                [x for x in list(p.get("insights") or []) if isinstance(x, dict)],
+                [x for x in list(p.get("citations") or []) if isinstance(x, dict)],
+            )
+        ]
+    out_sorted = sorted(out, key=lambda x: float(x.get("priority_score") or 0.0), reverse=True)
+    return out_sorted[: max(1, min(50, int(limit or 8)))]
 
 
 def dismiss_action_proposal(proposal_id: int, reason: str = "") -> bool:
@@ -1380,22 +2369,46 @@ def dismiss_action_proposal(proposal_id: int, reason: str = "") -> bool:
     pid = int(proposal_id or 0)
     if pid <= 0:
         return False
-    ok = {"done": False}
-
-    def _write() -> None:
-        con = _conn_core()
+    if core_backend() != "postgres":
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        now = dt.datetime.now().isoformat()
+        cur.execute(
+            "UPDATE action_proposals_core SET status='dismissed', updated_at=%s, dismissed_reason=%s WHERE id=%s",
+            (now, str(reason or "")[:240], pid),
+        )
+        changed = int(cur.rowcount or 0) > 0
+        con.commit()
+        if changed:
+            row = _pg_get_action_proposal_row(pid)
+            if row:
+                mirror_action_proposal(
+                    {
+                        "source_event_key": str(row.get("source_event_key") or ""),
+                        "proposal_id": int(row.get("id") or 0),
+                        "ticker": str(row.get("ticker") or ""),
+                        "kind": str(row.get("kind") or ""),
+                        "status": str(row.get("status") or "open"),
+                        "title": str(row.get("title") or ""),
+                        "insights_json": list(row.get("insights_json") or []),
+                        "reasoning_json": dict(row.get("reasoning_json") or {}),
+                        "created_at": str(row.get("created_at") or ""),
+                        "updated_at": str(row.get("updated_at") or ""),
+                    }
+                )
+        return changed
+    except Exception:
         try:
-            con.execute(
-                "UPDATE action_proposals SET status='dismissed', updated_at=?, dismissed_reason=? WHERE id=?",
-                (dt.datetime.now().isoformat(), str(reason or "")[:240], pid),
-            )
-            ok["done"] = con.total_changes > 0
-            con.commit()
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
-    return bool(ok["done"])
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
 
 
 def reject_action_proposal(proposal_id: int, reason: str = "") -> bool:
@@ -1404,22 +2417,46 @@ def reject_action_proposal(proposal_id: int, reason: str = "") -> bool:
     if pid <= 0:
         return False
     rs = str(reason or "").strip()[:500]
-    ok = {"done": False}
-
-    def _write() -> None:
-        con = _conn_core()
+    if core_backend() != "postgres":
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        now = dt.datetime.now().isoformat()
+        cur.execute(
+            "UPDATE action_proposals_core SET status='rejected', updated_at=%s, rejection_reason=%s, rejected_at=%s WHERE id=%s",
+            (now, rs, now, pid),
+        )
+        changed = int(cur.rowcount or 0) > 0
+        con.commit()
+        if changed:
+            row = _pg_get_action_proposal_row(pid)
+            if row:
+                mirror_action_proposal(
+                    {
+                        "source_event_key": str(row.get("source_event_key") or ""),
+                        "proposal_id": int(row.get("id") or 0),
+                        "ticker": str(row.get("ticker") or ""),
+                        "kind": str(row.get("kind") or ""),
+                        "status": str(row.get("status") or "open"),
+                        "title": str(row.get("title") or ""),
+                        "insights_json": list(row.get("insights_json") or []),
+                        "reasoning_json": dict(row.get("reasoning_json") or {}),
+                        "created_at": str(row.get("created_at") or ""),
+                        "updated_at": str(row.get("updated_at") or ""),
+                    }
+                )
+        return changed
+    except Exception:
         try:
-            con.execute(
-                "UPDATE action_proposals SET status='rejected', updated_at=?, rejection_reason=?, rejected_at=? WHERE id=?",
-                (dt.datetime.now().isoformat(), rs, dt.datetime.now().isoformat(), pid),
-            )
-            ok["done"] = con.total_changes > 0
-            con.commit()
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
-    return bool(ok["done"])
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
 
 
 def _upsert_onyx_preference(preference_key: str, preference_value: str, context_reason: str, source_ref: str = "reject_feedback") -> bool:
@@ -1430,6 +2467,8 @@ def _upsert_onyx_preference(preference_key: str, preference_value: str, context_
     s = str(source_ref or "reject_feedback").strip()[:120]
     if not k or not v:
         return False
+    if core_backend() == "postgres":
+        return bool(upsert_user_preference(pref_key=k, pref_value=v, source=s))
     now = dt.datetime.now().isoformat()
     con = _conn_onyx()
     try:
@@ -1458,26 +2497,16 @@ def learn_from_rejection(proposal_id: int, reason: str = "") -> dict[str, Any]:
     rs = str(reason or "").strip()
     if pid <= 0:
         return {"ok": False, "error": "invalid_id"}
-    con = _conn_core()
-    try:
-        row = con.execute(
-            """SELECT id, ticker, kind, title, thesis_json, citations_json
-               FROM action_proposals
-               WHERE id=? LIMIT 1""",
-            (pid,),
-        ).fetchone()
-    finally:
-        con.close()
+    if core_backend() != "postgres":
+        return {"ok": False, "error": "backend_not_postgres"}
+    row = _pg_get_action_proposal_row(pid)
     if not row:
         return {"ok": False, "error": "proposal_not_found"}
 
-    ticker = _safe_ticker(str(row["ticker"] or ""))
-    kind = str(row["kind"] or "").strip()
-    title = str(row["title"] or "").strip()
-    try:
-        bullets = list(json.loads(str(row["thesis_json"] or "[]")))
-    except Exception:
-        bullets = []
+    ticker = _safe_ticker(str(row.get("ticker") or ""))
+    kind = str(row.get("kind") or "").strip()
+    title = str(row.get("title") or "").strip()
+    bullets = [str(x or "").strip() for x in list(row.get("thesis_json") or []) if str(x or "").strip()]
     evidence = " | ".join([str(x).strip() for x in bullets if str(x).strip()])[:1600]
 
     pref_key = f"reject_rule_{kind or 'proposal'}"
@@ -1509,38 +2538,72 @@ def learn_from_rejection(proposal_id: int, reason: str = "") -> dict[str, Any]:
 
 
 def _event_seed_entities(event_description: str) -> list[int]:
-    con = _conn_onyx()
     seeds: list[int] = []
     text = str(event_description or "").strip()
     low = text.lower()
-    try:
-        # 1) direct ticker entities
-        for tk in sorted(set(_extract_peer_tickers(text, ""))):
-            row = con.execute(
-                "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name=? LIMIT 1",
-                (tk.lower(),),
-            ).fetchone()
-            if row:
-                seeds.append(int(row["id"] or 0))
-        # 2) theme keyword match
-        theme_keys = [k.lower() for k in _extract_themes(text)]
-        for k in theme_keys:
-            row = con.execute(
-                "SELECT id FROM entities WHERE type='RISK_THEME' AND normalized_name=? LIMIT 1",
-                (k.lower(),),
-            ).fetchone()
-            if row:
-                seeds.append(int(row["id"] or 0))
-        # 3) free-text on risk theme names
-        rows = con.execute(
-            "SELECT id, normalized_name FROM entities WHERE type='RISK_THEME' ORDER BY id DESC LIMIT 200"
-        ).fetchall()
-        for r in rows:
-            nm = str(r["normalized_name"] or "")
-            if nm and nm.replace("_", " ") in low:
-                seeds.append(int(r["id"] or 0))
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                # 1) direct ticker entities
+                for tk in sorted(set(_extract_peer_tickers(text, ""))):
+                    cur.execute(
+                        "SELECT id FROM entities_core WHERE type='COMPANY' AND normalized_name=%s LIMIT 1",
+                        (tk.lower(),),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        seeds.append(int((row or [0])[0] or 0))
+                # 2) theme keyword match
+                theme_keys = [k.lower() for k in _extract_themes(text)]
+                for k in theme_keys:
+                    cur.execute(
+                        "SELECT id FROM entities_core WHERE type='RISK_THEME' AND normalized_name=%s LIMIT 1",
+                        (k.lower(),),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        seeds.append(int((row or [0])[0] or 0))
+                # 3) free-text on risk theme names
+                cur.execute("SELECT id, normalized_name FROM entities_core WHERE type='RISK_THEME' ORDER BY id DESC LIMIT 200")
+                rows = cur.fetchall() or []
+                for r in rows:
+                    nm = str(r[1] or "")
+                    if nm and nm.replace("_", " ") in low:
+                        seeds.append(int(r[0] or 0))
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_onyx()
+        try:
+            # 1) direct ticker entities
+            for tk in sorted(set(_extract_peer_tickers(text, ""))):
+                row = con.execute(
+                    "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name=? LIMIT 1",
+                    (tk.lower(),),
+                ).fetchone()
+                if row:
+                    seeds.append(int(row["id"] or 0))
+            # 2) theme keyword match
+            theme_keys = [k.lower() for k in _extract_themes(text)]
+            for k in theme_keys:
+                row = con.execute(
+                    "SELECT id FROM entities WHERE type='RISK_THEME' AND normalized_name=? LIMIT 1",
+                    (k.lower(),),
+                ).fetchone()
+                if row:
+                    seeds.append(int(row["id"] or 0))
+            # 3) free-text on risk theme names
+            rows = con.execute(
+                "SELECT id, normalized_name FROM entities WHERE type='RISK_THEME' ORDER BY id DESC LIMIT 200"
+            ).fetchall()
+            for r in rows:
+                nm = str(r["normalized_name"] or "")
+                if nm and nm.replace("_", " ") in low:
+                    seeds.append(int(r["id"] or 0))
+        finally:
+            con.close()
     out: list[int] = []
     seen: set[int] = set()
     for s in seeds:
@@ -1553,22 +2616,41 @@ def _event_seed_entities(event_description: str) -> list[int]:
 def _scope_company_ids() -> tuple[set[int], dict[int, str]]:
     portfolio, watchlist, bluechips = _read_scope_tickers()
     scope = sorted(set(portfolio) | set(watchlist) | set(bluechips))
-    con = _conn_onyx()
     out_ids: set[int] = set()
     id_to_ticker: dict[int, str] = {}
-    try:
-        for tk in scope:
-            row = con.execute(
-                "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name=? LIMIT 1",
-                (tk.lower(),),
-            ).fetchone()
-            if row:
-                i = int(row["id"] or 0)
-                if i > 0:
-                    out_ids.add(i)
-                    id_to_ticker[i] = tk
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                for tk in scope:
+                    cur.execute(
+                        "SELECT id FROM entities_core WHERE type='COMPANY' AND normalized_name=%s LIMIT 1",
+                        (tk.lower(),),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        i = int((row or [0])[0] or 0)
+                        if i > 0:
+                            out_ids.add(i)
+                            id_to_ticker[i] = tk
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_onyx()
+        try:
+            for tk in scope:
+                row = con.execute(
+                    "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name=? LIMIT 1",
+                    (tk.lower(),),
+                ).fetchone()
+                if row:
+                    i = int(row["id"] or 0)
+                    if i > 0:
+                        out_ids.add(i)
+                        id_to_ticker[i] = tk
+        finally:
+            con.close()
     return out_ids, id_to_ticker
 
 
@@ -1653,119 +2735,235 @@ def simulate_macro_shock(event_description: str, max_depth: int = SIM_MAX_DEPTH)
             "impacts": [],
         }
 
-    con = _conn_onyx()
     impact_scores: dict[int, float] = {}
     impact_depth: dict[int, int] = {}
     citations: set[str] = set()
-    try:
-        for seed in seeds:
-            rows = con.execute(
-                """
-                WITH RECURSIVE walk(node_id, depth, score, path) AS (
-                  SELECT ?, 0, 1.0, ',' || CAST(? AS TEXT) || ','
-                  UNION ALL
-                  SELECT
-                    CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END AS next_id,
-                    walk.depth + 1,
-                    walk.score * COALESCE(NULLIF(r.confidence_score, 0), NULLIF(r.confidence, 0), 0.65) *
-                      CASE
-                        WHEN walk.depth = 0 THEN 0.92
-                        WHEN walk.depth = 1 THEN 0.80
-                        ELSE 0.68
-                      END,
-                    walk.path || CAST((CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END) AS TEXT) || ','
-                  FROM relationships r
-                  JOIN walk ON (r.source_id = walk.node_id OR r.target_id = walk.node_id)
-                  WHERE walk.depth < ?
-                    AND walk.score > 0.03
-                    AND INSTR(
-                      walk.path,
-                      ',' || CAST((CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END) AS TEXT) || ','
-                    ) = 0
-                )
-                SELECT node_id, MIN(depth) AS min_depth, MAX(score) AS best_score
-                FROM walk
-                GROUP BY node_id
-                """,
-                (int(seed), int(seed), max(1, min(4, int(max_depth or SIM_MAX_DEPTH)))),
-            ).fetchall()
-            for r in rows:
-                node = int(r["node_id"] or 0)
-                if node not in scope_ids:
-                    continue
-                sc = float(r["best_score"] or 0.0)
-                dp = int(r["min_depth"] or 0)
-                if sc <= 0:
-                    continue
-                impact_scores[node] = max(sc, impact_scores.get(node, 0.0))
-                if node not in impact_depth:
-                    impact_depth[node] = dp
-                else:
-                    impact_depth[node] = min(impact_depth[node], dp)
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                for seed in seeds:
+                    cur.execute(
+                        """
+                        WITH RECURSIVE walk(node_id, depth, score, path) AS (
+                          SELECT %s::bigint, 0, 1.0::double precision, ',' || CAST(%s AS TEXT) || ','
+                          UNION ALL
+                          SELECT
+                            CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END AS next_id,
+                            walk.depth + 1,
+                            walk.score * COALESCE(NULLIF(r.confidence_score, 0), NULLIF(r.confidence, 0), 0.65) *
+                              CASE
+                                WHEN walk.depth = 0 THEN 0.92
+                                WHEN walk.depth = 1 THEN 0.80
+                                ELSE 0.68
+                              END,
+                            walk.path || CAST((CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END) AS TEXT) || ','
+                          FROM relationships_core r
+                          JOIN walk ON (r.source_id = walk.node_id OR r.target_id = walk.node_id)
+                          WHERE walk.depth < %s
+                            AND walk.score > 0.03
+                            AND POSITION(
+                              ',' || CAST((CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END) AS TEXT) || ','
+                              IN walk.path
+                            ) = 0
+                        )
+                        SELECT node_id, MIN(depth) AS min_depth, MAX(score) AS best_score
+                        FROM walk
+                        GROUP BY node_id
+                        """,
+                        (int(seed), int(seed), max(1, min(4, int(max_depth or SIM_MAX_DEPTH)))),
+                    )
+                    rows = cur.fetchall() or []
+                    for r in rows:
+                        node = int(r[0] or 0)
+                        if node not in scope_ids:
+                            continue
+                        sc = float(r[2] or 0.0)
+                        dp = int(r[1] or 0)
+                        if sc <= 0:
+                            continue
+                        impact_scores[node] = max(sc, impact_scores.get(node, 0.0))
+                        if node not in impact_depth:
+                            impact_depth[node] = dp
+                        else:
+                            impact_depth[node] = min(impact_depth[node], dp)
 
-        if impact_scores:
-            marks = ",".join("?" for _ in impact_scores)
-            crows = con.execute(
-                f"""SELECT DISTINCT citation_link
-                    FROM relationships
-                    WHERE source_id IN ({marks}) OR target_id IN ({marks})
-                    ORDER BY id DESC
-                    LIMIT 24""",
-                tuple(list(impact_scores.keys()) + list(impact_scores.keys())),
-            ).fetchall()
-            for r in crows:
-                u = str(r["citation_link"] or "").strip()
-                if u:
-                    citations.add(u)
-    finally:
-        con.close()
+                if impact_scores:
+                    ids = list(impact_scores.keys())
+                    cur.execute(
+                        """SELECT DISTINCT citation_link
+                           FROM relationships_core
+                           WHERE source_id = ANY(%s) OR target_id = ANY(%s)
+                           ORDER BY citation_link DESC
+                           LIMIT 24""",
+                        (ids, ids),
+                    )
+                    crows = cur.fetchall() or []
+                    for r in crows:
+                        u = str(r[0] or "").strip()
+                        if u:
+                            citations.add(u)
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_onyx()
+        try:
+            for seed in seeds:
+                rows = con.execute(
+                    """
+                    WITH RECURSIVE walk(node_id, depth, score, path) AS (
+                      SELECT ?, 0, 1.0, ',' || CAST(? AS TEXT) || ','
+                      UNION ALL
+                      SELECT
+                        CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END AS next_id,
+                        walk.depth + 1,
+                        walk.score * COALESCE(NULLIF(r.confidence_score, 0), NULLIF(r.confidence, 0), 0.65) *
+                          CASE
+                            WHEN walk.depth = 0 THEN 0.92
+                            WHEN walk.depth = 1 THEN 0.80
+                            ELSE 0.68
+                          END,
+                        walk.path || CAST((CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END) AS TEXT) || ','
+                      FROM relationships r
+                      JOIN walk ON (r.source_id = walk.node_id OR r.target_id = walk.node_id)
+                      WHERE walk.depth < ?
+                        AND walk.score > 0.03
+                        AND INSTR(
+                          walk.path,
+                          ',' || CAST((CASE WHEN r.source_id = walk.node_id THEN r.target_id ELSE r.source_id END) AS TEXT) || ','
+                        ) = 0
+                    )
+                    SELECT node_id, MIN(depth) AS min_depth, MAX(score) AS best_score
+                    FROM walk
+                    GROUP BY node_id
+                    """,
+                    (int(seed), int(seed), max(1, min(4, int(max_depth or SIM_MAX_DEPTH)))),
+                ).fetchall()
+                for r in rows:
+                    node = int(r["node_id"] or 0)
+                    if node not in scope_ids:
+                        continue
+                    sc = float(r["best_score"] or 0.0)
+                    dp = int(r["min_depth"] or 0)
+                    if sc <= 0:
+                        continue
+                    impact_scores[node] = max(sc, impact_scores.get(node, 0.0))
+                    if node not in impact_depth:
+                        impact_depth[node] = dp
+                    else:
+                        impact_depth[node] = min(impact_depth[node], dp)
+
+            if impact_scores:
+                marks = ",".join("?" for _ in impact_scores)
+                crows = con.execute(
+                    f"""SELECT DISTINCT citation_link
+                        FROM relationships
+                        WHERE source_id IN ({marks}) OR target_id IN ({marks})
+                        ORDER BY id DESC
+                        LIMIT 24""",
+                    tuple(list(impact_scores.keys()) + list(impact_scores.keys())),
+                ).fetchall()
+                for r in crows:
+                    u = str(r["citation_link"] or "").strip()
+                    if u:
+                        citations.add(u)
+        finally:
+            con.close()
 
     impacts: list[dict[str, Any]] = []
     evidence_map: dict[int, dict[str, Any]] = {}
-    con = _conn_onyx()
-    try:
-        for cid in impact_scores.keys():
-            rows = con.execute(
-                """
-                SELECT
-                  r.relationship_type,
-                  r.citation_link,
-                  r.citation_text,
-                  COALESCE(r.confidence_score, r.confidence, 0.0) AS conf,
-                  e1.id AS s_id, e1.name AS s_name, e1.type AS s_type,
-                  e2.id AS t_id, e2.name AS t_name, e2.type AS t_type
-                FROM relationships r
-                JOIN entities e1 ON e1.id = r.source_id
-                JOIN entities e2 ON e2.id = r.target_id
-                WHERE r.source_id = ? OR r.target_id = ?
-                ORDER BY conf DESC, r.id DESC
-                LIMIT 60
-                """,
-                (int(cid), int(cid)),
-            ).fetchall()
-            sample: list[str] = []
-            cites_local: list[str] = []
-            for rr in rows:
-                s_id = int(rr["s_id"] or 0)
-                t_id = int(rr["t_id"] or 0)
-                other_name = str(rr["t_name"] if s_id == cid else rr["s_name"] or "").strip()
-                other_type = str(rr["t_type"] if s_id == cid else rr["s_type"] or "").strip().upper()
-                rel = str(rr["relationship_type"] or "").strip().upper()
-                ctext = str(rr["citation_text"] or "").strip()
-                cu = str(rr["citation_link"] or "").strip()
-                if cu:
-                    cites_local.append(cu)
-                if len(sample) < 3 and (other_type in {"RISK_THEME", "COMPANY"}):
-                    why = f"{rel} -> {other_name}" if other_name else rel
-                    if ctext:
-                        why += f" ({ctext[:100]})"
-                    sample.append(why)
-            evidence_map[cid] = {
-                "why": "; ".join(sample[:3]),
-                "citations": list(dict.fromkeys([x for x in cites_local if x]))[:3],
-            }
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                for cid in impact_scores.keys():
+                    cur.execute(
+                        """
+                        SELECT
+                          r.relationship_type,
+                          r.citation_link,
+                          r.citation_text,
+                          COALESCE(r.confidence_score, r.confidence, 0.0) AS conf,
+                          e1.id AS s_id, e1.name AS s_name, e1.type AS s_type,
+                          e2.id AS t_id, e2.name AS t_name, e2.type AS t_type
+                        FROM relationships_core r
+                        JOIN entities_core e1 ON e1.id = r.source_id
+                        JOIN entities_core e2 ON e2.id = r.target_id
+                        WHERE r.source_id = %s OR r.target_id = %s
+                        ORDER BY conf DESC, r.id DESC
+                        LIMIT 60
+                        """,
+                        (int(cid), int(cid)),
+                    )
+                    rows = cur.fetchall() or []
+                    sample: list[str] = []
+                    cites_local: list[str] = []
+                    for rr in rows:
+                        s_id = int(rr[4] or 0)
+                        other_name = str(rr[7] if s_id == cid else rr[5] or "").strip()
+                        other_type = str(rr[8] if s_id == cid else rr[6] or "").strip().upper()
+                        rel = str(rr[0] or "").strip().upper()
+                        ctext = str(rr[2] or "").strip()
+                        cu = str(rr[1] or "").strip()
+                        if cu:
+                            cites_local.append(cu)
+                        if len(sample) < 3 and (other_type in {"RISK_THEME", "COMPANY"}):
+                            why = f"{rel} -> {other_name}" if other_name else rel
+                            if ctext:
+                                why += f" ({ctext[:100]})"
+                            sample.append(why)
+                    evidence_map[cid] = {
+                        "why": "; ".join(sample[:3]),
+                        "citations": list(dict.fromkeys([x for x in cites_local if x]))[:3],
+                    }
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_onyx()
+        try:
+            for cid in impact_scores.keys():
+                rows = con.execute(
+                    """
+                    SELECT
+                      r.relationship_type,
+                      r.citation_link,
+                      r.citation_text,
+                      COALESCE(r.confidence_score, r.confidence, 0.0) AS conf,
+                      e1.id AS s_id, e1.name AS s_name, e1.type AS s_type,
+                      e2.id AS t_id, e2.name AS t_name, e2.type AS t_type
+                    FROM relationships r
+                    JOIN entities e1 ON e1.id = r.source_id
+                    JOIN entities e2 ON e2.id = r.target_id
+                    WHERE r.source_id = ? OR r.target_id = ?
+                    ORDER BY conf DESC, r.id DESC
+                    LIMIT 60
+                    """,
+                    (int(cid), int(cid)),
+                ).fetchall()
+                sample: list[str] = []
+                cites_local: list[str] = []
+                for rr in rows:
+                    s_id = int(rr["s_id"] or 0)
+                    other_name = str(rr["t_name"] if s_id == cid else rr["s_name"] or "").strip()
+                    other_type = str(rr["t_type"] if s_id == cid else rr["s_type"] or "").strip().upper()
+                    rel = str(rr["relationship_type"] or "").strip().upper()
+                    ctext = str(rr["citation_text"] or "").strip()
+                    cu = str(rr["citation_link"] or "").strip()
+                    if cu:
+                        cites_local.append(cu)
+                    if len(sample) < 3 and (other_type in {"RISK_THEME", "COMPANY"}):
+                        why = f"{rel} -> {other_name}" if other_name else rel
+                        if ctext:
+                            why += f" ({ctext[:100]})"
+                        sample.append(why)
+                evidence_map[cid] = {
+                    "why": "; ".join(sample[:3]),
+                    "citations": list(dict.fromkeys([x for x in cites_local if x]))[:3],
+                }
+        finally:
+            con.close()
 
     for cid, score in sorted(impact_scores.items(), key=lambda kv: kv[1], reverse=True):
         depth = int(impact_depth.get(cid, 3))
@@ -1886,26 +3084,73 @@ def execute_action_proposal(proposal_id: int) -> dict[str, Any]:
     pid = int(proposal_id or 0)
     if pid <= 0:
         return {"ok": False, "route": "/dashboard", "error": "invalid_id"}
-    con = _conn_core()
+    if core_backend() != "postgres":
+        return {"ok": False, "route": "/dashboard", "error": "backend_not_postgres"}
+    row = _pg_get_action_proposal_row(pid)
+    if not row:
+        return {"ok": False, "route": "/dashboard", "error": "not_found"}
+    route = str(row.get("execute_route") or "/dashboard").strip()
+    payload = dict(row.get("execute_payload_json") or {})
+    tk = _safe_ticker(str(row.get("ticker") or "") or str((payload or {}).get("ticker") or ""))
+    title = str(row.get("title") or "").strip()
+    source_key = str(row.get("source_event_key") or "").strip()
+    bullets = [str(x or "").strip() for x in list(row.get("thesis_json") or []) if str(x or "").strip()]
+    reasoning = dict(row.get("reasoning_json") or {})
+    if tk:
+        actionable = str((reasoning or {}).get("actionable_proposal") or "").strip()
+        margin = str((reasoning or {}).get("margin_impact") or "").strip()
+        thesis = str((reasoning or {}).get("thesis_validation") or "").strip()
+        risk = str((reasoning or {}).get("risk_assessment") or "").strip()
+        note_lines = [
+            f"[Active Proposal] {title or 'Action Proposal'}",
+            f"Source: {source_key or '-'}",
+            f"Actionable: {actionable or '-'}",
+            f"Margins: {margin or '-'}",
+            f"Thesis: {thesis or '-'}",
+            f"Risk: {risk or '-'}",
+        ]
+        if bullets:
+            note_lines.append("Evidence:")
+            for b in bullets[:3]:
+                note_lines.append(f"- {b}")
+        _ = add_company_note(ticker=tk, note="\n".join(note_lines)[:3900], action="Proposal Execute", emotion="Focused")
+        task_text = (actionable or f"Review and validate proposal for {tk}.").strip() + " [active_proposal]"
+        _ = add_company_task(ticker=tk, task=task_text[:900], due_date="", priority="P2")
+        remind_at = (dt.datetime.now() + dt.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+        _ = add_company_reminder(ticker=tk, remind_at=remind_at, note=f"Follow up accepted proposal for {tk}. [active_proposal]"[:900])
+    con_pg = pg_connect()
+    if con_pg is None:
+        return {"ok": False, "route": "/dashboard", "error": "pg_unavailable"}
     try:
-        row = con.execute(
-            "SELECT execute_route, execute_payload_json FROM action_proposals WHERE id=? LIMIT 1",
-            (pid,),
-        ).fetchone()
-        if not row:
-            return {"ok": False, "route": "/dashboard", "error": "not_found"}
-        route = str(row["execute_route"] or "/dashboard").strip()
-        payload_raw = str(row["execute_payload_json"] or "{}")
-        try:
-            payload = json.loads(payload_raw)
-        except Exception:
-            payload = {}
-        con.execute(
-            "UPDATE action_proposals SET status='executed', updated_at=?, executed_at=? WHERE id=?",
-            (dt.datetime.now().isoformat(), dt.datetime.now().isoformat(), pid),
+        cur = con_pg.cursor()
+        now = dt.datetime.now().isoformat()
+        cur.execute(
+            "UPDATE action_proposals_core SET status='executed', updated_at=%s, executed_at=%s WHERE id=%s",
+            (now, now, pid),
         )
-        con.commit()
-        # Human-in-loop: execute means open workspace/draft context; no trade placement.
-        return {"ok": True, "route": route if route.startswith("/") else "/dashboard", "payload": payload}
+        con_pg.commit()
+        up = _pg_get_action_proposal_row(pid)
+        if up:
+            mirror_action_proposal(
+                {
+                    "source_event_key": str(up.get("source_event_key") or ""),
+                    "proposal_id": int(up.get("id") or 0),
+                    "ticker": str(up.get("ticker") or ""),
+                    "kind": str(up.get("kind") or ""),
+                    "status": str(up.get("status") or "open"),
+                    "title": str(up.get("title") or ""),
+                    "insights_json": list(up.get("insights_json") or []),
+                    "reasoning_json": dict(up.get("reasoning_json") or {}),
+                    "created_at": str(up.get("created_at") or ""),
+                    "updated_at": str(up.get("updated_at") or ""),
+                }
+            )
+        return {"ok": True, "route": route if route.startswith("/") else "/dashboard", "payload": payload, "workspace_seeded": bool(tk)}
+    except Exception:
+        try:
+            con_pg.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "route": "/dashboard", "error": "update_failed"}
     finally:
-        con.close()
+        con_pg.close()

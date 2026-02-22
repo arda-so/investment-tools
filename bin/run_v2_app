@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/solmaz/Investment_Tools"
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
-PORT="8766"
+PORT="${APP_PORT:-8766}"
+HOST="${APP_HOST:-127.0.0.1}"
 
 # Default to memory-enabled runtime for Organizer Memory Inspector.
 # You can still override these in your shell before running this script.
 export INVESTOR_DISABLE_MEMORY="${INVESTOR_DISABLE_MEMORY:-0}"
 export INVESTOR_ENABLE_MEMORY="${INVESTOR_ENABLE_MEMORY:-1}"
-export CORE_DB_BACKEND="postgres"
-export CORE_DB_GUARD_ENFORCE="1"
-export CORE_DB_STRICT_POSTGRES="1"
+export CORE_DB_BACKEND="${CORE_DB_BACKEND:-postgres}"
+export CORE_DB_GUARD_ENFORCE="${CORE_DB_GUARD_ENFORCE:-1}"
+export CORE_DB_STRICT_POSTGRES="${CORE_DB_STRICT_POSTGRES:-1}"
 export PHASE2_POSTGRES_ENABLED="${PHASE2_POSTGRES_ENABLED:-1}"
 export AI_QUEUE_BACKEND="${AI_QUEUE_BACKEND:-postgres}"
-export AI_QUEUE_STRICT_PROD="1"
+export AI_QUEUE_STRICT_PROD="${AI_QUEUE_STRICT_PROD:-1}"
 
 # Optional: stop existing process on this port (default disabled for supervised mode).
 if [ "${RUN_V2_KILL_PORT:-0}" = "1" ]; then
   lsof -ti tcp:"$PORT" | xargs kill -9 2>/dev/null || true
 fi
 
-echo "Dashboard URL: http://127.0.0.1:${PORT}/dashboard"
+echo "Dashboard URL: http://${HOST}:${PORT}/dashboard"
 
-# Preflight core-db sync to keep strict postgres guard green on startup.
-if [ "${CORE_DB_BACKEND:-sqlite}" = "postgres" ]; then
+# Optional one-time bootstrap from SQLite.
+# Disabled by default to keep startup fast and avoid hybrid behavior.
+if [ "${CORE_DB_BACKEND:-sqlite}" = "postgres" ] && [ "${CORE_DB_BOOTSTRAP_FROM_SQLITE:-0}" = "1" ]; then
   if [ -x "$ROOT/.venv-memory/bin/python" ]; then
     "$ROOT/.venv-memory/bin/python" - <<'PY' >/dev/null 2>&1 || true
 from app.services.postgres_core_service import ensure_postgres_core_schema, sync_core_from_sqlite, verify_core_counts
@@ -49,8 +51,8 @@ import sqlmodel  # noqa: F401
 import jinja2  # noqa: F401
 PY
   then
-    exec "$ROOT/.venv-memory/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$PORT"
+    exec "$ROOT/.venv-memory/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT"
   fi
   echo "Warning: .venv-memory is missing core app deps (fastapi/sqlmodel/jinja2). Falling back to system uvicorn." >&2
 fi
-exec uvicorn app.main:app --host 127.0.0.1 --port "$PORT"
+exec uvicorn app.main:app --host "$HOST" --port "$PORT"

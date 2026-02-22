@@ -88,6 +88,77 @@ def _insert_report_fact_core_pg(
 
 
 def ensure_sec_ingest_schema() -> None:
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS filing_chunk_vectors_core (
+                        id BIGINT PRIMARY KEY,
+                        filing_id BIGINT NOT NULL,
+                        ticker TEXT NOT NULL DEFAULT '',
+                        form TEXT NOT NULL DEFAULT '',
+                        chunk_index INTEGER NOT NULL,
+                        chunk_text TEXT NOT NULL,
+                        embedding_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(filing_id, chunk_index)
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_fcv_core_filing ON filing_chunk_vectors_core(filing_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_fcv_core_ticker ON filing_chunk_vectors_core(ticker)")
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS entities_core (
+                        id BIGINT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        entity_type TEXT NOT NULL DEFAULT '',
+                        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        normalized_name TEXT NOT NULL,
+                        id_text TEXT NOT NULL UNIQUE,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(type, normalized_name)
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_core_type_norm ON entities_core(type, normalized_name)")
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS relationships_core (
+                        id BIGINT PRIMARY KEY,
+                        source_id BIGINT NOT NULL,
+                        target_id BIGINT NOT NULL,
+                        relationship_type TEXT NOT NULL,
+                        citation_link TEXT NOT NULL DEFAULT '',
+                        citation_url TEXT NOT NULL DEFAULT '',
+                        citation_text TEXT NOT NULL DEFAULT '',
+                        confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                        confidence_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(source_id, target_id, relationship_type, citation_link)
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_rel_core_source ON relationships_core(source_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_rel_core_target ON relationships_core(target_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_rel_core_type ON relationships_core(relationship_type)")
+                con_pg.commit()
+            except Exception:
+                try:
+                    con_pg.rollback()
+                except Exception:
+                    pass
+            finally:
+                con_pg.close()
+        ensure_proactive_schema()
+        return
+
     def _write() -> None:
         con = _conn_core()
         try:
@@ -388,6 +459,32 @@ def _entity_id(con: sqlite3.Connection, name: str, entity_type: str) -> int:
     return int(row["id"] or 0) if row else 0
 
 
+def _entity_id_pg(con_pg: Any, name: str, entity_type: str) -> int:
+    nm = str(name or "").strip()
+    et = str(entity_type or "").strip().upper()
+    if not nm or not et:
+        return 0
+    norm = re.sub(r"\s+", " ", nm.lower())
+    id_text = f"{et.lower()}:{norm}"
+    now = dt.datetime.now().isoformat()
+    cur = con_pg.cursor()
+    cur.execute(
+        """
+        INSERT INTO entities_core(name, type, entity_type, metadata_json, normalized_name, id_text, created_at, updated_at, id)
+        VALUES(%s,%s,%s,%s::jsonb,%s,%s,%s,%s,(SELECT COALESCE(MAX(id),0)+1 FROM entities_core))
+        ON CONFLICT(type, normalized_name) DO UPDATE SET
+          name=EXCLUDED.name,
+          entity_type=EXCLUDED.entity_type,
+          id_text=EXCLUDED.id_text,
+          updated_at=EXCLUDED.updated_at
+        """,
+        (nm, et, et, "{}", norm, id_text, now, now),
+    )
+    cur.execute("SELECT id FROM entities_core WHERE type=%s AND normalized_name=%s LIMIT 1", (et, norm))
+    row = cur.fetchone()
+    return int((row or [0])[0] or 0)
+
+
 def _link(
     con: sqlite3.Connection,
     source_id: int,
@@ -403,6 +500,40 @@ def _link(
         """INSERT OR IGNORE INTO relationships
            (source_id, target_id, relationship_type, citation_link, citation_url, citation_text, confidence, confidence_score, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            int(source_id),
+            int(target_id),
+            str(rel_type or "").strip().upper(),
+            str(citation_url or "").strip(),
+            str(citation_url or "").strip(),
+            str(citation_text or "")[:500],
+            float(conf or 0.0),
+            float(conf or 0.0),
+            dt.datetime.now().isoformat(),
+        ),
+    )
+
+
+def _link_pg(
+    con_pg: Any,
+    source_id: int,
+    target_id: int,
+    rel_type: str,
+    citation_url: str,
+    citation_text: str,
+    conf: float = 0.72,
+) -> None:
+    if source_id <= 0 or target_id <= 0:
+        return
+    cur = con_pg.cursor()
+    cur.execute(
+        """
+        INSERT INTO relationships_core
+        (id, source_id, target_id, relationship_type, citation_link, citation_url, citation_text, confidence, confidence_score, created_at)
+        VALUES
+        ((SELECT COALESCE(MAX(id),0)+1 FROM relationships_core), %s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(source_id, target_id, relationship_type, citation_link) DO NOTHING
+        """,
         (
             int(source_id),
             int(target_id),
@@ -540,15 +671,18 @@ def _maybe_write_thesis_alert_note(ticker: str, filing_id: int, form: str, analy
         return
     trace = f"sec_ingest:{int(filing_id)}:{tk}"
     # de-dup on trace_id
-    con = _conn_core()
-    try:
-        row = con.execute("SELECT 1 FROM investor_notes WHERE trace_id=? LIMIT 1", (trace,)).fetchone()
-        if row:
-            return
-    except Exception:
-        pass
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute("SELECT 1 FROM investor_notes_core WHERE trace_id=%s LIMIT 1", (trace,))
+                if cur.fetchone():
+                    return
+            except Exception:
+                pass
+            finally:
+                con_pg.close()
     note = (
         f"SEC Thesis Monitor Alert [{tk} {form}]\n"
         f"Potential thesis break signal detected.\n"
@@ -625,6 +759,23 @@ def _scope_tickers() -> set[str]:
             t = _safe_ticker((s.split(",", 1)[0] if "," in s else s).strip())
             if t:
                 out.add(t)
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute("SELECT to_regclass('public.blue_chips_core')")
+                if (cur.fetchone() or [None])[0]:
+                    cur.execute("SELECT ticker FROM blue_chips_core")
+                    for r in cur.fetchall() or []:
+                        t = _safe_ticker(str(r[0] or ""))
+                        if t:
+                            out.add(t)
+            except Exception:
+                pass
+            finally:
+                con_pg.close()
+        return out
     con = _conn_core()
     try:
         con.execute(
@@ -649,6 +800,24 @@ def _scope_tickers() -> set[str]:
 
 def _blue_chip_set() -> set[str]:
     out: set[str] = set()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return out
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT to_regclass('public.blue_chips_core')")
+            if (cur.fetchone() or [None])[0]:
+                cur.execute("SELECT ticker FROM blue_chips_core")
+                for r in cur.fetchall() or []:
+                    t = _safe_ticker(str(r[0] or ""))
+                    if t:
+                        out.add(t)
+        except Exception:
+            return out
+        finally:
+            con_pg.close()
+        return out
     con = _conn_core()
     try:
         con.execute(
@@ -678,31 +847,59 @@ def _recent_competitor_mda(ticker: str, limit: int = 6) -> list[dict[str, str]]:
     tk = _safe_ticker(ticker)
     if not tk:
         return []
-    con_onyx = _conn_onyx()
     peer_tickers: list[str] = []
-    try:
-        row = con_onyx.execute(
-            "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name=? LIMIT 1",
-            (tk.lower(),),
-        ).fetchone()
-        if not row:
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
             return []
-        cid = int(row["id"] or 0)
-        rels = con_onyx.execute(
-            """SELECT e2.name
-               FROM relationships r
-               JOIN entities e2 ON e2.id = r.target_id
-               WHERE r.source_id=? AND r.relationship_type IN ('COMPETES_WITH','PEER_OF')
-               ORDER BY r.id DESC
-               LIMIT 12""",
-            (cid,),
-        ).fetchall()
-        for rr in rels:
-            t = _safe_ticker(str(rr["name"] or ""))
-            if t and t != tk:
-                peer_tickers.append(t)
-    finally:
-        con_onyx.close()
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT id FROM entities_core WHERE type='COMPANY' AND normalized_name=%s LIMIT 1", (tk.lower(),))
+            row = cur.fetchone()
+            if not row:
+                return []
+            cid = int((row or [0])[0] or 0)
+            cur.execute(
+                """SELECT e2.name
+                   FROM relationships_core r
+                   JOIN entities_core e2 ON e2.id = r.target_id
+                   WHERE r.source_id=%s AND r.relationship_type IN ('COMPETES_WITH','PEER_OF')
+                   ORDER BY r.id DESC
+                   LIMIT 12""",
+                (cid,),
+            )
+            rels = cur.fetchall() or []
+            for rr in rels:
+                t = _safe_ticker(str(rr[0] or ""))
+                if t and t != tk:
+                    peer_tickers.append(t)
+        finally:
+            con_pg.close()
+    else:
+        con_onyx = _conn_onyx()
+        try:
+            row = con_onyx.execute(
+                "SELECT id FROM entities WHERE type='COMPANY' AND normalized_name=? LIMIT 1",
+                (tk.lower(),),
+            ).fetchone()
+            if not row:
+                return []
+            cid = int(row["id"] or 0)
+            rels = con_onyx.execute(
+                """SELECT e2.name
+                   FROM relationships r
+                   JOIN entities e2 ON e2.id = r.target_id
+                   WHERE r.source_id=? AND r.relationship_type IN ('COMPETES_WITH','PEER_OF')
+                   ORDER BY r.id DESC
+                   LIMIT 12""",
+                (cid,),
+            ).fetchall()
+            for rr in rels:
+                t = _safe_ticker(str(rr["name"] or ""))
+                if t and t != tk:
+                    peer_tickers.append(t)
+        finally:
+            con_onyx.close()
     if not peer_tickers:
         return []
     if core_backend() == "postgres":
@@ -735,30 +932,7 @@ def _recent_competitor_mda(ticker: str, limit: int = 6) -> list[dict[str, str]]:
                     return []
             finally:
                 con_pg.close()
-    con_core = _conn_core()
-    out: list[dict[str, str]] = []
-    try:
-        marks = ",".join("?" for _ in peer_tickers)
-        rows = con_core.execute(
-            f"""SELECT ticker, fact_text, report_name, created_at
-                FROM report_facts
-                WHERE ticker IN ({marks}) AND source='sec_buffett'
-                ORDER BY id DESC
-                LIMIT ?""",
-            tuple(peer_tickers + [max(2, int(limit or 6))]),
-        ).fetchall()
-        for r in rows:
-            out.append(
-                {
-                    "ticker": str(r["ticker"] or "").upper(),
-                    "fact_text": str(r["fact_text"] or ""),
-                    "report_name": str(r["report_name"] or ""),
-                    "created_at": str(r["created_at"] or ""),
-                }
-            )
-    finally:
-        con_core.close()
-    return out
+    return []
 
 
 def _buffett_analyze(ticker: str, form: str, sections: dict[str, str], competitor_mda: list[dict[str, str]]) -> dict[str, Any]:
@@ -824,9 +998,9 @@ def _buffett_analyze(ticker: str, form: str, sections: dict[str, str], competito
 
 
 def _process_one_filing(
-    con_core: sqlite3.Connection,
-    con_onyx: sqlite3.Connection,
-    row: sqlite3.Row,
+    con_core: sqlite3.Connection | None,
+    con_onyx: sqlite3.Connection | None,
+    row: sqlite3.Row | dict[str, Any],
     blue_chip_tickers: set[str] | None = None,
 ) -> dict[str, int]:
     filing_id = int(row["id"] or 0)
@@ -850,27 +1024,64 @@ def _process_one_filing(
     rel_rows = 0
     cite = f"/company_file/sec?t={ticker}&form={form}" if form else f"/company_file/sec?t={ticker}"
 
-    for idx, ch in enumerate(chunks):
-        emb = _hash_embedding(ch, dims=48)
-        meta = {"ticker": ticker, "form": form, "path": fpath, "filing_id": filing_id}
-        con_core.execute(
-            """INSERT OR REPLACE INTO filing_chunk_vectors
-               (filing_id, ticker, form, chunk_index, chunk_text, embedding_json, meta_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                filing_id,
-                ticker,
-                form,
-                int(idx),
-                ch,
-                json.dumps(emb, ensure_ascii=True),
-                json.dumps(meta, ensure_ascii=True),
-                now,
-            ),
-        )
-        chunk_rows += 1
+    con_pg_graph = None
+    if core_backend() == "postgres":
+        con_pg_graph = pg_connect()
+        if con_pg_graph is not None:
+            try:
+                cur = con_pg_graph.cursor()
+                for idx, ch in enumerate(chunks):
+                    emb = _hash_embedding(ch, dims=48)
+                    meta = {"ticker": ticker, "form": form, "path": fpath, "filing_id": filing_id}
+                    cur.execute(
+                        """
+                        INSERT INTO filing_chunk_vectors_core
+                        (id, filing_id, ticker, form, chunk_index, chunk_text, embedding_json, meta_json, created_at)
+                        VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM filing_chunk_vectors_core), %s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s)
+                        ON CONFLICT(filing_id, chunk_index) DO UPDATE SET
+                          ticker=EXCLUDED.ticker, form=EXCLUDED.form, chunk_text=EXCLUDED.chunk_text,
+                          embedding_json=EXCLUDED.embedding_json, meta_json=EXCLUDED.meta_json, created_at=EXCLUDED.created_at
+                        """,
+                        (
+                            filing_id,
+                            ticker,
+                            form,
+                            int(idx),
+                            ch,
+                            json.dumps(emb, ensure_ascii=True),
+                            json.dumps(meta, ensure_ascii=True),
+                            now,
+                        ),
+                    )
+                    chunk_rows += 1
+            except Exception:
+                pass
+    else:
+        if con_core is not None:
+            for idx, ch in enumerate(chunks):
+                emb = _hash_embedding(ch, dims=48)
+                meta = {"ticker": ticker, "form": form, "path": fpath, "filing_id": filing_id}
+                con_core.execute(
+                    """INSERT OR REPLACE INTO filing_chunk_vectors
+                       (filing_id, ticker, form, chunk_index, chunk_text, embedding_json, meta_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        filing_id,
+                        ticker,
+                        form,
+                        int(idx),
+                        ch,
+                        json.dumps(emb, ensure_ascii=True),
+                        json.dumps(meta, ensure_ascii=True),
+                        now,
+                    ),
+                )
+                chunk_rows += 1
 
-    company_id = _entity_id(con_onyx, ticker, "COMPANY")
+    if core_backend() == "postgres":
+        company_id = _entity_id_pg(con_pg_graph, ticker, "COMPANY") if con_pg_graph is not None else 0
+    else:
+        company_id = _entity_id(con_onyx, ticker, "COMPANY") if con_onyx is not None else 0
     if company_id:
         entity_rows += 1
     focus_text = target_blob[:12000]
@@ -908,10 +1119,18 @@ def _process_one_filing(
         conf_rc = float(rc.get("confidence") or 0.7)
         ev = str(rc.get("evidence") or "")[:360]
         etype = "RISK_THEME" if rel_type == "EXPOSED_TO" else "COMPANY"
-        tid = _entity_id(con_onyx, target, etype)
+        if core_backend() == "postgres":
+            tid = _entity_id_pg(con_pg_graph, target, etype) if con_pg_graph is not None else 0
+        else:
+            tid = _entity_id(con_onyx, target, etype) if con_onyx is not None else 0
         if tid:
             entity_rows += 1
-            _link(con_onyx, company_id, tid, rel_type, cite, ev, conf=conf_rc)
+            if core_backend() == "postgres":
+                if con_pg_graph is not None:
+                    _link_pg(con_pg_graph, company_id, tid, rel_type, cite, ev, conf=conf_rc)
+            else:
+                if con_onyx is not None:
+                    _link(con_onyx, company_id, tid, rel_type, cite, ev, conf=conf_rc)
             rel_rows += 1
 
     competitor_mda = _recent_competitor_mda(ticker=ticker, limit=6)
@@ -933,23 +1152,6 @@ def _process_one_filing(
             continue
         fact = f"[{label}] {b[:1600]}"
         h = hashlib.sha256(f"{ticker}|{form}|{filing_id}|{label}|{fact}".encode("utf-8", errors="ignore")).hexdigest()
-        con_core.execute(
-            """INSERT OR IGNORE INTO report_facts
-               (report_name, report_kind, report_modified, fact_date, ticker, fact_text, importance, source, fact_hash, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                f"SEC:{ticker}:{form}:{filing_id}",
-                "sec_filing",
-                "",
-                dt.date.today().isoformat(),
-                ticker,
-                fact,
-                int(imp),
-                "sec_buffett",
-                h,
-                now,
-            ),
-            )
         _insert_report_fact_core_pg(
             report_name=f"SEC:{ticker}:{form}:{filing_id}",
             report_kind="sec_filing",
@@ -973,16 +1175,40 @@ def _process_one_filing(
 
     if ticker in set(blue_chip_tickers or set()):
         macro_node_name = f"MACRO:{ticker}:{dt.date.today().isoformat()}"
-        macro_id = _entity_id(con_onyx, macro_node_name, "MACRO_NODE")
-        _link(
-            con_onyx,
-            company_id,
-            macro_id,
-            "SIGNALS_MACRO",
-            cite,
-            f"{cap[:140]} | {mar[:140]} | {rev[:140]} | {red[:140]}",
-            conf=0.86,
-        )
+        if core_backend() == "postgres":
+            macro_id = _entity_id_pg(con_pg_graph, macro_node_name, "MACRO_NODE") if con_pg_graph is not None else 0
+            if con_pg_graph is not None and macro_id > 0:
+                _link_pg(
+                    con_pg_graph,
+                    company_id,
+                    macro_id,
+                    "SIGNALS_MACRO",
+                    cite,
+                    f"{cap[:140]} | {mar[:140]} | {rev[:140]} | {red[:140]}",
+                    conf=0.86,
+                )
+        else:
+            macro_id = _entity_id(con_onyx, macro_node_name, "MACRO_NODE") if con_onyx is not None else 0
+            if con_onyx is not None and macro_id > 0:
+                _link(
+                    con_onyx,
+                    company_id,
+                    macro_id,
+                    "SIGNALS_MACRO",
+                    cite,
+                    f"{cap[:140]} | {mar[:140]} | {rev[:140]} | {red[:140]}",
+                    conf=0.86,
+                )
+    if con_pg_graph is not None:
+        try:
+            con_pg_graph.commit()
+        except Exception:
+            try:
+                con_pg_graph.rollback()
+            except Exception:
+                pass
+        finally:
+            con_pg_graph.close()
     return {"chunks": chunk_rows, "entities": entity_rows, "relationships": rel_rows}
 
 
@@ -994,8 +1220,8 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
 
     scope = _scope_tickers()
     blue_chip_tickers = _blue_chip_set()
-    con_core = _conn_core()
-    con_onyx = _conn_onyx()
+    con_core = None if core_backend() == "postgres" else _conn_core()
+    con_onyx = None if core_backend() == "postgres" else _conn_onyx()
     processed = 0
     chunks = 0
     entities = 0
@@ -1025,15 +1251,7 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
                 finally:
                     con_pg.close()
         if not rows_iter:
-            marks = ",".join("?" for _ in ids)
-            rows = con_core.execute(
-                f"""SELECT id, ticker, form, path
-                    FROM filings
-                    WHERE id IN ({marks})
-                    ORDER BY id ASC""",
-                tuple(ids),
-            ).fetchall()
-            rows_iter = [dict(r) for r in rows]
+            rows_iter = []
 
         for r in rows_iter:
             tk = _safe_ticker(str(r["ticker"] or ""))
@@ -1044,11 +1262,15 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
             chunks += int(st.get("chunks") or 0)
             entities += int(st.get("entities") or 0)
             rels += int(st.get("relationships") or 0)
-        con_core.commit()
-        con_onyx.commit()
+        if con_core is not None:
+            con_core.commit()
+        if con_onyx is not None:
+            con_onyx.commit()
     finally:
-        con_core.close()
-        con_onyx.close()
+        if con_core is not None:
+            con_core.close()
+        if con_onyx is not None:
+            con_onyx.close()
 
     monitor = run_event_driven_monitor(force=True)
     return {
