@@ -1,0 +1,53 @@
+{% macro omnibox_styles() -%}
+.omnibox-wrap {
+  margin: 0 0 12px 0;
+  border: 1px solid #dbe4ee;
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px 12px;
+  box-shadow: 0 2px 8px rgba(20,42,66,.04);
+}
+.omnibox {
+  width: 100%;
+  height: 46px;
+  border: 1px solid #cfdceb;
+  border-radius: 999px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2f46;
+  background: #f8fbff;
+  box-sizing: border-box;
+}
+.omnibox:focus {
+  outline: none;
+  border-color: #86a6ca;
+  box-shadow: 0 0 0 3px rgba(134,166,202,.16);
+  background: #fff;
+}
+{%- endmacro %}
+
+{% macro omnibox_form(form_id, action, hx_target, hx_swap, input_id, placeholder, hidden_fields={}) -%}
+<form
+  id="{{ form_id }}"
+  class="omnibox-wrap"
+  method="post"
+  action="{{ action }}"
+  hx-post="{{ action }}"
+  hx-target="{{ hx_target }}"
+  hx-swap="{{ hx_swap }}"
+  onsubmit="var i=document.getElementById('{{ input_id }}'); if(i){ i.value=''; }"
+>
+  {% for k, v in hidden_fields.items() %}
+  <input type="hidden" name="{{ k }}" value="{{ v }}">
+  {% endfor %}
+  <input
+    class="omnibox"
+    type="text"
+    name="entry"
+    id="{{ input_id }}"
+    autocomplete="off"
+    placeholder="{{ placeholder }}"
+  >
+</form>
+{%- endmacro %}
