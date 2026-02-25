@@ -2,6 +2,25 @@
 
 Use this file as your execution script. Fill the `TODO` values once, then run in order.
 
+## Fast Path (Recommended)
+
+```bash
+# 1) Bootstrap runtime IAM service account (one-time)
+PROJECT_ID="TODO_YOUR_GCP_PROJECT_ID" REGION="europe-west1" ./bin/cloud_bootstrap_iam
+
+# 2) Deploy app + worker in one command
+PROJECT_ID="TODO_YOUR_GCP_PROJECT_ID" REGION="europe-west1" DB_INSTANCE="investor-os-pg" \
+SERVICE_ACCOUNT="investor-tools-runtime@TODO_YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com" \
+INCLUDE_GEMINI_SECRET=1 ./bin/deploy_cloud_run.sh
+```
+
+Rollback:
+```bash
+ROLLBACK_TAG="<previous_image_tag>" PROJECT_ID="TODO_YOUR_GCP_PROJECT_ID" REGION="europe-west1" \
+SERVICE_ACCOUNT="investor-tools-runtime@TODO_YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com" \
+./bin/rollback_cloud_run.sh
+```
+
 ## 1) Set Variables (edit once)
 
 ```bash
@@ -164,4 +183,3 @@ Monitor:
 - worker heartbeat
 - DB connectivity
 - integrity report (`tools/integrity_financial_data.py`) at least 2x/day
-

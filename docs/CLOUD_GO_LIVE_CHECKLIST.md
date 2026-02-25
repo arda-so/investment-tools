@@ -79,6 +79,19 @@ cd ~/Investment_Tools
 cp .env.cloud.example .env
 # edit .env with real values
 ./bin/cloud_preflight
+PROJECT_ID="your-project-id" REGION="europe-west1" REPO="investor-tools" DB_INSTANCE="investor-os-pg" ./bin/cloud_preflight --gcp
+```
+
+## One-Command Deploy (Recommended)
+
+```bash
+# One-time IAM bootstrap
+PROJECT_ID="your-project-id" REGION="europe-west1" ./bin/cloud_bootstrap_iam
+
+# Deploy app + worker
+PROJECT_ID="your-project-id" REGION="europe-west1" DB_INSTANCE="investor-os-pg" \
+SERVICE_ACCOUNT="investor-tools-runtime@your-project-id.iam.gserviceaccount.com" \
+INCLUDE_GEMINI_SECRET=1 ./bin/deploy_cloud_run.sh
 ```
 
 ## Cloud Runbook (Minimal)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/solmaz/Investment_Tools"
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
 export CORE_DB_BACKEND="postgres"
 export CORE_DB_GUARD_ENFORCE="1"

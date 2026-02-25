@@ -17,6 +17,32 @@ echo "== Cloud Preflight =="
 need_cmd curl
 need_cmd python3
 
+MODE="${1:-local}"
+if [ "$MODE" != "local" ] && [ "$MODE" != "--gcp" ]; then
+  fail "usage: ./bin/cloud_preflight [local|--gcp]"
+fi
+
+if [ "$MODE" = "--gcp" ]; then
+  need_cmd gcloud
+  PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+  REGION="${REGION:-europe-west1}"
+  REPO="${REPO:-investor-tools}"
+  DB_INSTANCE="${DB_INSTANCE:-investor-os-pg}"
+
+  [ -n "${PROJECT_ID:-}" ] && [ "$PROJECT_ID" != "(unset)" ] || fail "PROJECT_ID is empty (set PROJECT_ID or gcloud config set project)"
+  gcloud artifacts repositories describe "$REPO" --location="$REGION" --project="$PROJECT_ID" >/dev/null || fail "artifact repo missing: $REPO in $REGION"
+  gcloud sql instances describe "$DB_INSTANCE" --project="$PROJECT_ID" >/dev/null || fail "cloud sql instance missing: $DB_INSTANCE"
+  gcloud secrets describe POSTGRES_DSN --project="$PROJECT_ID" >/dev/null || fail "secret missing: POSTGRES_DSN"
+  if gcloud secrets describe GEMINI_API_KEY --project="$PROJECT_ID" >/dev/null 2>&1; then
+    pass "secret present: GEMINI_API_KEY"
+  else
+    warn "secret missing: GEMINI_API_KEY (AI features will be disabled)"
+  fi
+  pass "gcp resource checks passed"
+  echo "Cloud preflight completed."
+  exit 0
+fi
+
 if [ ! -f ".env" ]; then
   fail ".env not found. copy .env.cloud.example -> .env and set real values"
 fi
@@ -33,7 +59,12 @@ set +a
 
 pass "env variables present"
 
-python3 - <<'PY' || fail "python import preflight failed"
+PYBIN="python3"
+if [ -x "./.venv-memory/bin/python" ]; then
+  PYBIN="./.venv-memory/bin/python"
+fi
+
+"$PYBIN" - <<'PY' || fail "python import preflight failed"
 import importlib
 mods = ["fastapi", "uvicorn", "jinja2", "psycopg2"]
 for m in mods:

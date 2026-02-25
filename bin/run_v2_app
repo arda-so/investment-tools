@@ -3,8 +3,16 @@ set -euo pipefail
 
 ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
-PORT="${APP_PORT:-8766}"
-HOST="${APP_HOST:-127.0.0.1}"
+if [ -n "${PORT:-}" ]; then
+  PORT="$PORT"
+else
+  PORT="${APP_PORT:-8766}"
+fi
+if [ "${APP_ENV:-}" = "cloud" ] || [ "${APP_ENV:-}" = "production" ]; then
+  HOST="${APP_HOST:-0.0.0.0}"
+else
+  HOST="${APP_HOST:-127.0.0.1}"
+fi
 
 # Default to memory-enabled runtime for Organizer Memory Inspector.
 # You can still override these in your shell before running this script.

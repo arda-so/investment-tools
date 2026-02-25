@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }
+}
+
+need_cmd gcloud
+
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+REGION="${REGION:-europe-west1}"
+SA_NAME="${SA_NAME:-investor-tools-runtime}"
+SA_DISPLAY_NAME="${SA_DISPLAY_NAME:-Investor Tools Runtime}"
+SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "(unset)" ]; then
+  echo "PROJECT_ID is required. Set PROJECT_ID or run: gcloud config set project <id>" >&2
+  exit 1
+fi
+
+if ! gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud iam service-accounts create "$SA_NAME" \
+    --display-name "$SA_DISPLAY_NAME" \
+    --project "$PROJECT_ID"
+fi
+
+roles=(
+  "roles/secretmanager.secretAccessor"
+  "roles/cloudsql.client"
+  "roles/artifactregistry.reader"
+  "roles/logging.logWriter"
+  "roles/monitoring.metricWriter"
+)
+
+for role in "${roles[@]}"; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="$role" \
+    --quiet >/dev/null
+done
+
+echo "Service account ready: ${SA_EMAIL}"
+echo "Use this in deploy commands:"
+echo "--service-account=${SA_EMAIL}"
+echo "Region currently set to: ${REGION}"

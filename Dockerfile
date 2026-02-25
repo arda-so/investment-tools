@@ -17,6 +17,6 @@ COPY . /app
 
 RUN chmod +x /app/bin/run_v2_app /app/bin/run_ai_worker
 
-EXPOSE 8766
+EXPOSE 8080
 
 CMD ["/app/bin/run_v2_app"]
