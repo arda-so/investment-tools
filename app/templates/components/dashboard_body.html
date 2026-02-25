@@ -3,13 +3,39 @@
 {% set nd = m.get("nasdaq", {}) %}
 {% set dj = m.get("dow", {}) %}
 {% set r2 = m.get("russell2000", {}) %}
+{% set us2 = m.get("us2y", {}) %}
+{% set us5 = m.get("us5y", {}) %}
 {% set us10 = m.get("us10y", {}) %}
+{% set us30 = m.get("us30y", {}) %}
+{% set de10 = m.get("de10y", {}) %}
+{% set jp10 = m.get("jp10y", {}) %}
 {% set vix = m.get("vix", {}) %}
 {% set gold = m.get("gold", {}) %}
 {% set silver = m.get("silver", {}) %}
+{% set platinum = m.get("platinum", {}) %}
+{% set palladium = m.get("palladium", {}) %}
 {% set crude = m.get("crude", {}) %}
+{% set brent = m.get("brent", {}) %}
 {% set gas = m.get("natgas", {}) %}
 {% set copper = m.get("copper", {}) %}
+{% set aluminum = m.get("aluminum", {}) %}
+{% set heatoil = m.get("heatoil", {}) %}
+{% set gasoline = m.get("gasoline", {}) %}
+{% set corn = m.get("corn", {}) %}
+{% set wheat = m.get("wheat", {}) %}
+{% set soybeans = m.get("soybeans", {}) %}
+{% set ironore = m.get("ironore", {}) %}
+{% set lumber = m.get("lumber", {}) %}
+{% set cotton = m.get("cotton", {}) %}
+{% set sugar = m.get("sugar", {}) %}
+{% set coffee = m.get("coffee", {}) %}
+{% set cocoa = m.get("cocoa", {}) %}
+{% set dxy = m.get("dxy", {}) %}
+{% set eurusd = m.get("eurusd", {}) %}
+{% set eurgbp = m.get("eurgbp", {}) %}
+{% set usdjpy = m.get("usdjpy", {}) %}
+{% set gbpusd = m.get("gbpusd", {}) %}
+{% set usdcnh = m.get("usdcnh", {}) %}
 
 {% macro daypill(day) -%}
   {% set ds = (day or "-") %}
@@ -28,29 +54,6 @@
   <div class="flash">{{ message }}</div>
   {% endif %}
 
-  <section class="brief-card">
-    <h2 class="brief-title">Daily Market Briefing</h2>
-    <div class="brief-sub">Updated {{ market.as_of or freshness.news or "-" }}</div>
-  </section>
-
-  <section class="brief-card wire-card">
-    <div class="wire-head">
-      <h3 class="wire-title">Live News Wire</h3>
-      <div class="wire-upd">Updated {{ freshness.news or "-" }}</div>
-    </div>
-    <div class="wire-box">
-      {% for n in (home.news_general[:2] + home.news_company[:1]) %}
-        {% if n.link %}
-        <a class="wire-item {% if loop.first %}active{% endif %}" href="{{ n.link }}" target="_blank" rel="noopener"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</a>
-        {% else %}
-        <span class="wire-item {% if loop.first %}active{% endif %}"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</span>
-        {% endif %}
-      {% else %}
-        <span class="wire-item active"><span class="wire-tag">[News]</span>No headlines available.</span>
-      {% endfor %}
-    </div>
-  </section>
-
   <section class="idx-grid">
     {% for label, row, extra in [
       ("S&P 500", sp, ""),
@@ -58,243 +61,120 @@
       ("Dow", dj, ""),
       ("Russell 2000", r2, "idx-r2k")
     ] %}
-    <article class="idx-card {{ extra }}">
+    <article
+      class="idx-card js-index-card {{ extra }}"
+      data-index="{{ label }}"
+      data-price="{{ row.price or '-' }}"
+      data-day="{{ row.day or '-' }}"
+    >
       <div class="idx-name">{{ label }}</div>
       <div class="idx-price">{{ row.price or "-" }}</div>
-      <div class="idx-foot">{{ daypill(row.day) }}</div>
+      <div class="idx-foot">
+        {{ daypill(row.day) }}
+      </div>
     </article>
     {% endfor %}
   </section>
 
-  <section class="dashboard-main">
-    <div class="left-col">
-    <article class="brief-card">
+  <section class="top-morning">
+    <article class="brief-card morning-card">
       <div class="mini-top">
-        <h3 class="mini-head">Morning Report</h3>
+        <h3 class="morning-head">Morning Report</h3>
         <div class="mini-upd">Updated {{ report_panels.morning_updated or "-" }}</div>
       </div>
-      <div class="insight-grid">
+      <div class="morning-sub">Top points from the latest morning brief.</div>
+      <ol class="morning-list">
         {% for x in report_panels.morning_points %}
         {% set parts = x.split(':', 1) %}
-        <article class="insight-chip">
-          <div class="insight-head">{{ parts[0] if (parts|length > 1) else "Insight" }}</div>
-          <div class="insight-body">{{ parts[1] if (parts|length > 1) else x }}</div>
-        </article>
+        {% set kicker = (parts[0] if (parts|length > 1) else "Insight")|replace('**','')|replace('__','')|trim %}
+        {% set body = (parts[1] if (parts|length > 1) else x)|replace('**','')|replace('__','')|trim %}
+        <li class="morning-row">
+          <div class="morning-kicker">{{ kicker }}</div>
+          <div class="morning-text">{{ body }}</div>
+        </li>
         {% else %}
-        <article class="insight-chip"><div class="insight-body">No morning bullets found in latest report file.</div></article>
+        <li class="morning-row">
+          <div class="morning-text">No morning bullets found in latest report file.</div>
+        </li>
         {% endfor %}
-      </div>
+      </ol>
     </article>
-
-  <section class="brief-card">
-    <div class="proposal-head">
-      <h3 class="mini-head">Action Proposals</h3>
-      <div class="proposal-actions">
-        <div class="mini-upd">Human-in-loop only. Execute opens workspace draft.</div>
-        <form method="post" action="/dashboard/proposals/scan" hx-post="/dashboard/proposals/scan" hx-target="#dashboardRoot" hx-swap="outerHTML">
-          <button class="analyze-btn" type="submit">Scan Now</button>
-        </form>
-      </div>
-    </div>
-    {% for p in action_proposals %}
-    <article class="proposal-card">
-      <div class="proposal-title-row">
-        <div>
-          <div class="proposal-title-wrap">
-            <div class="proposal-title">{{ p.title }}</div>
-            {% if p.badge_label %}
-            <span class="chip-badge {% if p.badge_variant == 'blue_chip' %}bluechip{% elif p.badge_variant == 'macro_signal' %}macro{% endif %}">
-              {{ p.badge_label }}
-            </span>
-            {% endif %}
-          </div>
-          <div class="proposal-meta-chips">
-            <span class="meta-chip">{{ p.direction or "REVIEW" }}</span>
-            <span class="meta-chip">Conf {{ "%.0f"|format((p.confidence or 0) * 100) }}%</span>
-            <span class="meta-chip">{{ p.company_name or ("Ticker " ~ (p.ticker or "-")) }}</span>
-          </div>
-        </div>
-        <span class="risk-badge {% if (p.priority_score or 0) >= 9 %}red{% else %}orange{% endif %}">Priority {{ "%.1f"|format(p.priority_score or 0) }}</span>
-      </div>
-      {% if p.insights %}
-      <div class="proposal-insights">
-        {% for i in p.insights %}
-        <div class="proposal-insight">
-          <div class="proposal-insight-label">{{ i.label }}</div>
-          <div class="proposal-insight-text">{{ i.text }}</div>
-        </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-      <ul class="mini-list proposal-list">
-        {% for b in p.bullets %}
-        <li>{{ b }}</li>
-        {% else %}
-        <li>Review supporting evidence and validate thesis impact.</li>
-        {% endfor %}
-      </ul>
-      <div class="proposal-cites">
-        {% for c in p.citations %}
-          {% set u = c.get("url", "") if c else "" %}
-          {% if u %}
-          <a class="analyze-btn" href="{{ u }}">{{ c.get("label", "Source") if c else "Source" }}</a>
-          {% endif %}
-        {% endfor %}
-      </div>
-      <div class="proposal-btns">
-        <form method="post" action="/dashboard/proposals/{{ p.id }}/execute" hx-post="/dashboard/proposals/{{ p.id }}/execute" hx-target="#dashboardRoot" hx-swap="outerHTML">
-          <button class="analyze-btn" type="submit">Execute / Open Workspace</button>
-        </form>
-        <button class="analyze-btn js-reject-toggle" data-proposal-id="{{ p.id }}" type="button">Reject</button>
-      </div>
-      <div class="proposal-reject-wrap" id="reject-wrap-{{ p.id }}" hidden>
-        <form method="post" action="/dashboard/proposals/{{ p.id }}/reject" hx-post="/dashboard/proposals/{{ p.id }}/reject" hx-target="#dashboardRoot" hx-swap="outerHTML" class="proposal-reject-form">
-          <input type="text" name="reason" placeholder="Reason for reject (teaches AI)" class="proposal-reason-input">
-          <button class="analyze-btn" type="submit">Confirm Reject + Learn</button>
-        </form>
-      </div>
-    </article>
-    {% else %}
-    <div class="mini-upd">No open proposals right now.</div>
-    {% endfor %}
   </section>
-  </div>
 
-  <div class="right-col">
-    <article class="brief-card">
-      <div class="mini-top">
-        <h3 class="mini-head">52-Week & All-Time Lows</h3>
-        <div class="mini-upd">Updated {{ report_panels.appendix_updated or "-" }}</div>
+  <section class="top-live">
+    <article class="brief-card wire-card wire-live">
+      <div class="wire-head">
+        <h3 class="wire-title">Live News Wire</h3>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span class="live-badge"><span class="live-dot"></span>LIVE</span>
+          <div class="wire-upd">{% if freshness.news and freshness.news != '-' %}Updated {{ freshness.news }}{% else %}Streaming now{% endif %}</div>
+        </div>
       </div>
-      <div class="feed-scroll">
-      <table class="mini-table">
-        <thead><tr><th>Ticker</th><th>Risk</th><th>% Above Low</th><th></th></tr></thead>
-        <tbody>
-          {% for r in report_panels.lows_both %}
-          <tr>
-            <td>
-              <a class="tk-strong" href="/company_file?t={{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
-              <div style="color:#64748b; font-size:11px; margin-top:2px;">{{ r.company or r.name or '-' }}</div>
-            </td>
-            <td><span class="risk-badge red">ALL TIME LOW</span></td>
-            <td>{{ r.above_low }}</td>
-            <td><a class="analyze-btn" href="/company_file?t={{ r.ticker|urlencode }}" title="Analyze">🔍</a></td>
-          </tr>
-          {% endfor %}
-          {% for r in report_panels.lows_52 %}
-          <tr>
-            <td>
-              <a class="tk-strong" href="/company_file?t={{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
-              <div style="color:#64748b; font-size:11px; margin-top:2px;">{{ r.company or r.name or '-' }}</div>
-            </td>
-            <td><span class="risk-badge orange">YEAR LOW</span></td>
-            <td>{{ r.above_low }}</td>
-            <td><a class="analyze-btn" href="/company_file?t={{ r.ticker|urlencode }}" title="Analyze">🔍</a></td>
-          </tr>
-          {% endfor %}
-          {% if (report_panels.lows_both|length + report_panels.lows_52|length) == 0 %}
-          <tr><td colspan="4">No low-lists found in latest appendix.</td></tr>
+      <div class="wire-box">
+        {% for n in (home.news_general[:2] + home.news_company[:1]) %}
+          {% if n.link %}
+          <a class="wire-item" href="{{ n.link }}" target="_blank" rel="noopener"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</a>
+          {% else %}
+          <span class="wire-item"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</span>
           {% endif %}
-        </tbody>
-      </table>
-      </div>
-    </article>
-
-    <article class="brief-card">
-      <div class="mini-top">
-        <h3 class="mini-head">Earnings Calendar (This Week)</h3>
-        <div class="mini-upd">Updated {{ report_panels.earnings_updated or "-" }}</div>
-      </div>
-      <div class="mini-upd" style="margin-top:-4px; margin-bottom:6px;">
-        Source: {{ report_panels.earnings_result_source or "Schedule reports + reliable earnings feed" }}
-      </div>
-      <div class="mini-upd" style="margin-top:-4px; margin-bottom:8px;">
-        Rows {{ report_panels.earnings_rows_count or 0 }} · Reported {{ report_panels.earnings_reported_count or 0 }} · Upcoming {{ report_panels.earnings_upcoming_count or 0 }}
-      </div>
-      <div class="feed-scroll">
-      {% set ns = namespace(last_date='') %}
-      {% for r in report_panels.earnings_week %}
-        {% set d = r.date or '-' %}
-        {% if d != ns.last_date %}
-          {% set ns.last_date = d %}
-          <div class="earn-date">📅 {{ d }}</div>
-        {% endif %}
-        {% set tl = (r.time or '')|lower %}
-        {% if 'pre' in tl %}
-          {% set tclass = 'pre' %}
-          {% set ttxt = 'Pre' %}
-        {% elif 'after' in tl or 'post' in tl %}
-          {% set tclass = 'post' %}
-          {% set ttxt = 'Post' %}
         {% else %}
-          {% set tclass = 'day' %}
-          {% set ttxt = 'Day' %}
-        {% endif %}
-        <div class="earn-row">
-          <span class="earn-time {{ tclass }}">{{ ttxt }}</span>
-          <div class="earn-ident">
-            <a class="tk-strong" href="/company_file?t={{ r.symbol|urlencode }}">{{ r.symbol }}</a>
-            <span class="earn-company">{{ r.company or '-' }}</span>
-          </div>
-          <div class="earn-results">
-            {% if r.reported == '1' %}
-              {% if (r.verdict or '')|upper == 'BEAT' %}
-                <span class="risk-badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">BEAT {{ r.surprise_txt or '' }}</span>
-              {% else %}
-                <span class="risk-badge" style="background:#fff1f2;color:#be123c;border:1px solid #fecdd3;">MISS {{ r.surprise_txt or '' }}</span>
-              {% endif %}
-              <span class="risk-badge" title="EPS actual vs estimate" style="background:#f8fafc;color:#0f172a;border:1px solid #e2e8f0;">EPS {{ r.eps_actual or '-' }} / {{ r.eps_estimate or '-' }}</span>
-            {% endif %}
-          </div>
-          <div class="earn-status">
-            <span class="status-dot {% if r.reported == '1' %}reported{% else %}upcoming{% endif %}" title="{% if r.reported == '1' %}Reported{% else %}Upcoming{% endif %}"></span>
-            {% if r.reported == '1' %}
-              <span class="risk-badge" style="background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe;">Reported</span>
-              {% if (r.confidence or '') == 'verified' %}
-                <span class="risk-badge" title="{{ r.verify_source or '' }} {{ r.verify_form or '' }} {{ r.verify_date or '' }}" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;">Verified</span>
-              {% else %}
-                <span class="risk-badge" title="Waiting for SEC confirmation" style="background:#f8fafc;color:#64748b;border:1px solid #cbd5e1;">Preliminary</span>
-              {% endif %}
-            {% else %}
-              <span class="risk-badge" style="background:#f8fafc;color:#334155;border:1px solid #cbd5e1;">Upcoming</span>
-            {% endif %}
-          </div>
-        </div>
-      {% else %}
-        <div class="mini-upd">No upcoming earnings rows found.</div>
-      {% endfor %}
+          <span class="wire-item"><span class="wire-tag">[News]</span>No headlines available.</span>
+        {% endfor %}
       </div>
     </article>
+  </section>
 
-    <article class="brief-card">
+  <section class="top-macro">
+    <article class="brief-card flat-card macro-panel">
       <h4 class="macro-head">Rates & Risk</h4>
-      <div class="risk-row">
-        <div>
-          <div class="risk-name">US 10Y</div>
-          <div class="risk-price">{{ us10.price or "-" }}</div>
+      <div class="macro-list">
+        {% for label, row in [
+          ("US 2Y", us2),
+          ("US 5Y", us5),
+          ("US 10Y", us10),
+          ("US 30Y", us30),
+          ("German 10Y", de10),
+          ("Japan 10Y", jp10),
+          ("VIX", vix)
+        ] %}
+        <div class="macro-item">
+          <div>
+            <div class="macro-k">{{ label }}</div>
+            <div class="macro-v">{{ row.price or "-" }}</div>
+          </div>
+          <div>{{ daypill(row.day) }}</div>
         </div>
-        <div>{{ daypill(us10.day) }}</div>
-      </div>
-      <div class="risk-row">
-        <div>
-          <div class="risk-name">VIX</div>
-          <div class="risk-price">{{ vix.price or "-" }}</div>
-        </div>
-        <div>{{ daypill(vix.day) }}</div>
+        {% endfor %}
       </div>
     </article>
 
-    <article class="brief-card">
+    <article class="brief-card flat-card macro-panel">
       <h4 class="macro-head">Commodities</h4>
       <div class="cmd-grid">
         {% for label, row in [
+          ("Crude Oil", crude),
+          ("Brent Oil", brent),
+          ("Nat Gas", gas),
+          ("Heating Oil", heatoil),
+          ("Gasoline", gasoline),
+          ("Lumber", lumber),
           ("Gold", gold),
           ("Silver", silver),
-          ("Crude Oil", crude),
-          ("Nat Gas", gas),
-          ("Copper", copper)
+          ("Platinum", platinum),
+          ("Palladium", palladium),
+          ("Copper", copper),
+          ("Aluminum", aluminum),
+          ("Iron Ore", ironore),
+          ("Cotton", cotton),
+          ("Sugar", sugar),
+          ("Coffee", coffee),
+          ("Cocoa", cocoa),
+          ("Wheat", wheat),
+          ("Corn", corn),
+          ("Soybeans", soybeans)
         ] %}
         {% set ds = row.day or "-" %}
+        {% if row.price and row.price != "-" %}
         <div class="cmd-item">
           <div>
             <div class="cmd-k">{{ label }}</div>
@@ -311,167 +191,391 @@
             </svg>
           </div>
         </div>
+        {% endif %}
         {% endfor %}
       </div>
     </article>
-  </div>
+
+    <article class="brief-card flat-card macro-panel">
+      <h4 class="macro-head">Currencies</h4>
+      <div class="macro-list">
+      {% for label, row in [
+        ("US Dollar Index", dxy),
+        ("EUR/USD", eurusd),
+        ("EUR/GBP", eurgbp),
+        ("USD/JPY", usdjpy),
+        ("GBP/USD", gbpusd),
+        ("USD/CNH", usdcnh)
+      ] %}
+      <div class="macro-item">
+        <div>
+          <div class="macro-k">{{ label }}</div>
+          <div class="macro-v">{{ row.price or "-" }}</div>
+        </div>
+        <div>{{ daypill(row.day) }}</div>
+      </div>
+      {% endfor %}
+      </div>
+    </article>
   </section>
 
-  <section class="agent-grid">
+  <section class="top-focus">
     <article class="brief-card">
       <div class="mini-top">
-        <h3 class="mini-head">Autonomous Runs</h3>
-        <div class="mini-upd">Background agent activity</div>
+        <h3 class="mini-head">Earnings Calendar (This Week)</h3>
+        <div class="mini-upd">Updated {{ report_panels.earnings_updated or "-" }}</div>
       </div>
-      {% for r in agent_runs[:6] %}
-      <div class="agent-row">
-        <div>
-          <div><strong>{{ r.agent_name or "-" }}</strong> · {{ r.trigger_type or "-" }}</div>
-          <div class="mini-upd">{{ r.started_at or "-" }}</div>
-        </div>
-        <div style="text-align:right;">
-          <span class="agent-tag {% if (r.status or '') == 'ok' %}ok{% elif (r.status or '') == 'failed' %}failed{% elif (r.status or '') == 'skipped' %}skipped{% endif %}">{{ (r.status or '-').upper() }}</span>
-          <div class="mini-upd">{{ "%.0f"|format(r.duration_ms or 0) }}ms</div>
-        </div>
+      <div class="mini-upd">
+        Source: {{ report_panels.earnings_result_source or "Schedule reports + reliable earnings feed" }}
       </div>
-      {% else %}
-      <div class="mini-upd">No autonomous runs yet.</div>
-      {% endfor %}
+      <div class="mini-upd earn-meta">
+        Rows {{ report_panels.earnings_rows_count or 0 }} · Reported {{ report_panels.earnings_reported_count or 0 }} · Upcoming {{ report_panels.earnings_upcoming_count or 0 }}
+      </div>
+      <div class="earn-filters">
+        <button class="earn-filter-btn is-active" type="button" data-earn-filter="all">All</button>
+        <button class="earn-filter-btn" type="button" data-earn-filter="reported">Reported</button>
+        <button class="earn-filter-btn" type="button" data-earn-filter="upcoming">Upcoming</button>
+        <button class="earn-filter-btn" type="button" data-earn-filter="beat">Beat</button>
+        <button class="earn-filter-btn" type="button" data-earn-filter="miss">Miss</button>
+      </div>
+      <div class="feed-scroll earnings-feed">
+        {% set ns = namespace(last_date='') %}
+        {% for r in report_panels.earnings_week %}
+          {% set d = r.date or '-' %}
+          {% if d != ns.last_date %}
+            {% set ns.last_date = d %}
+            <div class="earn-date">📅 {{ d }}</div>
+          {% endif %}
+          {% set tl = (r.time or '')|lower %}
+          {% if 'pre' in tl %}
+            {% set tclass = 'pre' %}
+            {% set ttxt = 'Pre' %}
+          {% elif 'after' in tl or 'post' in tl %}
+            {% set tclass = 'post' %}
+            {% set ttxt = 'Post' %}
+          {% else %}
+            {% set tclass = 'day' %}
+            {% set ttxt = 'Day' %}
+          {% endif %}
+          {% set rep = 'reported' if r.reported == '1' else 'upcoming' %}
+          {% set v = (r.verdict or '')|upper %}
+          {% set verdict_key = 'beat' if v == 'BEAT' else ('miss' if r.reported == '1' else '-') %}
+          <div
+            class="earn-row js-earn-row"
+            data-symbol="{{ r.symbol or '-' }}"
+            data-company="{{ r.company or '-' }}"
+            data-reported="{{ 'Reported' if r.reported == '1' else 'Upcoming' }}"
+            data-eps-actual="{{ r.eps_actual or '-' }}"
+            data-eps-estimate="{{ r.eps_estimate or '-' }}"
+            data-surprise="{{ r.surprise_txt or '-' }}"
+            data-verdict="{{ (r.verdict or '-')|upper }}"
+            data-confidence="{{ r.confidence or '-' }}"
+            data-kind="{{ rep }}"
+            data-result="{{ verdict_key }}"
+          >
+            <span class="earn-time {{ tclass }}">{{ ttxt }}</span>
+            <div class="earn-ident">
+              <a class="tk-strong" href="/company_file?t={{ r.symbol|urlencode }}">{{ r.symbol }}</a>
+              <span class="earn-company">{{ r.company or r.name or '-' }}</span>
+            </div>
+            <div class="earn-results">
+              {% if r.reported == '1' %}
+                {% if (r.verdict or '')|upper == 'BEAT' %}
+                  <span class="risk-badge beat">BEAT {{ r.surprise_txt or '' }}</span>
+                {% else %}
+                  <span class="risk-badge miss">MISS {{ r.surprise_txt or '' }}</span>
+                {% endif %}
+                <span class="risk-badge eps" title="EPS actual vs estimate">EPS {{ r.eps_actual or '-' }} / {{ r.eps_estimate or '-' }}</span>
+              {% endif %}
+            </div>
+            <div class="earn-status">
+              <span class="status-dot {% if r.reported == '1' %}reported{% else %}upcoming{% endif %}" title="{% if r.reported == '1' %}Reported{% else %}Upcoming{% endif %}"></span>
+              {% if r.reported == '1' %}
+                <span class="risk-badge reported">Reported</span>
+                {% if (r.confidence or '') == 'verified' %}
+                  <span class="risk-badge verified" title="{{ r.verify_source or '' }} {{ r.verify_form or '' }} {{ r.verify_date or '' }}">Verified</span>
+                {% else %}
+                  <span class="risk-badge preliminary" title="Waiting for SEC confirmation">Preliminary</span>
+                {% endif %}
+              {% else %}
+                <span class="risk-badge upcoming">Upcoming</span>
+              {% endif %}
+            </div>
+          </div>
+        {% else %}
+          <div class="mini-upd">No upcoming earnings rows found.</div>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
+  <section class="dashboard-main">
+    <div class="dash-main">
+      <article class="brief-card">
+      <div class="mini-top">
+        <h3 class="mini-head">52-Week & All-Time Lows</h3>
+        <div class="mini-upd">Updated {{ report_panels.appendix_updated or "-" }}</div>
+      </div>
+      <div class="feed-scroll lows-feed">
+      <table class="mini-table">
+        <thead><tr><th>Ticker</th><th>Risk</th><th>% Above Low</th><th></th></tr></thead>
+        <tbody>
+          {% for r in report_panels.lows_both %}
+          <tr>
+            <td>
+              <a class="tk-strong" href="/company_file?t={{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
+              <div class="company-sub">{{ r.company or r.name or '-' }}</div>
+            </td>
+            <td><span class="risk-badge red">ALL TIME LOW</span></td>
+            <td>{{ r.above_low }}</td>
+            <td><a class="analyze-btn" href="/company_file?t={{ r.ticker|urlencode }}" title="Analyze">🔍</a></td>
+          </tr>
+          {% endfor %}
+          {% for r in report_panels.lows_52 %}
+          <tr>
+            <td>
+              <a class="tk-strong" href="/company_file?t={{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
+              <div class="company-sub">{{ r.company or r.name or '-' }}</div>
+            </td>
+            <td><span class="risk-badge orange">YEAR LOW</span></td>
+            <td>{{ r.above_low }}</td>
+            <td><a class="analyze-btn" href="/company_file?t={{ r.ticker|urlencode }}" title="Analyze">🔍</a></td>
+          </tr>
+          {% endfor %}
+          {% if (report_panels.lows_both|length + report_panels.lows_52|length) == 0 %}
+          <tr><td colspan="4">No low-lists found in latest appendix.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+      </div>
     </article>
 
-    <article class="brief-card">
-      <div class="mini-top">
-        <h3 class="mini-head">Reflexion Policy</h3>
-        <div class="mini-upd">Self-learning safety rules</div>
-      </div>
-      {% if active_reflexion_policy and active_reflexion_policy.version_tag %}
-      <div class="policy-box">
-        <div><strong>Active Version:</strong> {{ active_reflexion_policy.version_tag }}</div>
-        <div class="mini-upd">Created {{ active_reflexion_policy.created_at or "-" }}</div>
-      </div>
-      {% else %}
-      <div class="mini-upd">No active reflexion policy version yet.</div>
-      {% endif %}
-      {% for n in (reflexions.notes if reflexions and reflexions.notes else [])[:3] %}
-      <div class="agent-row">
-        <div>
-          <div><strong>{{ n.rule_key or "-" }}</strong></div>
-          <div class="mini-upd">{{ n.event_type or "-" }} · {{ n.created_at or "-" }}</div>
+      <section class="brief-card proposals-card">
+        <div class="ai-hub-head">
+          <h3 class="mini-head">AI Reports Hub</h3>
+          <form method="post" action="/dashboard/proposals/scan" hx-post="/dashboard/proposals/scan" hx-target="#dashboardRoot" hx-swap="outerHTML">
+            <button class="analyze-btn" type="submit">Refresh Insights</button>
+          </form>
         </div>
-      </div>
-      {% else %}
-      <div class="mini-upd">No reflexion notes yet.</div>
-      {% endfor %}
-    </article>
+        <div class="ai-tabs">
+          <button type="button" class="ai-tab-btn is-active" data-ai-tab="insights">Open Insights</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="earnings">Earnings</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="thesis">Thesis Alerts</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="cascade">Cascades</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="accuracy">AI Accuracy</button>
+        </div>
 
-    <article class="brief-card">
-      <div class="mini-top">
-        <h3 class="mini-head">Risk Veto</h3>
-        <div class="mini-upd">Pre-mutation brake log</div>
-      </div>
-      {% if risk_veto_config %}
-      <div class="policy-box" style="margin-bottom:8px;">
-        <div class="mini-upd">
-          Enabled={{ "yes" if risk_veto_config.enabled else "no" }}
-          · MinConf={{ "%.2f"|format(risk_veto_config.min_confidence_for_mutation or 0) }}
-          · MaxAdd={{ "%.2f"|format(risk_veto_config.max_single_add_pct or 0) }}%
-          · MaxPos={{ "%.2f"|format(risk_veto_config.max_position_weight_pct or 0) }}%
+        <div class="ai-panel" data-ai-panel="insights">
+          {% for p in action_proposals %}
+          <article class="proposal-card">
+            <div class="proposal-title-row">
+              <div>
+                <div class="proposal-title-wrap">
+                  <div class="proposal-title">{{ p.title }}</div>
+                  {% if p.badge_label %}
+                  <span class="chip-badge {% if p.badge_variant == 'blue_chip' %}bluechip{% elif p.badge_variant == 'macro_signal' %}macro{% endif %}">
+                    {{ p.badge_label }}
+                  </span>
+                  {% endif %}
+                </div>
+                <div class="proposal-meta-chips">
+                  <span class="meta-chip">{{ p.direction or "REVIEW" }}</span>
+                  <span class="meta-chip">Conf {{ "%.0f"|format((p.confidence or 0) * 100) }}%</span>
+                  <span class="meta-chip">{{ p.company_name or ("Ticker " ~ (p.ticker or "-")) }}</span>
+                </div>
+              </div>
+              <span class="risk-badge {% if (p.priority_score or 0) >= 9 %}red{% else %}orange{% endif %}">Priority {{ "%.1f"|format(p.priority_score or 0) }}</span>
+            </div>
+            {% if p.insights %}
+            <div class="proposal-insights">
+              {% for i in p.insights %}
+              <div class="proposal-insight">
+                <div class="proposal-insight-label">{{ i.label }}</div>
+                <div class="proposal-insight-text">{{ i.text }}</div>
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}
+            <ul class="mini-list proposal-list">
+              {% for b in p.bullets %}
+              <li>{{ b }}</li>
+              {% else %}
+              <li>Review supporting evidence and validate thesis impact.</li>
+              {% endfor %}
+            </ul>
+            <div class="proposal-cites">
+              {% for c in p.citations %}
+                {% set u = c.get("url", "") if c else "" %}
+                {% if u %}
+                <a class="analyze-btn" href="{{ u }}">{{ c.get("label", "Source") if c else "Source" }}</a>
+                {% endif %}
+              {% endfor %}
+            </div>
+            <div class="proposal-btns">
+              <form method="post" action="/dashboard/proposals/{{ p.id }}/execute" hx-post="/dashboard/proposals/{{ p.id }}/execute" hx-target="#dashboardRoot" hx-swap="outerHTML">
+                <button class="analyze-btn" type="submit">Open Analysis</button>
+              </form>
+              <button class="analyze-btn js-reject-toggle" data-proposal-id="{{ p.id }}" type="button">Dismiss</button>
+            </div>
+            <div class="proposal-reject-wrap" id="reject-wrap-{{ p.id }}" hidden>
+              <form method="post" action="/dashboard/proposals/{{ p.id }}/reject" hx-post="/dashboard/proposals/{{ p.id }}/reject" hx-target="#dashboardRoot" hx-swap="outerHTML" class="proposal-reject-form">
+                <input type="text" name="reason" placeholder="Optional feedback to improve insight quality" class="proposal-reason-input">
+                <button class="analyze-btn" type="submit">Confirm Dismiss</button>
+              </form>
+            </div>
+          </article>
+          {% else %}
+          <div class="proposal-empty">◌ No open insights</div>
+          {% endfor %}
         </div>
-        <form class="risk-form" method="post" action="/dashboard/risk-veto/config" hx-post="/dashboard/risk-veto/config" hx-target="#dashboardRoot" hx-swap="outerHTML">
-          <div class="rf-row">
-            <label>Enabled</label>
-            <select name="enabled">
-              <option value="1" {% if risk_veto_config.enabled %}selected{% endif %}>On</option>
-              <option value="0" {% if not risk_veto_config.enabled %}selected{% endif %}>Off</option>
-            </select>
+
+        <div class="ai-panel" data-ai-panel="earnings" hidden>
+          {% if earnings_analyses %}
+          <div class="stack-list">
+            {% for e in earnings_analyses %}
+            <div class="stack-item">
+              <div class="stack-title-row">
+                <span class="stack-ticker">{{ e.ticker }}</span>
+                <span class="meta-chip">{{ e.form }}</span>
+                <span class="meta-chip">{{ e.fiscal_quarter or e.filing_date[:7] }}</span>
+                <span class="meta-chip {% if e.guidance_direction == 'raised' %}good{% elif e.guidance_direction == 'lowered' %}bad{% endif %}">
+                  Guidance {{ e.guidance_direction or "—" }}
+                </span>
+                <span class="meta-chip {% if e.tone == 'confident' %}good{% elif e.tone in ('cautious','defensive') %}bad{% endif %}">
+                  {{ e.tone or "—" }}
+                </span>
+              </div>
+              {% if e.summary %}<div class="stack-text">{{ e.summary }}</div>{% endif %}
+              {% if e.key_signals %}
+              <ul class="stack-bullets">
+                {% for s in e.key_signals %}<li>{{ s }}</li>{% endfor %}
+              </ul>
+              {% endif %}
+              {% if e.deflected_topics and e.deflected_topics != 'N/A' %}
+              <div class="stack-text muted">Deflected: {{ e.deflected_topics }}</div>
+              {% endif %}
+            </div>
+            {% endfor %}
           </div>
-          <div class="rf-row">
-            <label>Min Confidence</label>
-            <input type="number" step="0.01" min="0.30" max="0.95" name="min_confidence_for_mutation" value="{{ '%.2f'|format(risk_veto_config.min_confidence_for_mutation or 0.62) }}">
-          </div>
-          <div class="rf-row">
-            <label>Max Single Add %</label>
-            <input type="number" step="0.01" min="0.25" max="50" name="max_single_add_pct" value="{{ '%.2f'|format(risk_veto_config.max_single_add_pct or 5.0) }}">
-          </div>
-          <div class="rf-row">
-            <label>Max Position Weight %</label>
-            <input type="number" step="0.01" min="1" max="100" name="max_position_weight_pct" value="{{ '%.2f'|format(risk_veto_config.max_position_weight_pct or 20.0) }}">
-          </div>
-          <div class="rf-row">
-            <label>Max VaR95 %</label>
-            <input type="number" step="0.01" min="0.5" max="50" name="max_var95_pct" value="{{ '%.2f'|format(risk_veto_config.max_var95_pct or 6.0) }}">
-          </div>
-          <div class="rf-row">
-            <label>Max CVaR95 %</label>
-            <input type="number" step="0.01" min="1" max="80" name="max_cvar95_pct" value="{{ '%.2f'|format(risk_veto_config.max_cvar95_pct or 8.0) }}">
-          </div>
-          <div class="rf-row">
-            <label>Min Quote Coverage %</label>
-            <input type="number" step="0.01" min="1" max="100" name="min_quote_coverage_pct" value="{{ '%.2f'|format(risk_veto_config.min_quote_coverage_pct or 75.0) }}">
-          </div>
-          <div class="rf-row">
-            <label>High Impact Notional %</label>
-            <input type="number" step="0.01" min="0.25" max="50" name="high_impact_notional_pct" value="{{ '%.2f'|format(risk_veto_config.high_impact_notional_pct or 3.0) }}">
-          </div>
-          <div class="rf-row">
-            <label>Require Known Ticker Scope</label>
-            <select name="require_known_ticker_scope">
-              <option value="1" {% if risk_veto_config.require_known_ticker_scope %}selected{% endif %}>Yes</option>
-              <option value="0" {% if not risk_veto_config.require_known_ticker_scope %}selected{% endif %}>No</option>
-            </select>
-          </div>
-          <div class="rf-row">
-            <label>Block Unknown Ticker</label>
-            <select name="block_on_unknown_ticker">
-              <option value="1" {% if risk_veto_config.block_on_unknown_ticker %}selected{% endif %}>Yes</option>
-              <option value="0" {% if not risk_veto_config.block_on_unknown_ticker %}selected{% endif %}>No</option>
-            </select>
-          </div>
-          <div class="rf-row">
-            <label>Review High Impact</label>
-            <select name="review_for_high_impact">
-              <option value="1" {% if risk_veto_config.review_for_high_impact %}selected{% endif %}>Yes</option>
-              <option value="0" {% if not risk_veto_config.review_for_high_impact %}selected{% endif %}>No</option>
-            </select>
-          </div>
-          <div class="rf-full">
-            <button class="analyze-btn" type="submit">Save Risk Veto Settings</button>
-          </div>
-        </form>
-      </div>
-      {% endif %}
-      {% for v in risk_veto_decisions[:6] %}
-      <div class="agent-row">
-        <div>
-          <div><strong>{{ (v.action or '-').upper() }}</strong> · {{ (v.verdict or '-').upper() }}</div>
-          <div class="mini-upd">{{ v.reason or "-" }}</div>
+          {% else %}
+          <div class="proposal-empty">No earnings analyses yet — will populate after next 8-K/10-Q filing</div>
+          {% endif %}
         </div>
-        <div style="text-align:right;">
-          <span class="agent-tag {% if (v.verdict or '') == 'allow' %}ok{% elif (v.verdict or '') == 'veto' %}failed{% else %}skipped{% endif %}">
-            {{ "%.0f"|format((v.confidence or 0) * 100) }}%
-          </span>
-          <div class="mini-upd">{{ v.created_at or "-" }}</div>
+
+        <div class="ai-panel" data-ai-panel="thesis" hidden>
+          {% if thesis_breach_alerts %}
+          <div class="stack-list">
+            {% for a in thesis_breach_alerts %}
+            <div class="stack-item">
+              <div class="proposal-title-row">
+                <div>
+                  <a class="tk-strong" href="/company_file?t={{ a.ticker|urlencode }}">{{ a.ticker }}</a>
+                  <span class="meta-chip with-gap">{{ a.breach_type or "breach" }}</span>
+                </div>
+                <span class="risk-badge {% if a.severity == 'critical' %}red{% elif a.severity == 'high' %}red{% else %}orange{% endif %}">
+                  {{ (a.severity or "medium")|upper }}
+                </span>
+              </div>
+              <div class="stack-text">{{ a.breach_detail or "-" }}</div>
+              {% if a.actual_values %}
+              <div class="mini-upd stack-sub">{{ a.actual_values }}</div>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="proposal-empty">No open thesis breach alerts</div>
+          {% endif %}
         </div>
-      </div>
-      {% else %}
-      <div class="mini-upd">No veto decisions logged yet.</div>
-      {% endfor %}
-    </article>
+
+        <div class="ai-panel" data-ai-panel="cascade" hidden>
+          {% if cascade_alerts %}
+          <div class="stack-list">
+            {% for c in cascade_alerts %}
+            <div class="stack-item">
+              <div class="proposal-title-row">
+                <div>
+                  <a class="tk-strong" href="/company_file?t={{ c.trigger_ticker|urlencode }}">{{ c.trigger_ticker }}</a>
+                  <span class="link-arrow">→</span>
+                  <a class="tk-strong" href="/company_file?t={{ c.affected_ticker|urlencode }}">{{ c.affected_ticker }}</a>
+                  <span class="meta-chip with-gap">{{ c.effect_type or "cascade" }}</span>
+                </div>
+                <span class="risk-badge {% if c.severity == 'critical' %}red{% elif c.severity == 'high' %}red{% else %}orange{% endif %}">
+                  {{ "%.0f"|format((c.confidence or 0) * 100) }}% conf
+                </span>
+              </div>
+              <div class="stack-text">{{ c.effect_summary or "-" }}</div>
+              {% if c.relationship %}
+              <div class="mini-upd stack-sub">Link: {{ c.relationship }}</div>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="proposal-empty">No open cascade alerts</div>
+          {% endif %}
+        </div>
+
+        <div class="ai-panel" data-ai-panel="accuracy" hidden>
+          {% if ai_accuracy and ai_accuracy.get("ok") %}
+            <div class="big-metric">
+              <div class="big-metric-num {% if (ai_accuracy.overall_hit_rate or 0) >= 60 %}good{% elif (ai_accuracy.overall_hit_rate or 0) >= 40 %}mid{% else %}bad{% endif %}">
+                {{ "%.1f"|format(ai_accuracy.overall_hit_rate or 0) }}%
+              </div>
+              <div class="mini-upd">{{ ai_accuracy.total_measured or 0 }} outcomes measured</div>
+            </div>
+            {% if ai_accuracy.by_window %}
+            <table class="mini-table">
+              <thead><tr><th>Window</th><th>Total</th><th>Correct</th><th>Hit Rate</th><th>Avg Return</th></tr></thead>
+              <tbody>
+                {% for w, s in ai_accuracy.by_window.items() %}
+                <tr>
+                  <td>{{ w }}</td>
+                  <td>{{ s.total }}</td>
+                  <td>{{ s.correct }}</td>
+                  <td>{{ "%.1f"|format(s.hit_rate) }}%</td>
+                  <td>{{ "%+.1f"|format(s.avg_return_pct) }}%</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% endif %}
+          {% else %}
+          <div class="proposal-empty">No measured outcomes yet — execute proposals to start tracking</div>
+          {% endif %}
+        </div>
+      </section>
+
+    </div>
   </section>
 
 </div>
 
+<div id="earnTooltip" class="earn-tooltip" aria-hidden="true"></div>
+<div id="indexDrawerOverlay" class="index-drawer-overlay"></div>
+<aside id="indexDrawer" class="index-drawer" aria-hidden="true">
+  <div class="index-drawer-head">
+    <div class="index-drawer-title" id="indexDrawerTitle">Index Detail</div>
+    <button type="button" id="indexDrawerClose" class="index-drawer-close">Close</button>
+  </div>
+  <div class="index-drawer-body">
+    <article class="id-card">
+      <div class="id-k">Last</div>
+      <div class="id-v" id="indexDrawerPrice">-</div>
+      <div id="indexDrawerDay" class="mini-upd">-</div>
+    </article>
+    <article class="id-card">
+      <div class="id-k">1Y Trend (Illustrative)</div>
+      <svg class="id-chart" viewBox="0 0 420 160" preserveAspectRatio="none" aria-hidden="true">
+        <polyline id="indexDrawerLine" points="0,120 42,112 84,105 126,95 168,102 210,88 252,76 294,64 336,55 378,42 420,36" fill="none" stroke="#2563eb" stroke-width="3"/>
+      </svg>
+      <div class="mini-upd">Click off-panel to close.</div>
+    </article>
+  </div>
+</aside>
+
 <script>
   (function(){
-    var wireItems = Array.prototype.slice.call(document.querySelectorAll('.wire-item'));
-    if (wireItems.length > 1){
-      var idx = 0;
-      setInterval(function(){
-        wireItems[idx].classList.remove('active');
-        idx = (idx + 1) % wireItems.length;
-        wireItems[idx].classList.add('active');
-      }, 5000);
-    }
     document.querySelectorAll('.js-reject-toggle').forEach(function(btn){
       btn.addEventListener('click', function(){
         var id = btn.getAttribute('data-proposal-id');
@@ -481,5 +585,110 @@
         if(hidden){ el.removeAttribute('hidden'); } else { el.setAttribute('hidden','hidden'); }
       });
     });
+
+    function activateAiTab(name){
+      document.querySelectorAll('[data-ai-tab]').forEach(function(btn){
+        btn.classList.toggle('is-active', btn.getAttribute('data-ai-tab') === name);
+      });
+      document.querySelectorAll('[data-ai-panel]').forEach(function(panel){
+        if (panel.getAttribute('data-ai-panel') === name) {
+          panel.removeAttribute('hidden');
+        } else {
+          panel.setAttribute('hidden', 'hidden');
+        }
+      });
+    }
+    document.querySelectorAll('[data-ai-tab]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        activateAiTab(btn.getAttribute('data-ai-tab') || 'insights');
+      });
+    });
+    activateAiTab('insights');
+
+    function applyEarningsFilter(kind){
+      document.querySelectorAll('[data-earn-filter]').forEach(function(btn){
+        btn.classList.toggle('is-active', (btn.getAttribute('data-earn-filter') || 'all') === kind);
+      });
+      document.querySelectorAll('.js-earn-row').forEach(function(row){
+        var rowKind = row.getAttribute('data-kind') || '';
+        var rowRes = (row.getAttribute('data-result') || '').toLowerCase();
+        var show = (kind === 'all')
+          || (kind === 'reported' && rowKind === 'reported')
+          || (kind === 'upcoming' && rowKind === 'upcoming')
+          || (kind === 'beat' && rowRes === 'beat')
+          || (kind === 'miss' && rowRes === 'miss');
+        row.classList.toggle('is-hidden', !show);
+      });
+    }
+    document.querySelectorAll('[data-earn-filter]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        applyEarningsFilter(btn.getAttribute('data-earn-filter') || 'all');
+      });
+    });
+    applyEarningsFilter('all');
+
+    var tt = document.getElementById('earnTooltip');
+    function showTip(ev, row){
+      if(!tt || !row) return;
+      var symbol = row.getAttribute('data-symbol') || '-';
+      var company = row.getAttribute('data-company') || '-';
+      var status = row.getAttribute('data-reported') || '-';
+      var epsA = row.getAttribute('data-eps-actual') || '-';
+      var epsE = row.getAttribute('data-eps-estimate') || '-';
+      var surprise = row.getAttribute('data-surprise') || '-';
+      var verdict = row.getAttribute('data-verdict') || '-';
+      var conf = row.getAttribute('data-confidence') || '-';
+      tt.innerHTML = '<div class="tt-head">' + symbol + ' · ' + status + '</div>'
+        + '<div>' + company + '</div>'
+        + '<div>EPS: ' + epsA + ' / ' + epsE + '</div>'
+        + '<div>Surprise: ' + surprise + ' · ' + verdict + '</div>'
+        + '<div>History hint: confidence=' + conf + '</div>';
+      tt.style.display = 'block';
+      moveTip(ev);
+    }
+    function moveTip(ev){
+      if(!tt || tt.style.display !== 'block') return;
+      var x = (ev.clientX || 0) + 14;
+      var y = (ev.clientY || 0) + 12;
+      var maxX = window.innerWidth - tt.offsetWidth - 12;
+      var maxY = window.innerHeight - tt.offsetHeight - 12;
+      tt.style.left = Math.max(8, Math.min(x, maxX)) + 'px';
+      tt.style.top = Math.max(8, Math.min(y, maxY)) + 'px';
+    }
+    function hideTip(){ if(tt){ tt.style.display = 'none'; } }
+    document.querySelectorAll('.js-earn-row').forEach(function(row){
+      row.addEventListener('mouseenter', function(ev){ showTip(ev, row); });
+      row.addEventListener('mousemove', moveTip);
+      row.addEventListener('mouseleave', hideTip);
+    });
+
+    var drawer = document.getElementById('indexDrawer');
+    var drawerOverlay = document.getElementById('indexDrawerOverlay');
+    var drawerClose = document.getElementById('indexDrawerClose');
+    var drawerTitle = document.getElementById('indexDrawerTitle');
+    var drawerPrice = document.getElementById('indexDrawerPrice');
+    var drawerDay = document.getElementById('indexDrawerDay');
+    function closeDrawer(){
+      if(!drawer || !drawerOverlay) return;
+      drawer.classList.remove('open');
+      drawerOverlay.style.display = 'none';
+      drawer.setAttribute('aria-hidden', 'true');
+    }
+    function openDrawer(card){
+      if(!drawer || !drawerOverlay || !card) return;
+      var idx = card.getAttribute('data-index') || 'Index';
+      if(idx !== 'S&P 500'){ return; }
+      drawerTitle.textContent = idx + ' Detail';
+      drawerPrice.textContent = card.getAttribute('data-price') || '-';
+      drawerDay.textContent = 'Day: ' + (card.getAttribute('data-day') || '-');
+      drawerOverlay.style.display = 'block';
+      drawer.classList.add('open');
+      drawer.setAttribute('aria-hidden', 'false');
+    }
+    document.querySelectorAll('.js-index-card').forEach(function(card){
+      card.addEventListener('click', function(){ openDrawer(card); });
+    });
+    if(drawerOverlay){ drawerOverlay.addEventListener('click', closeDrawer); }
+    if(drawerClose){ drawerClose.addEventListener('click', closeDrawer); }
   })();
 </script>

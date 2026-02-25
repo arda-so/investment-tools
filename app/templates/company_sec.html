@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.ticker }} | Company{% endblock %}
+{% block body %}
+<div class="card">
+  <div class="topbar">
+    <a class="btn" href="/company_file?t={{ detail.ticker|urlencode }}">Back to Company File</a>
+    <strong class="title">{{ detail.name }}</strong>
+  </div>
+</div>
+
+{% if message %}
+<div class="flash">{{ message }}</div>
+{% endif %}
+
+<div class="card">
+  <h2 style="margin:0 0 6px 0;">{{ detail.name }}</h2>
+  <div class="muted">Ticker: {{ detail.ticker }} | Country: {{ detail.country }} | Industry: {{ detail.industry }} | Market Cap: {{ detail.market_cap }}</div>
+  <form method="post" action="/company_file/sec-sync" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+    <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+    <button type="submit">Sync SEC Filings</button>
+    {% if sync_state and sync_state.message %}
+    <span class="muted">Status: {{ sync_state.result or "-" }} | {{ sync_state.message }}{% if sync_state.last %} | {{ sync_state.last }}{% endif %}</span>
+    {% endif %}
+  </form>
+</div>
+
+<div class="card">
+  <h3 style="margin:0 0 8px 0;">SEC Filings</h3>
+  <div class="topbar" style="margin-bottom:8px;">
+    <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}">All Forms</a>
+    <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}&form=10-K" {% if selected_form == "10-K" %}style="border-color:#ff7a59;background:#fff1ec;color:#b5472f;"{% endif %}>10-K</a>
+    <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}&form=10-Q" {% if selected_form == "10-Q" %}style="border-color:#ff7a59;background:#fff1ec;color:#b5472f;"{% endif %}>10-Q</a>
+    <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}&form=8-K" {% if selected_form == "8-K" %}style="border-color:#ff7a59;background:#fff1ec;color:#b5472f;"{% endif %}>8-K</a>
+    {% if selected_form %}
+    <span class="chip">Filter: {{ selected_form }}</span>
+    {% endif %}
+  </div>
+  <div class="stats" style="margin-bottom:8px;">
+    <span class="chip">Total: {{ detail.filings|length }}</span>
+    {% for g in detail.filing_groups %}
+    <span class="chip">{{ g.label }} ({{ g.count }})</span>
+    {% endfor %}
+  </div>
+  <div class="muted" style="margin-bottom:8px;">Grouped by filing type. Newest first in each section.</div>
+  {% if detail.filing_groups %}
+  {% for g in detail.filing_groups %}
+  <details class="card" {% if loop.first %}open{% endif %} style="margin:8px 0;padding:10px;">
+    <summary style="cursor:pointer;font-weight:700;">{{ g.label }} ({{ g.count }})</summary>
+    <div style="margin-top:8px;">
+      <table>
+        <thead><tr><th>Date</th><th>Form</th><th>Accession</th><th>File</th><th>Open</th></tr></thead>
+        <tbody>
+        {% for f in g.rows %}
+        <tr>
+          <td>{{ f.date }}</td>
+          <td>{{ f.form }}</td>
+          <td>{{ f.accession }}</td>
+          <td>{{ f.file_name }}</td>
+          <td style="white-space:nowrap;">
+            {% if f.doc_url %}
+            <a class="btn" href="{{ f.doc_url|e }}" target="_blank" rel="noopener noreferrer">Open</a>
+            {% elif f.has_local == "1" %}
+            <a class="btn" href="/filing?path={{ f.path|urlencode }}&doc={{ f.doc_url|urlencode }}&t={{ detail.ticker|urlencode }}&mode=original">Open</a>
+            {% else %}
+            <span class="muted">N/A</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endfor %}
+  {% else %}
+  <table>
+    <thead><tr><th>Date</th><th>Form</th><th>Accession</th><th>File</th><th>Open</th></tr></thead>
+    <tbody>
+    <tr><td colspan="5" class="muted">No filings found for this company.</td></tr>
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

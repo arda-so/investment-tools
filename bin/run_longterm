@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+cd /Users/solmaz/Investment_Tools
+./automations/long_term_weekly.sh

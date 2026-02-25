@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import CORE_DB_PATH, DATA_DIR
-from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
-from app.services.postgres_core_service import pg_connect
+from app.core.db import get_sqlite_conn, sqlite_retry
+from app.core.date import parse_datetime_flexible
+from app.services.postgres_core_service import pg_connect, strict_postgres_mode
 
 try:
     import redis
@@ -19,7 +20,9 @@ except Exception:  # pragma: no cover
     redis = None  # type: ignore[assignment]
 
 
-def _conn() -> sqlite3.Connection:
+def _queue_conn() -> sqlite3.Connection:
+    if _queue_backend() != "sqlite" and strict_postgres_mode():
+        raise RuntimeError("sqlite_queue_fallback_forbidden_in_strict_postgres_mode")
     qpath = str(os.getenv("AI_QUEUE_DB_PATH", "")).strip()
     if not qpath:
         qpath = str(DATA_DIR / "ai_queue.db")
@@ -30,11 +33,16 @@ def _conn() -> sqlite3.Connection:
     except Exception:
         # Fallback to core DB if custom queue path is not writable.
         p = Path(str(CORE_DB_PATH))
-    return connect_sqlite(str(p), row_factory=True)
+    return get_sqlite_conn(p, row_factory=True)
 
 
 def _queue_backend() -> str:
     return str(os.getenv("AI_QUEUE_BACKEND", "postgres")).strip().lower()
+
+
+def queue_backend() -> str:
+    # Public accessor used by app health/ready wiring.
+    return _queue_backend()
 
 
 def _is_production() -> bool:
@@ -44,6 +52,8 @@ def _is_production() -> bool:
 
 def _queue_policy_guard() -> None:
     strict_prod = str(os.getenv("AI_QUEUE_STRICT_PROD", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    if strict_postgres_mode() and _queue_backend() == "sqlite":
+        raise RuntimeError("sqlite_queue_forbidden_in_strict_postgres_mode")
     if strict_prod and _is_production() and _queue_backend() == "sqlite":
         raise RuntimeError("sqlite_queue_forbidden_in_production")
 
@@ -73,6 +83,9 @@ def _use_redis() -> bool:
 def _use_postgres() -> bool:
     if _queue_backend() != "postgres":
         return False
+    if strict_postgres_mode():
+        # Do not allow silent SQLite fallback when core runtime is strict-postgres.
+        return True
     con = pg_connect()
     if con is None:
         return False
@@ -147,7 +160,7 @@ def ensure_ai_job_queue_schema() -> None:
             return
         finally:
             con.close()
-    con = _conn()
+    con = _queue_conn()
     try:
         con.execute(
             """CREATE TABLE IF NOT EXISTS ai_command_jobs (
@@ -226,7 +239,7 @@ def touch_worker(worker_id: str) -> None:
             con.close()
         return
     ensure_ai_job_queue_schema()
-    con = _conn()
+    con = _queue_conn()
     try:
         con.execute(
             """INSERT INTO ai_worker_heartbeats(worker_id, heartbeat_at, updated_at)
@@ -276,9 +289,8 @@ def get_cached_result(payload: dict[str, Any], ttl_sec: int = 75) -> dict[str, A
             if not row:
                 return None
             upd = str(row[1] or "").strip()
-            try:
-                ts = dt.datetime.fromisoformat(upd.replace("Z", ""))
-            except Exception:
+            ts = parse_datetime_flexible(upd)
+            if ts is None:
                 return None
             if (now - ts).total_seconds() > float(max(5, int(ttl_sec or 75))):
                 return None
@@ -292,7 +304,7 @@ def get_cached_result(payload: dict[str, Any], ttl_sec: int = 75) -> dict[str, A
     ensure_ai_job_queue_schema()
     key = _cache_key(payload)
     now = dt.datetime.now()
-    con = _conn()
+    con = _queue_conn()
     try:
         row = con.execute(
             "SELECT result_json, updated_at FROM ai_command_cache WHERE cache_key = ? LIMIT 1",
@@ -301,9 +313,8 @@ def get_cached_result(payload: dict[str, Any], ttl_sec: int = 75) -> dict[str, A
         if not row:
             return None
         upd = str(row["updated_at"] or "").strip()
-        try:
-            ts = dt.datetime.fromisoformat(upd.replace("Z", ""))
-        except Exception:
+        ts = parse_datetime_flexible(upd)
+        if ts is None:
             return None
         if (now - ts).total_seconds() > float(max(5, int(ttl_sec or 75))):
             return None
@@ -357,7 +368,7 @@ def set_cached_result(payload: dict[str, Any], result: dict[str, Any]) -> None:
     ensure_ai_job_queue_schema()
     key = _cache_key(payload)
     now = dt.datetime.now().isoformat()
-    con = _conn()
+    con = _queue_conn()
     try:
         con.execute(
             """INSERT INTO ai_command_cache(cache_key, result_json, created_at, updated_at)
@@ -434,7 +445,7 @@ def enqueue_job(payload: dict[str, Any]) -> str:
     out: dict[str, str] = {"id": ""}
 
     def _write() -> None:
-        con = _conn()
+        con = _queue_conn()
         try:
             con.execute(
                 """INSERT INTO ai_command_jobs
@@ -537,7 +548,7 @@ def get_job(job_id: str) -> dict[str, Any] | None:
     jid = str(job_id or "").strip()
     if not jid:
         return None
-    con = _conn()
+    con = _queue_conn()
     try:
         row = con.execute(
             """SELECT id, status, payload_json, result_json, error_text, worker_id, attempts,
@@ -659,7 +670,7 @@ def claim_next_job(worker_id: str, stale_after_sec: int = 120) -> dict[str, Any]
     now_dt = dt.datetime.now()
     now = now_dt.isoformat()
     stale_cut = (now_dt - dt.timedelta(seconds=max(30, int(stale_after_sec or 120)))).isoformat()
-    con = _conn()
+    con = _queue_conn()
     try:
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(
@@ -745,7 +756,7 @@ def heartbeat(job_id: str, worker_id: str) -> None:
     if not jid:
         return
     now = dt.datetime.now().isoformat()
-    con = _conn()
+    con = _queue_conn()
     try:
         con.execute(
             "UPDATE ai_command_jobs SET heartbeat_at=?, updated_at=?, worker_id=? WHERE id=? AND status='running'",
@@ -809,7 +820,7 @@ def complete_job(job_id: str, result: dict[str, Any]) -> None:
     if not jid:
         return
     now = dt.datetime.now().isoformat()
-    con = _conn()
+    con = _queue_conn()
     try:
         con.execute(
             """UPDATE ai_command_jobs
@@ -875,7 +886,7 @@ def fail_job(job_id: str, error: str, result: dict[str, Any] | None = None) -> N
     if not jid:
         return
     now = dt.datetime.now().isoformat()
-    con = _conn()
+    con = _queue_conn()
     try:
         con.execute(
             """UPDATE ai_command_jobs
@@ -918,11 +929,10 @@ def worker_health(active_within_sec: int = 120) -> dict[str, Any]:
                     counts[st] += 1
                 if st == "error":
                     upd = str(d.get("updated_at") or "").strip()
-                    try:
-                        upd_dt = dt.datetime.fromisoformat(upd.replace("Z", ""))
-                        if (now - upd_dt).total_seconds() <= float(recent_window_sec):
-                            recent_error_count += 1
-                    except Exception:
+                    upd_dt = parse_datetime_flexible(upd)
+                    if upd_dt is not None and (now - upd_dt).total_seconds() <= float(recent_window_sec):
+                        recent_error_count += 1
+                    elif upd_dt is None:
                         # If timestamp is missing/invalid, count once as recent for safety.
                         recent_error_count += 1
                 wid = str(d.get("worker_id") or "").strip()
@@ -939,13 +949,12 @@ def worker_health(active_within_sec: int = 120) -> dict[str, Any]:
             pass
         active_workers: list[dict[str, str]] = []
         for wid, hb in workers.items():
-            try:
-                hb_dt = dt.datetime.fromisoformat(hb.replace("Z", ""))
-                age = (now - hb_dt).total_seconds()
-                if age <= float(max(10, int(active_within_sec or 120))):
-                    active_workers.append({"worker_id": wid, "heartbeat_at": hb, "age_sec": f"{age:.1f}"})
-            except Exception:
+            hb_dt = parse_datetime_flexible(hb)
+            if hb_dt is None:
                 continue
+            age = (now - hb_dt).total_seconds()
+            if age <= float(max(10, int(active_within_sec or 120))):
+                active_workers.append({"worker_id": wid, "heartbeat_at": hb, "age_sec": f"{age:.1f}"})
         return {
             "ok": True,
             "backend": "redis",
@@ -1016,13 +1025,12 @@ def worker_health(active_within_sec: int = 120) -> dict[str, Any]:
                 hb = str(r.get("hb") or "").strip()
                 if not wid or not hb:
                     continue
-                try:
-                    hb_dt = dt.datetime.fromisoformat(hb.replace("Z", ""))
-                    age = (now - hb_dt).total_seconds()
-                    if age <= float(max(10, int(active_within_sec or 120))):
-                        active_workers.append({"worker_id": wid, "heartbeat_at": hb, "age_sec": f"{age:.1f}"})
-                except Exception:
+                hb_dt = parse_datetime_flexible(hb)
+                if hb_dt is None:
                     continue
+                age = (now - hb_dt).total_seconds()
+                if age <= float(max(10, int(active_within_sec or 120))):
+                    active_workers.append({"worker_id": wid, "heartbeat_at": hb, "age_sec": f"{age:.1f}"})
             return {
                 "ok": True,
                 "backend": "postgres",
@@ -1037,7 +1045,7 @@ def worker_health(active_within_sec: int = 120) -> dict[str, Any]:
             con.close()
 
     ensure_ai_job_queue_schema()
-    con = _conn()
+    con = _queue_conn()
     try:
         counts = {"queued": 0, "running": 0, "done": 0, "error": 0}
         rows = con.execute(
@@ -1091,13 +1099,12 @@ def worker_health(active_within_sec: int = 120) -> dict[str, Any]:
             hb = str(r["hb"] or "").strip()
             if not wid or not hb:
                 continue
-            try:
-                hb_dt = dt.datetime.fromisoformat(hb.replace("Z", ""))
-                age = (now - hb_dt).total_seconds()
-                if age <= float(max(10, int(active_within_sec or 120))):
-                    active_workers.append({"worker_id": wid, "heartbeat_at": hb, "age_sec": f"{age:.1f}"})
-            except Exception:
+            hb_dt = parse_datetime_flexible(hb)
+            if hb_dt is None:
                 continue
+            age = (now - hb_dt).total_seconds()
+            if age <= float(max(10, int(active_within_sec or 120))):
+                active_workers.append({"worker_id": wid, "heartbeat_at": hb, "age_sec": f"{age:.1f}"})
         return {
             "ok": True,
             "backend": "sqlite",

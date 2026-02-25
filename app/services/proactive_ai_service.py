@@ -6,9 +6,22 @@ import re
 import sqlite3
 from typing import Any
 
-from app.core.config import CORE_DB_PATH, ROOT
-from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
+from app.core.config import ROOT
+from app.core.analysis_context import (
+    build_analysis_context,
+    build_execute_payload,
+    format_citation_url,
+)
+from app.core.db import core_conn as _conn_core, onyx_conn as _conn_onyx, sqlite_retry
+from app.core.num import to_float as _to_float
+from app.core.ticker import safe_ticker as _safe_ticker
+from app.core.proposal_pipeline import (
+    insights_from_reasoning,
+    passes_reasoning_quality,
+    run_proposal_pipeline,
+)
 from app.services.company_file_service import add_company_note, add_company_reminder, add_company_task
+from app.services.company_lookup_service import company_name_map
 from app.services.phase2_scaling_service import mirror_action_proposal
 from app.services.postgres_core_service import (
     core_backend,
@@ -19,6 +32,9 @@ from app.services.postgres_core_service import (
     pg_connect,
 )
 from app.services.user_preferences_service import upsert_user_preference
+from app.services.mini_statements_service import fetch_historical_financials
+from app.services.company_intel_service import get_company_intel
+from app.services.price_metrics_service import get_price_metrics
 
 try:
     from tools.llm_engine import ask_ai, ask_ai_json_schema
@@ -27,33 +43,9 @@ except Exception:  # pragma: no cover
     ask_ai_json_schema = None  # type: ignore[assignment]
 
 
-ONYX_BRAIN_DB_PATH = ROOT / "onyx_brain.db"
 MAX_PROPOSALS_PER_MONITOR_RUN = 30
 PROPOSAL_COOLDOWN_HOURS = 24
 SIM_MAX_DEPTH = 3
-
-
-def _conn_core() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
-def _conn_onyx() -> sqlite3.Connection:
-    return connect_sqlite(str(ONYX_BRAIN_DB_PATH), row_factory=True)
-
-
-def _to_float(v: object, default: float = 0.0) -> float:
-    try:
-        return float(v)
-    except Exception:
-        return float(default)
-
-
-def _safe_ticker(raw: str) -> str:
-    s = re.sub(r"[^A-Z0-9.\-]", "", str(raw or "").strip().upper())
-    if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,11}", s):
-        return s
-    return ""
-
 
 def _read_scope_tickers() -> tuple[set[str], set[str], set[str]]:
     portfolio: set[str] = set()
@@ -372,31 +364,47 @@ def _reflexion_pattern_key(event_type: str, detail: dict[str, Any]) -> str:
     return key[:180]
 
 
-def _build_reflexion_rule(event_type: str, query: str) -> tuple[str, str, float]:
+def _build_reflexion_rule(event_type: str, query: str, detail: dict[str, Any] | None = None) -> tuple[str, str, float]:
+    """Let the LLM reason about the failure and generate a contextual learning rule."""
     ev = str(event_type or "").strip().lower()
-    q = str(query or "").strip().lower()
-    if ev in {"action_confidence_gate", "clarify_before_action", "needs_clarification"}:
-        return (
-            "ask_clarify_when_uncertain",
-            "When intent confidence is low, ask one explicit clarifying question before any mutation/navigation.",
-            0.86,
-        )
-    if ev in {"mutation_verify_failed", "verify_failed", "mutation_execution_error"}:
-        return (
-            "strengthen_verify_after_write",
-            "On any write verification mismatch, return explicit failure and never claim success.",
-            0.94,
-        )
-    if "watchlist" in q or "portfolio" in q:
-        return (
-            "prefer_info_then_navigation",
-            "For list/info requests, answer in chat first; ask before navigation.",
-            0.81,
-        )
+    q = str(query or "").strip()
+    d = dict(detail or {})
+
+    if ask_ai is not None:
+        try:
+            prompt = (
+                "You are an AI self-improvement engine. A failure event occurred in an investment assistant.\n"
+                "Analyze the failure and generate ONE learning rule to prevent recurrence.\n\n"
+                f"Event type: {ev}\n"
+                f"User query: {q[:800]}\n"
+                f"Detail: {json.dumps(d, ensure_ascii=True)[:600]}\n\n"
+                "Return strict JSON only:\n"
+                '{"rule_key": "snake_case_name_max_80_chars", '
+                '"rule_text": "Actionable instruction for the AI to follow (max 300 chars)", '
+                '"confidence": 0.0}\n\n'
+                "Rules:\n"
+                "- rule_key: unique descriptive snake_case (max 80 chars)\n"
+                "- rule_text: clear, actionable instruction the AI can follow in future interactions\n"
+                "- confidence: 0.0-1.0 based on how clearly this failure implies the rule\n"
+                "- Focus on root cause, not symptoms\n"
+                "- Be specific to this failure pattern, not generic"
+            )
+            raw = str(ask_ai(prompt, "AI reflexion engine. JSON only.", mode="fast", json_mode=True, temperature=0.0) or "").strip()
+            if raw:
+                parsed = json.loads(raw)
+                rk = str(parsed.get("rule_key") or "")[:80].strip()
+                rt = str(parsed.get("rule_text") or "")[:300].strip()
+                rc = float(parsed.get("confidence") or 0.0)
+                if rk and rt and 0.0 < rc <= 1.0:
+                    return (rk, rt, rc)
+        except Exception:
+            pass
+
+    # Fallback: generic rule when LLM unavailable
     return (
-        "improve_intent_disambiguation",
-        "Disambiguate user intent (chat vs action) before routing to execution.",
-        0.74,
+        f"reflexion_{ev[:40]}_{dt.datetime.now().strftime('%Y%m%d%H%M')}",
+        f"Review and improve handling of '{ev}' events to reduce user friction.",
+        0.65,
     )
 
 
@@ -405,12 +413,17 @@ def record_reflexion_from_quality_event(event_type: str, query: str, detail: dic
     ev = str(event_type or "").strip().lower()
     d = dict(detail or {})
     q = str(query or "").strip()
-    tracked = {"action_confidence_gate", "clarify_before_action", "needs_clarification", "mutation_verify_failed", "verify_failed", "mutation_execution_error", "llm_fallback_error"}
+    tracked = {
+        "action_confidence_gate", "clarify_before_action", "needs_clarification",
+        "mutation_verify_failed", "verify_failed", "mutation_execution_error",
+        "llm_fallback_error", "risk_veto_blocked", "risk_veto_review",
+        "outcome_miss",
+    }
     if ev not in tracked:
         return {"ok": True, "skipped": True, "reason": "event_not_tracked"}
     now = dt.datetime.now().isoformat()
     pattern_key = _reflexion_pattern_key(ev, d)
-    rule_key, rule_text, conf = _build_reflexion_rule(ev, q)
+    rule_key, rule_text, conf = _build_reflexion_rule(ev, q, d)
     note_text = f"Observed failure pattern '{ev}'. Applied rule '{rule_key}' to reduce repeats."
     out = {"ok": False, "policy_version": "", "rule_key": rule_key}
 
@@ -877,22 +890,6 @@ def _relationship_upsert_pg(
             dt.datetime.now().isoformat(),
         ),
     )
-    con.execute(
-        """INSERT OR IGNORE INTO relationships
-           (source_id, target_id, relationship_type, citation_link, citation_url, citation_text, confidence, confidence_score, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            int(source_id),
-            int(target_id),
-            str(rel_type or "").strip().upper(),
-            str(citation_link or "").strip(),
-            str(citation_link or "").strip(),
-            str(citation_text or "")[:500],
-            float(confidence or 0.0),
-            float(confidence or 0.0),
-            dt.datetime.now().isoformat(),
-        ),
-    )
 
 
 def _extract_themes(text: str) -> list[str]:
@@ -1133,7 +1130,6 @@ def _proposal_upsert(
             style_text=style_ctx,
             decisions_text=decisions_ctx,
         )
-        insights = _insights_from_reasoning(reasoning, list(bullets or [])[:3])
         verify = _verify_reasoning_relevance(
             ticker=tk,
             signal_text=signal_blob,
@@ -1141,13 +1137,27 @@ def _proposal_upsert(
             style_text=style_ctx,
             reasoning=reasoning,
         )
-        if verify:
-            reasoning["quality_verdict"] = str(verify.get("quality_verdict") or "").strip().lower()
-            reasoning["quality_reason"] = str(verify.get("quality_reason") or "").strip()[:220]
-        reasoning = _normalize_reasoning_payload(reasoning)
-        insights = _insights_from_reasoning(reasoning, list(bullets or [])[:3])
-        if not _passes_reasoning_quality(reasoning, insights, citations):
+        pipeline = run_proposal_pipeline(
+            relevance_ok=not _is_non_event_signal(signal_blob, tk),
+            raw_reasoning=reasoning,
+            citations=citations,
+            confidence=confidence,
+            priority_score=priority_score,
+            verify_result=verify,
+        )
+        if not bool(pipeline.get("accepted")):
             return False
+        reasoning = dict(pipeline.get("reasoning") or {})
+        insights = [x for x in list(pipeline.get("insights") or []) if isinstance(x, dict)]
+        citations = [x for x in list(pipeline.get("citations") or []) if isinstance(x, dict)]
+        confidence = float(pipeline.get("confidence") or 0.0)
+        priority_score = float(pipeline.get("priority_score") or 0.0)
+        analysis_ctx = build_analysis_context(analysis_id=source_key, source=str(kind or ""), trace_id=f"ap_{new_id}")
+        exec_payload = build_execute_payload(
+            route=str(execute_route or "/dashboard"),
+            context=analysis_ctx,
+            payload=dict(execute_payload or {}),
+        )
         row = {
             "id": new_id,
             "created_at": now,
@@ -1162,8 +1172,8 @@ def _proposal_upsert(
             "reasoning_json": dict(reasoning or {}),
             "confidence": float(confidence or 0.0),
             "priority_score": float(priority_score or 0.0),
-            "execute_route": str(execute_route or "/dashboard"),
-            "execute_payload_json": dict(execute_payload or {}),
+            "execute_route": str(exec_payload.get("route") or "/dashboard"),
+            "execute_payload_json": dict(exec_payload or {}),
             "source_event_key": source_key,
             "proposal_uid": f"ap_{new_id}",
             "target_ticker": str(ticker or "").upper(),
@@ -1175,8 +1185,29 @@ def _proposal_upsert(
             "rejected_at": "",
             "executed_at": "",
         }
+        # Multi-agent debate gate — run for high-confidence proposals (>= 0.5)
+        debate_approved = True
+        if confidence >= 0.5:
+            try:
+                from app.services.debate_service import run_proposal_debate
+                debate_result = run_proposal_debate(
+                    ticker=tk,
+                    signal=signal_blob,
+                    proposed_stance=str(row.get("suggested_action") or "REVIEW"),
+                    reasoning_summary=str(row.get("thesis_summary") or "")[:600],
+                    proposal_id=new_id,
+                )
+                debate_approved = bool(debate_result.get("approved", True))
+                if not debate_approved:
+                    row["status"] = "debate_rejected"
+                    artifacts = debate_result.get("artifacts") or {}
+                    row["rejection_reason"] = str(artifacts.get("judge_rationale", "debate_rejected"))[:500]
+            except Exception:
+                pass  # debate errors → allow proposal through
         con.commit()
         _upsert_action_proposal_core_pg(row)
+        if not debate_approved:
+            return False  # stored for audit but skip mirror/cascade
         mirror_action_proposal(
             {
                 "source_event_key": source_key,
@@ -1191,6 +1222,16 @@ def _proposal_upsert(
                 "updated_at": now,
             }
         )
+        # Phase 3.4: auto-run cascade analysis when a new proposal is created
+        if tk:
+            try:
+                analyze_portfolio_cascades(
+                    trigger_ticker=tk,
+                    trigger_signal=signal_blob[:500],
+                    trigger_proposal_id=new_id,
+                )
+            except Exception:
+                pass
         return True
     except Exception:
         try:
@@ -1389,33 +1430,6 @@ def _day_pct_map() -> dict[str, float]:
         con.close()
     return out
 
-
-def _company_name_map() -> dict[str, str]:
-    out: dict[str, str] = {}
-    if core_backend() != "postgres":
-        return out
-    con_pg = pg_connect()
-    if con_pg is None:
-        return out
-    try:
-        cur = con_pg.cursor()
-        cur.execute("SELECT to_regclass('public.company_profile_cache_core')")
-        exists = cur.fetchone()
-        if not exists or not exists[0]:
-            return out
-        cur.execute("SELECT ticker, name FROM company_profile_cache_core")
-        for r in cur.fetchall() or []:
-            tk = _safe_ticker(str(r[0] or ""))
-            if tk:
-                out[tk] = str(r[1] or "").strip()
-    except Exception:
-        # Fail-safe for partially migrated Postgres schemas: never break dashboard render.
-        return {}
-    finally:
-        con_pg.close()
-    return out
-
-
 def _portfolio_weight_map() -> dict[str, float]:
     positions: dict[str, tuple[float, float]] = {}
     p = ROOT / "data" / "portfolio.csv"
@@ -1557,6 +1571,280 @@ def _recent_decision_context(con: sqlite3.Connection | None, ticker: str, limit:
     return "\n".join(out)[:2400]
 
 
+def _build_financial_context(ticker: str) -> str:
+    """Build a structured financial context block with actual numbers for the LLM."""
+    tk = _safe_ticker(ticker)
+    if not tk:
+        return ""
+    lines: list[str] = []
+
+    # 1. Historical financials (5yr)
+    try:
+        fin = fetch_historical_financials(tk, metric="all", years=5)
+        if fin.get("ok") and fin.get("years"):
+            yrs = fin["years"]
+            rev = fin.get("revenue") or []
+            gp = fin.get("gross_profit") or []
+            ocf = fin.get("operating_cash_flow") or []
+            fcf = fin.get("free_cash_flow") or []
+            debt = fin.get("total_debt") or []
+            equity = fin.get("total_equity") or []
+            cash = fin.get("total_cash") or []
+            ccy = fin.get("currency") or "USD"
+
+            def _fmt(v: Any) -> str:
+                if v is None:
+                    return "N/A"
+                try:
+                    f = float(v)
+                    if abs(f) >= 1e9:
+                        return f"{f/1e9:.1f}B"
+                    if abs(f) >= 1e6:
+                        return f"{f/1e6:.0f}M"
+                    return f"{f:,.0f}"
+                except Exception:
+                    return "N/A"
+
+            def _pct(a: Any, b: Any) -> str:
+                try:
+                    af, bf = float(a), float(b)
+                    if bf == 0:
+                        return "N/A"
+                    return f"{((af - bf) / abs(bf)) * 100:+.1f}%"
+                except Exception:
+                    return "N/A"
+
+            def _margin(num: Any, denom: Any) -> str:
+                try:
+                    n, d = float(num), float(denom)
+                    if d == 0:
+                        return "N/A"
+                    return f"{(n / d) * 100:.1f}%"
+                except Exception:
+                    return "N/A"
+
+            lines.append(f"FINANCIAL DATA ({ccy}, 5-year):")
+            # Revenue row
+            rev_row = " | ".join(f"{y}: {_fmt(r)}" for y, r in zip(yrs, rev))
+            lines.append(f"  Revenue: {rev_row}")
+            # YoY revenue growth
+            if len(rev) >= 2:
+                growths = [_pct(rev[i], rev[i - 1]) for i in range(1, len(rev))]
+                lines.append(f"  Revenue YoY Growth: {' → '.join(growths)}")
+            # Gross margin row
+            if rev and gp:
+                margins = [_margin(g, r) for g, r in zip(gp, rev)]
+                lines.append(f"  Gross Margin: {' → '.join(margins)}")
+            # FCF row
+            if fcf:
+                fcf_row = " | ".join(f"{y}: {_fmt(f)}" for y, f in zip(yrs, fcf))
+                lines.append(f"  Free Cash Flow: {fcf_row}")
+            # Debt/Equity
+            if debt and equity:
+                de_ratios = []
+                for d_val, e_val in zip(debt, equity):
+                    try:
+                        dv, ev = float(d_val), float(e_val)
+                        de_ratios.append(f"{dv / ev:.2f}" if ev != 0 else "N/A")
+                    except Exception:
+                        de_ratios.append("N/A")
+                lines.append(f"  Debt/Equity: {' → '.join(de_ratios)}")
+            # Net cash position (latest)
+            if cash and debt:
+                try:
+                    net_cash = float(cash[-1] or 0) - float(debt[-1] or 0)
+                    lines.append(f"  Net Cash Position (latest): {_fmt(net_cash)}")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 2. XBRL intel (segments, buybacks, insider trades)
+    try:
+        intel = get_company_intel(tk, refresh=False)
+        if intel and intel.get("ticker"):
+            segs = intel.get("revenue_segments") or {}
+            products = segs.get("product") or []
+            geos = segs.get("geography") or []
+            if products:
+                lines.append("REVENUE SEGMENTS (Product):")
+                for s in products[:8]:
+                    lbl = str(s.get("label") or "").strip()
+                    pct = s.get("pct")
+                    val = s.get("value")
+                    if lbl:
+                        parts = [lbl]
+                        if pct is not None:
+                            parts.append(f"{float(pct):.1f}%")
+                        if val is not None:
+                            try:
+                                v = float(val)
+                                parts.append(f"({v / 1e9:.1f}B)" if abs(v) >= 1e9 else f"({v / 1e6:.0f}M)")
+                            except Exception:
+                                pass
+                        lines.append(f"  {' — '.join(parts)}")
+            if geos:
+                lines.append("REVENUE SEGMENTS (Geography):")
+                for s in geos[:6]:
+                    lbl = str(s.get("label") or "").strip()
+                    pct = s.get("pct")
+                    if lbl and pct is not None:
+                        lines.append(f"  {lbl}: {float(pct):.1f}%")
+
+            buyback = intel.get("buyback") or {}
+            ttm = buyback.get("ttm_value")
+            quarters = buyback.get("quarters") or []
+            if ttm is not None or quarters:
+                lines.append("BUYBACK ACTIVITY:")
+                if ttm is not None:
+                    try:
+                        lines.append(f"  TTM Buybacks: {float(ttm) / 1e9:.1f}B")
+                    except Exception:
+                        pass
+                for q in quarters[:4]:
+                    qp = str(q.get("period") or "").strip()
+                    qv = q.get("value")
+                    if qp and qv is not None:
+                        try:
+                            lines.append(f"  {qp}: {float(qv) / 1e9:.1f}B")
+                        except Exception:
+                            pass
+
+            insiders = intel.get("insider_trades") or []
+            if insiders:
+                buys = sum(1 for t in insiders if str(t.get("tx_type") or "").upper() == "BUY")
+                sells = sum(1 for t in insiders if str(t.get("tx_type") or "").upper() == "SELL")
+                lines.append(f"INSIDER ACTIVITY: {buys} buys, {sells} sells (recent)")
+                for t in insiders[:4]:
+                    owner = str(t.get("owner") or "")[:30]
+                    tx = str(t.get("tx_type") or "")
+                    shares = t.get("net_shares")
+                    date = str(t.get("date") or "")[:10]
+                    if owner and tx:
+                        sh_str = f" ({int(shares):,} shares)" if shares else ""
+                        lines.append(f"  {date} {owner}: {tx}{sh_str}")
+    except Exception:
+        pass
+
+    # 3. Peer comparison (gross margin + revenue growth vs sector peers)
+    try:
+        peers = _get_sector_peers(tk)
+        if peers:
+            peer_lines: list[str] = []
+            for ptk in peers[:3]:
+                pfin = fetch_historical_financials(ptk, metric="all", years=2)
+                if not pfin.get("ok") or not pfin.get("years"):
+                    continue
+                prev = pfin.get("revenue") or []
+                pgp = pfin.get("gross_profit") or []
+                if len(prev) >= 2 and len(pgp) >= 2:
+                    try:
+                        pm = float(pgp[-1]) / float(prev[-1]) * 100 if float(prev[-1]) else 0
+                        pg = (float(prev[-1]) - float(prev[-2])) / abs(float(prev[-2])) * 100 if float(prev[-2]) else 0
+                        peer_lines.append(f"  {ptk}: margin {pm:.1f}%, rev growth {pg:+.1f}%")
+                    except Exception:
+                        pass
+            if peer_lines:
+                lines.append("PEER COMPARISON:")
+                lines.extend(peer_lines)
+    except Exception:
+        pass
+
+    return "\n".join(lines)[:3600]
+
+
+_SECTOR_PEERS: dict[str, list[str]] = {
+    "AAPL": ["MSFT", "GOOGL", "META"],
+    "MSFT": ["AAPL", "GOOGL", "CRM"],
+    "GOOGL": ["META", "MSFT", "AMZN"],
+    "GOOG": ["META", "MSFT", "AMZN"],
+    "META": ["GOOGL", "SNAP", "PINS"],
+    "AMZN": ["MSFT", "GOOGL", "WMT"],
+    "NVDA": ["AMD", "INTC", "QCOM"],
+    "AMD": ["NVDA", "INTC", "QCOM"],
+    "INTC": ["NVDA", "AMD", "TSM"],
+    "QCOM": ["NVDA", "AMD", "MRVL"],
+    "TSM": ["INTC", "SMSN", "UMC"],
+    "CRM": ["MSFT", "SAP", "ORCL"],
+    "ORCL": ["MSFT", "CRM", "SAP"],
+    "NFLX": ["DIS", "WBD", "PARA"],
+    "DIS": ["NFLX", "WBD", "CMCSA"],
+    "JPM": ["BAC", "WFC", "GS"],
+    "BAC": ["JPM", "WFC", "C"],
+    "GS": ["MS", "JPM", "BLK"],
+    "XOM": ["CVX", "COP", "BP"],
+    "CVX": ["XOM", "COP", "SLB"],
+    "TSLA": ["GM", "F", "RIVN"],
+    "COST": ["WMT", "TGT", "BJ"],
+    "WMT": ["COST", "TGT", "AMZN"],
+    "UNH": ["CVS", "CI", "HUM"],
+    "LLY": ["NVO", "PFE", "MRK"],
+    "ASML": ["AMAT", "LRCX", "KLAC"],
+    "WYNN": ["LVS", "MGM", "CZR"],
+    "ADBE": ["CRM", "MSFT", "FIGMA"],
+    "PYPL": ["V", "MA", "SQ"],
+}
+
+
+def _get_sector_peers(ticker: str) -> list[str]:
+    """Return 3-4 peer tickers for comparison. Entity graph first, hardcoded map as fallback."""
+    tk = _safe_ticker(ticker)
+    if not tk:
+        return []
+    peers: list[str] = []
+    # 1. Try entity graph
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute(
+                    """SELECT e2.name FROM relationships_core r
+                       JOIN entities_core e1 ON r.source_entity_id = e1.id
+                       JOIN entities_core e2 ON r.target_entity_id = e2.id
+                       WHERE e1.name = %s AND r.relationship_type = 'COMPETES_WITH'
+                       LIMIT 4""",
+                    (tk,),
+                )
+                for row in cur.fetchall() or []:
+                    p = _safe_ticker(str(row[0] or ""))
+                    if p and p != tk:
+                        peers.append(p)
+            except Exception:
+                pass
+            finally:
+                con_pg.close()
+    # 2. Fall back to hardcoded map
+    if not peers:
+        peers = [p for p in (_SECTOR_PEERS.get(tk) or []) if p != tk]
+    return peers[:4]
+
+
+def _read_active_reflexion_rules(limit: int = 8) -> str:
+    """Return formatted string of high-confidence reflexion rules for injection into LLM prompts."""
+    if core_backend() != "postgres":
+        return ""
+    con_pg = pg_connect()
+    if con_pg is None:
+        return ""
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """SELECT rule_text FROM reflexion_notes_core
+               WHERE confidence >= 0.6 AND rule_text IS NOT NULL AND rule_text != ''
+               ORDER BY id DESC LIMIT %s""",
+            (max(1, min(12, int(limit))),),
+        )
+        rows = cur.fetchall() or []
+        if not rows:
+            return ""
+        return "\n".join(f"• {str(r[0] or '').strip()}" for r in rows if r[0])
+    except Exception:
+        return ""
+    finally:
+        con_pg.close()
+
+
 def _evaluate_signal_reasoning(
     *,
     ticker: str,
@@ -1572,27 +1860,55 @@ def _evaluate_signal_reasoning(
         return {}
     if ask_ai is None:
         return {}
+
+    # Build rich financial context with actual numbers
+    financial_ctx = _build_financial_context(tk)
+
+    # Load reflexion rules from past prediction misses
+    reflexion_rules = _read_active_reflexion_rules()
+    reflexion_section = (
+        f"\nLESSONS FROM PAST PREDICTION MISSES (apply these):\n{reflexion_rules}\n"
+        if reflexion_rules else ""
+    )
+
     prompt = (
-        "You are an Elite Fundamental Equity Analyst evaluating a new market signal.\n\n"
-        f"TARGET ASSET: {tk} (Current Weight: {float(portfolio_weight_pct or 0.0):.2f}%)\n"
-        f"USER'S INVESTMENT THESIS & EXPECTATIONS: {thesis_text or 'not provided'}\n"
-        f"USER'S HISTORICAL CONTEXT: {style_text or 'not provided'}\n"
-        f"NEW SIGNAL: {sig[:2600]}\n\n"
-        "STEP 1: THE BOUNCER (RELEVANCE CHECK)\n"
-        "Does this signal logically and directly impact this specific company's core business model, margins, or moat? "
-        "If the signal is generic macro noise, applies to an unrelated company without a direct competitive link, or is a non-event (e.g., 'Not in calendar'), you MUST ABORT. "
-        "Return an empty JSON object `{}`. Do not force an analysis on garbage data.\n\n"
-        "STEP 2: COMPARE & LEARN (FUNDAMENTAL INSIGHTS)\n"
-        "If relevant, perform a deep comparative analysis. Do NOT scold the user about portfolio rules. Instead, generate insights based on:\n"
-        "- COMPARISON: Compare the reality of this new signal against the expectations in the user's thesis. If the signal is about a peer/competitor, what is the direct read-through for our target asset?\n"
-        "- LEARNING: How does our understanding of this company need to adapt? What new risk or tailwind did we just learn about that wasn't in the original thesis?\n\n"
-        "STEP 3: DYNAMIC JSON GENERATION\n"
-        "Return STRICT JSON only. Generate 2 to 3 `insight_cards`. You MUST invent a highly specific, dynamic `label` for each card based on the exact comparative analysis (e.g., 'Peer Divergence', 'Thesis Degradation', 'Margin Reality Check', 'Competitor Headwind').\n"
+        "You are an Elite Fundamental Equity Analyst with full access to financial data.\n"
+        "You DO the analysis — you don't tell the user to check things. You give clear conclusions with specific numbers.\n\n"
+        f"TARGET ASSET: {tk} (Current Weight: {float(portfolio_weight_pct or 0.0):.2f}%)\n\n"
+        f"STRUCTURED FINANCIAL DATA:\n{financial_ctx or '(unavailable)'}\n\n"
+        f"USER'S INVESTMENT THESIS & EXPECTATIONS:\n{thesis_text or 'not provided'}\n\n"
+        f"USER'S STYLE & PREFERENCES:\n{style_text or 'not provided'}\n\n"
+        f"RECENT DECISIONS:\n{decisions_text or 'none'}\n\n"
+        f"{reflexion_section}"
+        f"NEW SIGNAL:\n{sig[:2600]}\n\n"
+        "STEP 1: RELEVANCE CHECK\n"
+        "Does this signal directly impact this company's core business, margins, or moat? "
+        "If it's generic macro noise or a non-event, ABORT — return empty JSON `{}`.\n\n"
+        "STEP 2: DEEP NUMERICAL ANALYSIS\n"
+        "Using the financial data above, perform concrete analysis:\n"
+        "- MARGINS: What are the actual margins? How have they trended? Does this signal change the trajectory?\n"
+        "- GROWTH: What is the revenue growth rate? Is it accelerating or decelerating?\n"
+        "- CASH FLOW: Is FCF improving or deteriorating? What does the debt position look like?\n"
+        "- SEGMENTS: Which business segments are driving growth vs dragging? How concentrated is revenue?\n"
+        "- INSIDER SIGNALS: Are insiders buying or selling? What does this tell us about management confidence?\n"
+        "- THESIS CHECK: Does the data confirm or contradict the user's thesis? Be specific.\n\n"
+        "STEP 3: CAUSE-EFFECT REASONING\n"
+        "Think in chains: if X happens → Y impact on margins → Z impact on FCF → implications for valuation.\n"
+        "Identify secondary effects the investor might miss.\n\n"
+        "STEP 4: GENERATE INSIGHT CARDS\n"
+        "Return STRICT JSON. Generate 2-3 `insight_cards` with:\n"
+        "- Specific numbers in every insight (e.g., 'Gross margin dropped from 37.8% to 34.2%')\n"
+        "- Clear conclusions (not 'check the margin' but 'margin is compressing because...')\n"
+        "- Cause-effect chains where applicable\n"
         "{\n"
         '  "insight_cards": [\n'
-        '    {"label": "<AI_INVENTED_LABEL>", "text": "<Deep comparative or adaptive analysis. Max 2 sentences.>"}\n'
+        '    {"label": "<SPECIFIC_LABEL>", "text": "<Analysis WITH numbers. Max 2 sentences.>"}\n'
         "  ],\n"
-        '  "confidence": "high|medium|low"\n'
+        '  "confidence": "high|medium|low",\n'
+        '  "margin_impact": "<specific margin analysis with numbers>",\n'
+        '  "thesis_validation": "<does data confirm or contradict thesis? be specific>",\n'
+        '  "risk_assessment": "<key risks with quantification>",\n'
+        '  "recommended_stance": "HOLD|ADD|TRIM|WATCH|EXIT"\n'
         "}"
     )
     try:
@@ -1749,81 +2065,6 @@ def _verify_reasoning_relevance(
         return {"quality_verdict": "unknown", "quality_reason": ""}
 
 
-def _passes_reasoning_quality(reasoning: dict[str, Any], insights: list[dict[str, str]], citations: list[dict[str, str]]) -> bool:
-    rz = dict(reasoning or {})
-    ins = [x for x in list(insights or []) if isinstance(x, dict)]
-    cits = [x for x in list(citations or []) if isinstance(x, dict)]
-    if len(ins) < 2:
-        return False
-    labels: set[str] = set()
-    strong = 0
-    for card in ins[:3]:
-        lb = str(card.get("label") or "").strip()
-        tx = str(card.get("text") or "").strip()
-        if not lb or not tx:
-            continue
-        labels.add(lb.lower())
-        if len(tx) >= 40:
-            strong += 1
-    if len(labels) < 2 or strong < 2:
-        return False
-    if not cits:
-        return False
-    qv = str(rz.get("quality_verdict") or "").strip().lower()
-    if qv and qv != "accept":
-        return False
-    return True
-
-
-def _insights_from_reasoning(reasoning: dict[str, Any], bullets: list[str]) -> list[dict[str, str]]:
-    cards: list[dict[str, str]] = []
-    for c in list((reasoning or {}).get("insight_cards") or []):
-        if not isinstance(c, dict):
-            continue
-        lb = str(c.get("label") or "").strip()[:42]
-        tx = str(c.get("text") or "").strip()[:320]
-        if lb and tx:
-            cards.append({"label": lb, "text": tx})
-    if cards:
-        return cards[:3]
-    return []
-
-
-def _normalize_reasoning_payload(raw_reasoning: dict[str, Any] | None) -> dict[str, Any]:
-    rr = dict(raw_reasoning or {})
-    out: dict[str, Any] = {}
-    # keep only known safe scalar keys
-    for k, lim in {
-        "margin_impact": 320,
-        "thesis_validation": 320,
-        "risk_assessment": 320,
-        "actionable_proposal": 320,
-        "peer_contagion": 320,
-        "confidence": 16,
-        "recommended_stance": 12,
-        "invalidation_hit": 16,
-        "quality_verdict": 16,
-        "quality_reason": 220,
-    }.items():
-        v = rr.get(k)
-        if v is None:
-            continue
-        txt = str(v).strip()
-        if txt:
-            out[k] = txt[:lim]
-    cards: list[dict[str, str]] = []
-    for c in list(rr.get("insight_cards") or []):
-        if not isinstance(c, dict):
-            continue
-        lb = str(c.get("label") or "").strip()[:42]
-        tx = str(c.get("text") or "").strip()[:320]
-        if lb and tx:
-            cards.append({"label": lb, "text": tx})
-    if cards:
-        out["insight_cards"] = cards[:3]
-    return out
-
-
 def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
     ensure_proactive_schema()
     run_uid = start_agent_run(
@@ -1863,7 +2104,7 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
         # Phase 2: ontology ingest from newly observed facts.
         ont = ingest_ontology_from_report_facts(limit_rows=500)
 
-        name_map = _company_name_map()
+        name_map = company_name_map()
         day_map = _day_pct_map()
 
         # Phase 3/4: build action proposals from new report facts for in-scope companies.
@@ -1909,9 +2150,14 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
             text = str(r["fact_text"] or "").strip()
             rep = str(r["report_name"] or "").strip()
             src_key = f"rf:{int(r['id'] or 0)}:{tk}"
+            actx = build_analysis_context(analysis_id=src_key, source="thesis_trigger")
             title = f"Review {tk} Thesis Trigger"
             bullets = _build_thesis_bullets(tk, text, "THESIS_TRIGGER")
-            cites = [{"label": "Report Evidence", "url": f"/reports/view?name={rep}"}] if rep else [{"label": "Reports", "url": "/reports"}]
+            cites = (
+                [{"label": "Report Evidence", "url": format_citation_url(f"/reports/view?name={rep}", actx)}]
+                if rep
+                else [{"label": "Reports", "url": format_citation_url("/reports", actx)}]
+            )
             if _proposal_upsert(
                 source_event_key=src_key,
                 kind="thesis_trigger",
@@ -1921,8 +2167,12 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                 citations=cites,
                 confidence=min(0.99, 0.55 + (imp * 0.04)),
                 priority_score=float(imp),
-                    execute_route=f"/company_file?t={tk}",
-                    execute_payload={"ticker": tk, "source": "report_facts"},
+                execute_route=f"/company_file?t={tk}",
+                execute_payload=build_execute_payload(
+                    route=f"/company_file?t={tk}",
+                    context=actx,
+                    payload={"ticker": tk, "source": "report_facts"},
+                ),
             ):
                 created += 1
                 seen_rf_tickers.add(tk)
@@ -1964,13 +2214,14 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
             if _has_open_proposal("filing_update", tk) or _has_recent_proposal("filing_update", tk):
                 continue
             src_key = f"fil:{int(r['id'] or 0)}:{tk}:{fm}"
+            actx = build_analysis_context(analysis_id=src_key, source="filing_update")
             title = f"{tk} filed {fm} — review update"
             bullets = [
                 f"New official filing detected: {fm} ({str(r['date'] or '-')}).",
                 "Check if this changes your core thesis, invalidation level, or sizing.",
                 "Open workspace and record decision rationale before acting.",
             ]
-            cites = [{"label": "SEC Filings", "url": f"/company_file/sec?t={tk}"}]
+            cites = [{"label": "SEC Filings", "url": format_citation_url(f"/company_file/sec?t={tk}", actx)}]
             if _proposal_upsert(
                 source_event_key=src_key,
                 kind="filing_update",
@@ -1981,7 +2232,11 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                 confidence=0.9,
                 priority_score=8.5 if fm in {"8-K", "10-Q", "10-K"} else 7.5,
                 execute_route=f"/company_file/sec?t={tk}",
-                execute_payload={"ticker": tk, "form": fm},
+                execute_payload=build_execute_payload(
+                    route=f"/company_file/sec?t={tk}",
+                    context=actx,
+                    payload={"ticker": tk, "form": fm},
+                ),
             ):
                 created += 1
 
@@ -2029,6 +2284,7 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                                 continue
                             rel_type = str(rr[1] or "LINKED")
                             src_key = f"contagion:{tk}:{peer}:{dt.date.today().isoformat()}"
+                            actx = build_analysis_context(analysis_id=src_key, source="contagion_peer_alert")
                             title = f"Contagion Alert: {peer} {d:+.2f}% may impact {tk}"
                             bullets = [
                                 f"Linked peer {peer} moved {d:+.2f}% today.",
@@ -2036,8 +2292,8 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                                 f"Re-check {tk} thesis assumptions and cross-company risk transmission.",
                             ]
                             cites = [
-                                {"label": "Company Workspace", "url": f"/company_file?t={tk}"},
-                                {"label": f"{peer} Workspace", "url": f"/company_file?t={peer}"},
+                                {"label": "Company Workspace", "url": format_citation_url(f"/company_file?t={tk}", actx)},
+                                {"label": f"{peer} Workspace", "url": format_citation_url(f"/company_file?t={peer}", actx)},
                             ]
                             if _proposal_upsert(
                                 source_event_key=src_key,
@@ -2049,7 +2305,11 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                                 confidence=0.88,
                                 priority_score=9.2 + min(3.0, abs(d) / 10.0),
                                 execute_route=f"/company_file?t={tk}",
-                                execute_payload={"ticker": tk, "peer": peer, "day_pct": d},
+                                execute_payload=build_execute_payload(
+                                    route=f"/company_file?t={tk}",
+                                    context=actx,
+                                    payload={"ticker": tk, "peer": peer, "day_pct": d},
+                                ),
                             ):
                                 created += 1
                 finally:
@@ -2090,6 +2350,7 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                             continue
                         rel_type = str(rr["relationship_type"] or "LINKED")
                         src_key = f"contagion:{tk}:{peer}:{dt.date.today().isoformat()}"
+                        actx = build_analysis_context(analysis_id=src_key, source="contagion_peer_alert")
                         title = f"Contagion Alert: {peer} {d:+.2f}% may impact {tk}"
                         bullets = [
                             f"Linked peer {peer} moved {d:+.2f}% today.",
@@ -2097,8 +2358,8 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                             f"Re-check {tk} thesis assumptions and cross-company risk transmission.",
                         ]
                         cites = [
-                            {"label": "Company Workspace", "url": f"/company_file?t={tk}"},
-                            {"label": f"{peer} Workspace", "url": f"/company_file?t={peer}"},
+                            {"label": "Company Workspace", "url": format_citation_url(f"/company_file?t={tk}", actx)},
+                            {"label": f"{peer} Workspace", "url": format_citation_url(f"/company_file?t={peer}", actx)},
                         ]
                         if _proposal_upsert(
                             source_event_key=src_key,
@@ -2110,7 +2371,11 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
                             confidence=0.88,
                             priority_score=9.2 + min(3.0, abs(d) / 10.0),
                             execute_route=f"/company_file?t={tk}",
-                            execute_payload={"ticker": tk, "peer": peer, "day_pct": d},
+                            execute_payload=build_execute_payload(
+                                route=f"/company_file?t={tk}",
+                                context=actx,
+                                payload={"ticker": tk, "peer": peer, "day_pct": d},
+                            ),
                         ):
                             created += 1
             finally:
@@ -2162,11 +2427,12 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
         finally:
             con_pg.close()
 
-    name_map = _company_name_map()
+    name_map = company_name_map()
     weight_map = _portfolio_weight_map()
     lim = max(1, min(250, int(limit or 8) * 12))
     rows = list_action_proposals_pg(status=st, limit=lim)
     raw_items: list[dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     def _to_list(val: Any) -> list[Any]:
         if isinstance(val, list):
             return list(val)
@@ -2186,11 +2452,37 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
             return dict(obj) if isinstance(obj, dict) else {}
         except Exception:
             return {}
+    if not rows:
+        return []
+
     for r in rows:
         bullets = _to_list(r["thesis_json"])
         cites = _to_list(r["citations_json"])
-        insights = _to_list(r["insights_json"])
-        reasoning = _to_dict(r["reasoning_json"])
+        source_event_key = str(r["source_event_key"] or "")
+        actx = build_analysis_context(
+            analysis_id=source_event_key,
+            source=str(r["kind"] or ""),
+            trace_id=f"ap_{int(r['id'] or 0)}",
+        )
+        reasoning_raw = _to_dict(r["reasoning_json"])
+        pipeline = run_proposal_pipeline(
+            relevance_ok=True,
+            raw_reasoning=reasoning_raw,
+            citations=cites,
+            confidence=r.get("confidence"),
+            priority_score=r.get("priority_score"),
+            verify_result=None,
+        )
+        insights = [x for x in list(pipeline.get("insights") or []) if isinstance(x, dict)]
+        reasoning = dict(pipeline.get("reasoning") or {})
+        cites_norm: list[dict[str, str]] = []
+        for c in list(pipeline.get("citations") or []):
+            if not isinstance(c, dict):
+                continue
+            lb = str(c.get("label") or "Source").strip()
+            url = format_citation_url(str(c.get("url") or "").strip(), actx)
+            if url:
+                cites_norm.append({"label": lb or "Source", "url": url})
         raw_items.append(
             {
                 "id": int(r["id"] or 0),
@@ -2200,13 +2492,14 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
                 "ticker": str(r["ticker"] or ""),
                 "title": str(r["title"] or ""),
                 "bullets": [str(x) for x in bullets[:3]],
-                "citations": cites[:6],
+                "citations": cites_norm[:6],
                 "insights": [x for x in insights[:3] if isinstance(x, dict)],
                 "reasoning": reasoning if isinstance(reasoning, dict) else {},
-                "confidence": float(r["confidence"] or 0.0),
-                "priority_score": float(r["priority_score"] or 0.0),
+                "confidence": float(pipeline.get("confidence") or 0.0),
+                "priority_score": float(pipeline.get("priority_score") or 0.0),
                 "execute_route": str(r["execute_route"] or ""),
-                "source_event_key": str(r["source_event_key"] or ""),
+                "source_event_key": source_event_key,
+                "analysis_context": actx.to_dict(),
                 "is_blue_chip": str(r["ticker"] or "").strip().upper() in blue_chip_set,
             }
         )
@@ -2230,7 +2523,6 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
             score += min(ins_count, 3)
             return (score, int(item.get("id") or 0))
 
-        out: list[dict[str, Any]] = []
         for key, items in grouped.items():
             items_sorted = sorted(items, key=lambda x: float(x.get("priority_score") or 0.0), reverse=True)
             base = dict(items_sorted[0])
@@ -2336,7 +2628,7 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
             rz = dict(p.get("reasoning") or {})
             ins = [x for x in list(p.get("insights") or []) if isinstance(x, dict)]
             if not ins:
-                ins = _insights_from_reasoning(rz, bs)
+                ins = insights_from_reasoning(rz)
             p["insights"] = ins[:3]
             p["reasoning"] = rz
             p["bullets"] = bs[:3]
@@ -2354,7 +2646,7 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
         out = [
             p for p in out
             if _reasoning_strength(p)[0] > 0
-            and _passes_reasoning_quality(
+            and passes_reasoning_quality(
                 dict(p.get("reasoning") or {}),
                 [x for x in list(p.get("insights") or []) if isinstance(x, dict)],
                 [x for x in list(p.get("citations") or []) if isinstance(x, dict)],
@@ -3089,8 +3381,8 @@ def execute_action_proposal(proposal_id: int) -> dict[str, Any]:
     row = _pg_get_action_proposal_row(pid)
     if not row:
         return {"ok": False, "route": "/dashboard", "error": "not_found"}
-    route = str(row.get("execute_route") or "/dashboard").strip()
     payload = dict(row.get("execute_payload_json") or {})
+    route = str((payload or {}).get("route") or row.get("execute_route") or "/dashboard").strip()
     tk = _safe_ticker(str(row.get("ticker") or "") or str((payload or {}).get("ticker") or ""))
     title = str(row.get("title") or "").strip()
     source_key = str(row.get("source_event_key") or "").strip()
@@ -3113,7 +3405,13 @@ def execute_action_proposal(proposal_id: int) -> dict[str, Any]:
             note_lines.append("Evidence:")
             for b in bullets[:3]:
                 note_lines.append(f"- {b}")
-        _ = add_company_note(ticker=tk, note="\n".join(note_lines)[:3900], action="Proposal Execute", emotion="Focused")
+        _ = add_company_note(
+            ticker=tk,
+            note="\n".join(note_lines)[:3900],
+            action="Proposal Execute",
+            emotion="Focused",
+            created_by="ai",
+        )
         task_text = (actionable or f"Review and validate proposal for {tk}.").strip() + " [active_proposal]"
         _ = add_company_task(ticker=tk, task=task_text[:900], due_date="", priority="P2")
         remind_at = (dt.datetime.now() + dt.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
@@ -3145,6 +3443,11 @@ def execute_action_proposal(proposal_id: int) -> dict[str, Any]:
                     "updated_at": str(up.get("updated_at") or ""),
                 }
             )
+        # Phase 3.2: Capture outcome tracking baseline
+        try:
+            _capture_outcome_baseline(pid, row)
+        except Exception:
+            pass
         return {"ok": True, "route": route if route.startswith("/") else "/dashboard", "payload": payload, "workspace_seeded": bool(tk)}
     except Exception:
         try:
@@ -3152,5 +3455,617 @@ def execute_action_proposal(proposal_id: int) -> dict[str, Any]:
         except Exception:
             pass
         return {"ok": False, "route": "/dashboard", "error": "update_failed"}
+    finally:
+        con_pg.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2: Outcome Tracking
+# ---------------------------------------------------------------------------
+
+def _capture_outcome_baseline(proposal_id: int, proposal_row: dict[str, Any]) -> None:
+    """Capture price + thesis baseline when a proposal is executed, for future measurement."""
+    if core_backend() != "postgres":
+        return
+    tk = _safe_ticker(str(proposal_row.get("ticker") or ""))
+    if not tk:
+        return
+    # Get current price as baseline
+    pm = get_price_metrics(tk)
+    baseline_price = float((pm or {}).get("price") or (pm or {}).get("end_px") or 0.0)
+    if baseline_price <= 0:
+        return
+    reasoning = dict(proposal_row.get("reasoning_json") or {})
+    conf = str(reasoning.get("confidence") or "").strip()
+    stance = str(reasoning.get("recommended_stance") or "").strip()
+    summary = str(reasoning.get("thesis_validation") or reasoning.get("margin_impact") or "").strip()[:500]
+    now = dt.datetime.now().isoformat()
+
+    con_pg = pg_connect()
+    if con_pg is None:
+        return
+    try:
+        cur = con_pg.cursor()
+        for window in ("7d", "30d", "90d"):
+            cur.execute(
+                """INSERT INTO proposal_outcomes_core
+                   (id, proposal_id, ticker, outcome_type, created_at, measurement_window,
+                    baseline_price, confidence_at_proposal, stance_at_proposal, reasoning_summary, status)
+                   VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM proposal_outcomes_core),
+                           %s, %s, 'price', %s, %s, %s, %s, %s, %s, 'pending')""",
+                (int(proposal_id), tk, now, window, baseline_price, conf[:16], stance[:12], summary),
+            )
+        con_pg.commit()
+    except Exception:
+        try:
+            con_pg.rollback()
+        except Exception:
+            pass
+    finally:
+        con_pg.close()
+
+
+def measure_proposal_outcomes() -> dict[str, Any]:
+    """Measure pending outcomes where the measurement window has elapsed."""
+    if core_backend() != "postgres":
+        return {"ok": False, "error": "not_postgres"}
+    con_pg = pg_connect()
+    if con_pg is None:
+        return {"ok": False, "error": "pg_unavailable"}
+    now = dt.datetime.now()
+    measured = 0
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """SELECT id, proposal_id, ticker, measurement_window, baseline_price,
+                      confidence_at_proposal, stance_at_proposal, reasoning_summary, created_at
+               FROM proposal_outcomes_core
+               WHERE status='pending'
+               ORDER BY id
+               LIMIT 200""",
+        )
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description] if cur.description else []
+        for row in rows:
+            r = dict(zip(cols, row))
+            oid = int(r["id"])
+            tk = str(r["ticker"])
+            window = str(r["measurement_window"])
+            created = str(r["created_at"])
+            baseline = float(r["baseline_price"])
+            # Check if window has elapsed
+            try:
+                created_dt = dt.datetime.fromisoformat(created)
+            except Exception:
+                continue
+            window_days = {"7d": 7, "30d": 30, "90d": 90}.get(window, 30)
+            if (now - created_dt).days < window_days:
+                continue
+            # Measure outcome
+            pm = get_price_metrics(tk)
+            outcome_price = float((pm or {}).get("price") or (pm or {}).get("end_px") or 0.0)
+            if outcome_price <= 0 or baseline <= 0:
+                continue
+            return_pct = ((outcome_price - baseline) / baseline) * 100.0
+            stance = str(r.get("stance_at_proposal") or "").strip().upper()
+            # Direction correct: if stance was ADD/HOLD and price went up, or TRIM/EXIT and price went down
+            direction_correct = None
+            if stance in ("ADD", "HOLD", "WATCH"):
+                direction_correct = return_pct > 0
+            elif stance in ("TRIM", "EXIT"):
+                direction_correct = return_pct < 0
+            # Score: 1.0 = perfect, 0.0 = bad
+            score = 1.0 if direction_correct else 0.0 if direction_correct is not None else 0.5
+
+            cur.execute(
+                """UPDATE proposal_outcomes_core
+                   SET measured_at=%s, outcome_price=%s, return_pct=%s,
+                       direction_correct=%s, score=%s, status='measured'
+                   WHERE id=%s""",
+                (now.isoformat(), outcome_price, round(return_pct, 4),
+                 direction_correct, round(score, 4), oid),
+            )
+            measured += 1
+
+            # Feed back into reflexion if the AI was wrong
+            if direction_correct is False:
+                try:
+                    record_reflexion_from_quality_event(
+                        event_type="outcome_miss",
+                        query=f"Proposal {r['proposal_id']} for {tk}: predicted {stance}, actual {return_pct:+.1f}%",
+                        detail={
+                            "proposal_id": int(r["proposal_id"]),
+                            "ticker": tk,
+                            "stance": stance,
+                            "return_pct": round(return_pct, 2),
+                            "window": window,
+                            "reasoning": str(r.get("reasoning_summary") or ""),
+                        },
+                    )
+                except Exception:
+                    pass
+
+        con_pg.commit()
+        return {"ok": True, "measured": measured}
+    except Exception as exc:
+        try:
+            con_pg.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "error": str(exc)}
+    finally:
+        con_pg.close()
+
+
+def get_ai_accuracy_stats(days: int = 90) -> dict[str, Any]:
+    """Get AI prediction accuracy stats for the dashboard."""
+    if core_backend() != "postgres":
+        return {"ok": False}
+    con_pg = pg_connect()
+    if con_pg is None:
+        return {"ok": False}
+    since = (dt.datetime.now() - dt.timedelta(days=max(1, int(days or 90)))).isoformat()
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """SELECT measurement_window, COUNT(*) as total,
+                      SUM(CASE WHEN direction_correct=TRUE THEN 1 ELSE 0 END) as correct,
+                      AVG(return_pct) as avg_return,
+                      AVG(score) as avg_score
+               FROM proposal_outcomes_core
+               WHERE status='measured' AND created_at >= %s
+               GROUP BY measurement_window
+               ORDER BY measurement_window""",
+            (since,),
+        )
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description] if cur.description else []
+        windows = {}
+        total_correct = 0
+        total_measured = 0
+        for row in rows:
+            r = dict(zip(cols, row))
+            w = str(r["measurement_window"])
+            t = int(r["total"] or 0)
+            c = int(r["correct"] or 0)
+            windows[w] = {
+                "total": t,
+                "correct": c,
+                "hit_rate": round(c / t * 100, 1) if t > 0 else 0.0,
+                "avg_return_pct": round(float(r["avg_return"] or 0), 2),
+                "avg_score": round(float(r["avg_score"] or 0), 3),
+            }
+            total_correct += c
+            total_measured += t
+        return {
+            "ok": True,
+            "overall_hit_rate": round(total_correct / total_measured * 100, 1) if total_measured > 0 else 0.0,
+            "total_measured": total_measured,
+            "by_window": windows,
+        }
+    except Exception:
+        return {"ok": False}
+    finally:
+        con_pg.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.3: Thesis Breach Detector
+# ---------------------------------------------------------------------------
+
+def detect_thesis_breaches(ticker: str | None = None) -> dict[str, Any]:
+    """
+    Compare current financial data against stored thesis invalidation criteria.
+    If ticker is None, check all tickers with active theses.
+    """
+    if core_backend() != "postgres" or ask_ai is None:
+        return {"ok": False, "error": "requires_postgres_and_llm"}
+
+    # Load theses
+    theses = list_watchlist_thesis_pg(limit=200)
+    if ticker:
+        tk = _safe_ticker(ticker)
+        theses = [t for t in theses if _safe_ticker(str(t.get("ticker") or "")) == tk]
+    if not theses:
+        return {"ok": True, "breaches": 0, "checked": 0}
+
+    breaches_created = 0
+    checked = 0
+    for thesis in theses:
+        tk = _safe_ticker(str(thesis.get("ticker") or ""))
+        if not tk:
+            continue
+        thesis_text = str(thesis.get("thesis_summary") or thesis.get("thesis") or "").strip()
+        invalidation = str(thesis.get("invalidation_criteria") or "").strip()
+        if not thesis_text and not invalidation:
+            continue
+
+        checked += 1
+        financial_ctx = _build_financial_context(tk)
+        if not financial_ctx:
+            continue
+
+        prompt = (
+            "You are a thesis validation engine for an investment portfolio.\n"
+            "Compare the investor's thesis and invalidation criteria against the actual financial data.\n"
+            "Determine if any invalidation criteria have been breached.\n\n"
+            f"TICKER: {tk}\n\n"
+            f"INVESTOR'S THESIS:\n{thesis_text[:1500]}\n\n"
+            f"INVALIDATION CRITERIA:\n{invalidation[:800] or '(none specified — infer reasonable criteria from the thesis)'}\n\n"
+            f"CURRENT FINANCIAL DATA:\n{financial_ctx}\n\n"
+            "Analyze:\n"
+            "1. Does the actual data confirm or contradict the thesis?\n"
+            "2. Have any invalidation criteria been breached? Be specific with numbers.\n"
+            "3. What is the severity? (low/medium/high/critical)\n\n"
+            "Return strict JSON only:\n"
+            '{"breached": true/false, "breach_type": "margin_breach|growth_miss|debt_concern|concentration_risk|thesis_invalid|none", '
+            '"breach_detail": "Specific explanation with numbers (e.g., gross margin at 33.2% vs thesis minimum of 35%)", '
+            '"severity": "low|medium|high|critical", '
+            '"actual_values": "Key metrics that triggered the breach"}\n\n'
+            "Rules:\n"
+            "- Only flag a breach if the data clearly contradicts the thesis or hits an invalidation criterion\n"
+            "- Be specific — cite exact numbers from the financial data\n"
+            "- severity=critical only if the core thesis is fundamentally broken\n"
+            "- If no breach, return {\"breached\": false}"
+        )
+        try:
+            raw = str(ask_ai(prompt, "Thesis breach detector. JSON only.", mode="fast", json_mode=True, temperature=0.0) or "").strip()
+            if not raw:
+                continue
+            parsed = json.loads(raw)
+            if not parsed.get("breached"):
+                continue
+            # Store breach alert
+            con_pg = pg_connect()
+            if con_pg is None:
+                continue
+            try:
+                cur = con_pg.cursor()
+                now = dt.datetime.now().isoformat()
+                thesis_id = int(thesis.get("id") or 0)
+                # Dedupe: don't create duplicate breach for same ticker+type in last 7 days
+                cur.execute(
+                    """SELECT id FROM thesis_breach_alerts_core
+                       WHERE ticker=%s AND breach_type=%s AND detected_at >= %s AND status='open'
+                       LIMIT 1""",
+                    (tk, str(parsed.get("breach_type") or "")[:60],
+                     (dt.datetime.now() - dt.timedelta(days=7)).isoformat()),
+                )
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """INSERT INTO thesis_breach_alerts_core
+                       (id, ticker, thesis_id, breach_type, breach_detail, severity, detected_at,
+                        financial_context, thesis_text, invalidation_criteria, actual_values, status)
+                       VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM thesis_breach_alerts_core),
+                               %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'open')""",
+                    (tk, thesis_id,
+                     str(parsed.get("breach_type") or "")[:60],
+                     str(parsed.get("breach_detail") or "")[:600],
+                     str(parsed.get("severity") or "medium")[:16],
+                     now,
+                     financial_ctx[:2000],
+                     thesis_text[:1000],
+                     invalidation[:500],
+                     str(parsed.get("actual_values") or "")[:500]),
+                )
+                con_pg.commit()
+                breaches_created += 1
+            finally:
+                con_pg.close()
+        except Exception:
+            continue
+
+    return {"ok": True, "breaches": breaches_created, "checked": checked}
+
+
+def list_thesis_breach_alerts(status: str = "open", limit: int = 20) -> list[dict[str, Any]]:
+    """List thesis breach alerts for dashboard display."""
+    if core_backend() != "postgres":
+        return []
+    con_pg = pg_connect()
+    if con_pg is None:
+        return []
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """SELECT id, ticker, thesis_id, breach_type, breach_detail, severity,
+                      detected_at, thesis_text, invalidation_criteria, actual_values, status
+               FROM thesis_breach_alerts_core
+               WHERE status=%s
+               ORDER BY id DESC
+               LIMIT %s""",
+            (str(status or "open"), max(1, min(100, int(limit or 20)))),
+        )
+        cols = [d[0] for d in cur.description] if cur.description else []
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    except Exception:
+        return []
+    finally:
+        con_pg.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.4: Cross-Portfolio Reasoning (Secondary Effects)
+# ---------------------------------------------------------------------------
+
+def analyze_portfolio_cascades(trigger_ticker: str, trigger_signal: str, trigger_proposal_id: int = 0) -> dict[str, Any]:
+    """
+    When a signal hits one holding, analyze cascading effects across the portfolio.
+    Uses entity graph relationships + LLM reasoning.
+    """
+    if core_backend() != "postgres" or ask_ai is None:
+        return {"ok": False, "error": "requires_postgres_and_llm"}
+
+    tk = _safe_ticker(trigger_ticker)
+    if not tk:
+        return {"ok": False, "error": "invalid_ticker"}
+
+    # Get all portfolio holdings
+    from app.services.portfolio_memory_service import get_holdings
+    holdings = get_holdings(limit=200)
+    other_tickers = [
+        _safe_ticker(str(h.get("ticker") or ""))
+        for h in holdings
+        if _safe_ticker(str(h.get("ticker") or "")) and _safe_ticker(str(h.get("ticker") or "")) != tk
+    ]
+    if not other_tickers:
+        return {"ok": True, "cascades": 0, "reason": "single_holding_portfolio"}
+
+    # Get relationships from entity graph
+    relationships: list[str] = []
+    con_pg = pg_connect()
+    if con_pg is not None:
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """SELECT r.source_entity_id, r.target_entity_id, r.relationship_type, r.detail_json
+                   FROM relationships_core r
+                   JOIN entities_core e1 ON r.source_entity_id = e1.id
+                   JOIN entities_core e2 ON r.target_entity_id = e2.id
+                   WHERE (e1.name = %s OR e2.name = %s)
+                   LIMIT 50""",
+                (tk, tk),
+            )
+            for row in cur.fetchall():
+                src, tgt, rel_type, detail = row
+                relationships.append(f"{src} --{rel_type}--> {tgt}")
+        except Exception:
+            pass
+        finally:
+            con_pg.close()
+
+    # Build context for each holding
+    portfolio_ctx_lines = []
+    for otk in other_tickers[:12]:
+        ctx = _build_financial_context(otk)
+        if ctx:
+            portfolio_ctx_lines.append(f"--- {otk} ---\n{ctx[:400]}")
+
+    portfolio_summary = "\n".join(portfolio_ctx_lines)[:4000]
+    rel_text = "\n".join(relationships[:20]) if relationships else "(no known relationships)"
+
+    prompt = (
+        "You are a portfolio risk cascade engine. A significant signal just hit one holding.\n"
+        "Analyze the secondary effects on OTHER holdings in the portfolio.\n\n"
+        f"TRIGGER: {tk}\n"
+        f"SIGNAL: {trigger_signal[:1500]}\n\n"
+        f"KNOWN RELATIONSHIPS:\n{rel_text}\n\n"
+        f"OTHER PORTFOLIO HOLDINGS:\n{portfolio_summary}\n\n"
+        "Think about:\n"
+        "- Shared suppliers or customers (if AAPL supply chain hit, does QCOM share same supplier?)\n"
+        "- Same sector exposure (regulatory change affecting multiple holdings)\n"
+        "- Revenue geography overlap (China risk hitting multiple holdings)\n"
+        "- Competitive dynamics (signal good for one = bad for competitor in portfolio)\n"
+        "- Macro correlation (rate sensitivity affecting multiple holdings)\n\n"
+        "Return strict JSON only:\n"
+        '{"cascades": [{"affected_ticker": "TK", "effect_type": "shared_supplier|same_sector|customer_dependency|regulatory_contagion|competitive_impact|macro_correlation", '
+        '"effect_summary": "Specific explanation with reasoning chain", '
+        '"relationship": "How the two are connected", '
+        '"confidence": 0.0, "severity": "low|medium|high|critical"}]}\n\n'
+        "Rules:\n"
+        "- Only include cascades with real, specific connections (not vague)\n"
+        "- Explain the cause-effect chain: signal X → impact on Y → because Z\n"
+        "- confidence 0.0-1.0 based on how direct the connection is\n"
+        "- Maximum 6 cascades\n"
+        "- If no meaningful cascades exist, return {\"cascades\": []}"
+    )
+    try:
+        raw = str(ask_ai(prompt, "Portfolio cascade analyst. JSON only.", mode="smart", json_mode=True, temperature=0.1) or "").strip()
+        if not raw:
+            return {"ok": True, "cascades": 0}
+        parsed = json.loads(raw)
+        cascades = parsed.get("cascades") or []
+        if not cascades:
+            return {"ok": True, "cascades": 0}
+
+        created = 0
+        con_pg = pg_connect()
+        if con_pg is None:
+            return {"ok": False, "error": "pg_unavailable"}
+        try:
+            cur = con_pg.cursor()
+            now = dt.datetime.now().isoformat()
+            for c in cascades[:6]:
+                atk = _safe_ticker(str(c.get("affected_ticker") or ""))
+                if not atk or atk == tk:
+                    continue
+                conf = float(c.get("confidence") or 0.0)
+                if conf < 0.4:
+                    continue
+                # Dedupe
+                cur.execute(
+                    """SELECT id FROM portfolio_cascade_alerts_core
+                       WHERE trigger_ticker=%s AND affected_ticker=%s
+                       AND detected_at >= %s AND status='open'
+                       LIMIT 1""",
+                    (tk, atk, (dt.datetime.now() - dt.timedelta(days=3)).isoformat()),
+                )
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """INSERT INTO portfolio_cascade_alerts_core
+                       (id, trigger_ticker, trigger_signal, trigger_proposal_id, affected_ticker,
+                        effect_type, effect_summary, relationship, confidence, severity, detected_at, status)
+                       VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM portfolio_cascade_alerts_core),
+                               %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'open')""",
+                    (tk, trigger_signal[:500], int(trigger_proposal_id or 0), atk,
+                     str(c.get("effect_type") or "")[:60],
+                     str(c.get("effect_summary") or "")[:600],
+                     str(c.get("relationship") or "")[:300],
+                     conf,
+                     str(c.get("severity") or "medium")[:16],
+                     now),
+                )
+                created += 1
+            con_pg.commit()
+            return {"ok": True, "cascades": created}
+        finally:
+            con_pg.close()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def analyze_universe_signal_for_portfolio(
+    universe_ticker: str,
+    filing_text: str,
+    filing_form: str,
+    held_tickers: list[str],
+) -> dict[str, Any]:
+    """
+    Given a filing from a non-held ticker (e.g. TSMC 8-K about supply constraints),
+    determine whether it creates signals relevant to any held positions.
+
+    This is the noise filter: the LLM reads the filing and decides whether it's
+    actually relevant to your portfolio. If not, it returns cascades=0 and nothing
+    is surfaced. Only real, specific connections become cascade alerts.
+    """
+    if core_backend() != "postgres" or ask_ai is None:
+        return {"ok": False, "cascades": 0, "relevant": False}
+
+    tk = _safe_ticker(universe_ticker)
+    if not tk or not filing_text or not held_tickers:
+        return {"ok": True, "cascades": 0, "relevant": False}
+
+    held_str = ", ".join(held_tickers[:20])
+
+    prompt = (
+        f"You are monitoring SEC filings from companies you DON'T hold, looking for signals "
+        f"that affect companies you DO hold.\n\n"
+        f"FILING SOURCE: {tk} ({filing_form})\n"
+        f"FILING TEXT (excerpt):\n{filing_text[:6000]}\n\n"
+        f"YOUR HELD POSITIONS: {held_str}\n\n"
+        f"TASK:\n"
+        f"1. First, is there anything in this {tk} filing that is materially relevant to any "
+        f"of your held positions? Think about:\n"
+        f"   - Supply chain: does {tk} supply components/services to any held company?\n"
+        f"   - Competition: does {tk} compete with any held company?\n"
+        f"   - Customer: is {tk} a major customer of any held company?\n"
+        f"   - Macro signal: does this reveal a trend (rates, regulation, demand) that hits held positions?\n"
+        f"   - Revenue geography: shared exposure (e.g. both have heavy China revenue)?\n\n"
+        f"2. If relevant: for each affected held ticker, explain the specific mechanism.\n"
+        f"3. If NOT relevant: return cascades=[] — do NOT invent connections.\n\n"
+        f"Return strict JSON only:\n"
+        f'{{"relevant": true/false, "cascades": ['
+        f'{{"affected_ticker": "TK", "effect_type": "shared_supplier|competitor|customer|macro|regulatory", '
+        f'"effect_summary": "Specific cause-effect chain with numbers from the filing", '
+        f'"relationship": "How {tk} and TK are connected", '
+        f'"confidence": 0.0, "severity": "low|medium|high|critical"}}]}}\n\n'
+        f"Rules:\n"
+        f"- Only include cascades where confidence >= 0.5\n"
+        f"- Effect summary must cite specific data from the filing (numbers, quotes)\n"
+        f"- Maximum 5 cascades\n"
+        f"- If nothing is relevant, return {{\"relevant\": false, \"cascades\": []}}"
+    )
+
+    try:
+        raw = str(ask_ai(
+            prompt,
+            f"Portfolio signal monitor. Analyzing {tk} filing for impact on held positions. JSON only.",
+            mode="smart", json_mode=True, temperature=0.1,
+        ) or "").strip()
+        if not raw:
+            return {"ok": True, "cascades": 0, "relevant": False}
+
+        parsed = json.loads(raw)
+        relevant = bool(parsed.get("relevant"))
+        cascades = list(parsed.get("cascades") or [])
+
+        if not relevant or not cascades:
+            return {"ok": True, "cascades": 0, "relevant": False}
+
+        created = 0
+        con_pg = pg_connect()
+        if con_pg is None:
+            return {"ok": False, "error": "pg_unavailable"}
+        try:
+            cur = con_pg.cursor()
+            now = dt.datetime.now().isoformat()
+            signal_snippet = f"[{filing_form}] {filing_text[:300]}"
+            for c in cascades[:5]:
+                atk = _safe_ticker(str(c.get("affected_ticker") or ""))
+                if not atk:
+                    continue
+                conf = float(c.get("confidence") or 0.0)
+                if conf < 0.5:
+                    continue
+                # Dedupe: skip if same (trigger, affected) pair has an open alert in last 7 days
+                cur.execute(
+                    """SELECT id FROM portfolio_cascade_alerts_core
+                       WHERE trigger_ticker=%s AND affected_ticker=%s
+                       AND detected_at >= %s AND status='open' LIMIT 1""",
+                    (tk, atk, (dt.datetime.now() - dt.timedelta(days=7)).isoformat()),
+                )
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """INSERT INTO portfolio_cascade_alerts_core
+                       (id, trigger_ticker, trigger_signal, trigger_proposal_id, affected_ticker,
+                        effect_type, effect_summary, relationship, confidence, severity, detected_at, status)
+                       VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM portfolio_cascade_alerts_core),
+                               %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, 'open')""",
+                    (
+                        tk, signal_snippet[:500], atk,
+                        str(c.get("effect_type") or "")[:60],
+                        str(c.get("effect_summary") or "")[:600],
+                        str(c.get("relationship") or "")[:300],
+                        conf,
+                        str(c.get("severity") or "medium")[:16],
+                        now,
+                    ),
+                )
+                created += 1
+            con_pg.commit()
+            return {"ok": True, "cascades": created, "relevant": True}
+        finally:
+            con_pg.close()
+
+    except Exception as exc:
+        return {"ok": False, "cascades": 0, "relevant": False, "error": str(exc)[:200]}
+
+
+def list_cascade_alerts(status: str = "open", limit: int = 20) -> list[dict[str, Any]]:
+    """List cross-portfolio cascade alerts for dashboard display."""
+    if core_backend() != "postgres":
+        return []
+    con_pg = pg_connect()
+    if con_pg is None:
+        return []
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """SELECT id, trigger_ticker, trigger_signal, affected_ticker,
+                      effect_type, effect_summary, relationship, confidence, severity,
+                      detected_at, status
+               FROM portfolio_cascade_alerts_core
+               WHERE status=%s
+               ORDER BY id DESC
+               LIMIT %s""",
+            (str(status or "open"), max(1, min(100, int(limit or 20)))),
+        )
+        cols = [d[0] for d in cur.description] if cur.description else []
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    except Exception:
+        return []
     finally:
         con_pg.close()

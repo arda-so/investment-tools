@@ -3,8 +3,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import threading
+import uuid
 from typing import Any
 
 from app.core.config import CORE_DB_PATH
@@ -71,6 +73,17 @@ def _pool_recycle_sec() -> int:
         return max(30, int(os.getenv("POSTGRES_POOL_RECYCLE_SEC", "1800")))
     except Exception:
         return 1800
+
+
+def _extract_ticker_from_text(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    # Explicit ticker mention only (e.g., "$AAPL") to avoid noisy auto-linking.
+    m = re.search(r"\$([A-Za-z]{1,5})\b", s)
+    if not m:
+        return ""
+    return str(m.group(1) or "").strip().upper()[:16]
 
 
 def _pg_creator():
@@ -205,6 +218,34 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pt_core_created ON portfolio_transactions_core(created_at DESC)")
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS price_metrics_core (
+                ticker TEXT PRIMARY KEY,
+                asof TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                ytd_return DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                m12_return DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                y5_return DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                ytd_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                ytd_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                m12_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                m12_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                y5_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                y5_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        try:
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS ytd_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS ytd_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS m12_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS m12_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS y5_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS y5_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+        except Exception:
+            pass
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS watchlist_thesis_core (
                 ticker TEXT PRIMARY KEY,
                 thesis TEXT NOT NULL DEFAULT '',
@@ -276,11 +317,16 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
                 created_at TEXT NOT NULL DEFAULT '',
                 priority TEXT NOT NULL DEFAULT 'P2',
                 due_date TEXT NOT NULL DEFAULT '',
+                snooze_until TEXT NOT NULL DEFAULT '',
                 ticker TEXT NOT NULL DEFAULT '',
                 category TEXT NOT NULL DEFAULT 'general'
             )
             """
         )
+        try:
+            cur.execute("ALTER TABLE todos_core ADD COLUMN IF NOT EXISTS snooze_until TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
         cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_core_status ON todos_core(status, id DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_core_ticker ON todos_core(ticker, id DESC)")
         cur.execute(
@@ -318,6 +364,105 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_inv_notes_core_created ON investor_notes_core(created_at DESC, id DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_inv_notes_core_ticker ON investor_notes_core(ticker, id DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investor_annotations_core (
+                id BIGSERIAL PRIMARY KEY,
+                entity_type TEXT NOT NULL DEFAULT 'global',
+                entity_id TEXT NOT NULL DEFAULT '',
+                annotation_type TEXT NOT NULL DEFAULT 'note',
+                content TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                priority TEXT NOT NULL DEFAULT 'P2',
+                due_date TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'general',
+                snooze_until TEXT NOT NULL DEFAULT '',
+                source_ref TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL DEFAULT 'human',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        try:
+            cur.execute("ALTER TABLE investor_annotations_core ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'P2'")
+            cur.execute("ALTER TABLE investor_annotations_core ADD COLUMN IF NOT EXISTS due_date TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE investor_annotations_core ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'general'")
+            cur.execute("ALTER TABLE investor_annotations_core ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_anno_core_entity ON investor_annotations_core(entity_type, entity_id, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_anno_core_type ON investor_annotations_core(annotation_type, status, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_anno_core_due ON investor_annotations_core(due_date, snooze_until)")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_anno_core_source_ref ON investor_annotations_core(source_ref) WHERE source_ref <> ''")
+        # Heavy backfill is opt-in to keep app startup fast and deterministic.
+        if str(os.getenv("CORE_DB_ANNOTATIONS_BACKFILL", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+            cur.execute(
+                """
+                INSERT INTO investor_annotations_core
+                (entity_type, entity_id, annotation_type, content, status, priority, due_date, category, snooze_until, source_ref, created_by, created_at, updated_at)
+                SELECT
+                  CASE WHEN COALESCE(ticker,'') <> '' THEN 'company' ELSE 'global' END,
+                  COALESCE(ticker,''),
+                  'task',
+                  COALESCE(task,''),
+                  COALESCE(status,'open'),
+                  COALESCE(priority,'P2'),
+                  COALESCE(due_date,''),
+                  COALESCE(category,'general'),
+                  COALESCE(snooze_until,''),
+                  'todo:' || COALESCE(id,0)::text,
+                  'human',
+                  COALESCE(created_at,''),
+                  COALESCE(created_at,'')
+                FROM todos_core
+                ON CONFLICT DO NOTHING
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO investor_annotations_core
+                (entity_type, entity_id, annotation_type, content, status, priority, due_date, category, snooze_until, source_ref, created_by, created_at, updated_at)
+                SELECT
+                  CASE WHEN COALESCE(ticker,'') <> '' THEN 'company' ELSE 'global' END,
+                  COALESCE(ticker,''),
+                  'note',
+                  COALESCE(note,''),
+                  COALESCE(status,'approved'),
+                  'P2',
+                  '',
+                  'general',
+                  '',
+                  'invnote:' || COALESCE(id,0)::text,
+                  COALESCE(created_by,'human'),
+                  COALESCE(created_at,''),
+                  COALESCE(created_at,'')
+                FROM investor_notes_core
+                ON CONFLICT DO NOTHING
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO investor_annotations_core
+                (entity_type, entity_id, annotation_type, content, status, priority, due_date, category, snooze_until, source_ref, created_by, created_at, updated_at)
+                SELECT
+                  CASE WHEN COALESCE(ticker,'') <> '' THEN 'company' ELSE 'global' END,
+                  COALESCE(ticker,''),
+                  'note',
+                  COALESCE(note,''),
+                  COALESCE(status,'approved'),
+                  'P2',
+                  '',
+                  'general',
+                  '',
+                  'wj:' || COALESCE(id,0)::text,
+                  COALESCE(created_by,'human'),
+                  COALESCE(created_at,''),
+                  COALESCE(created_at,'')
+                FROM workspace_journal_core
+                ON CONFLICT DO NOTHING
+                """
+            )
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS company_reminders_core (
@@ -556,6 +701,44 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_intel_feed_core_created ON intel_feed_core(created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_intel_feed_core_ticker ON intel_feed_core(ticker)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS news_wire_snapshot_core (
+                id BIGSERIAL PRIMARY KEY,
+                panel TEXT NOT NULL DEFAULT 'general',
+                title TEXT NOT NULL DEFAULT '',
+                link TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                published_at TEXT NOT NULL DEFAULT '',
+                fetched_at TEXT NOT NULL DEFAULT '',
+                unique_key TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_news_wire_core_panel_fetched ON news_wire_snapshot_core(panel, fetched_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS earnings_calendar_snapshot_core (
+                id BIGSERIAL PRIMARY KEY,
+                event_date TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL DEFAULT '',
+                company TEXT NOT NULL DEFAULT '',
+                time_text TEXT NOT NULL DEFAULT '',
+                reported TEXT NOT NULL DEFAULT '0',
+                verdict TEXT NOT NULL DEFAULT '',
+                surprise_txt TEXT NOT NULL DEFAULT '',
+                eps_actual TEXT NOT NULL DEFAULT '',
+                eps_estimate TEXT NOT NULL DEFAULT '',
+                result_source TEXT NOT NULL DEFAULT '',
+                event_status TEXT NOT NULL DEFAULT 'upcoming',
+                confidence TEXT NOT NULL DEFAULT '',
+                fetched_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(event_date, symbol, time_text)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_earnings_snap_core_date ON earnings_calendar_snapshot_core(event_date, symbol)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_earnings_snap_core_fetched ON earnings_calendar_snapshot_core(fetched_at DESC)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS changes_core (
@@ -879,6 +1062,80 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_created ON ai_meta_suggestions_core(created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_status ON ai_meta_suggestions_core(status, priority DESC)")
+
+        # Phase 3.2: Outcome Tracking
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proposal_outcomes_core (
+                id BIGINT PRIMARY KEY,
+                proposal_id BIGINT NOT NULL,
+                ticker TEXT NOT NULL,
+                outcome_type TEXT NOT NULL DEFAULT 'price',
+                created_at TEXT NOT NULL,
+                measured_at TEXT NOT NULL DEFAULT '',
+                measurement_window TEXT NOT NULL DEFAULT '',
+                baseline_price DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                outcome_price DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                return_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                direction_correct BOOLEAN DEFAULT NULL,
+                thesis_confirmed BOOLEAN DEFAULT NULL,
+                confidence_at_proposal TEXT NOT NULL DEFAULT '',
+                stance_at_proposal TEXT NOT NULL DEFAULT '',
+                reasoning_summary TEXT NOT NULL DEFAULT '',
+                score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'pending'
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_proposal_outcomes_core_proposal ON proposal_outcomes_core(proposal_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_proposal_outcomes_core_status ON proposal_outcomes_core(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_proposal_outcomes_core_ticker ON proposal_outcomes_core(ticker)")
+
+        # Phase 3.3: Thesis Breach Alerts
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thesis_breach_alerts_core (
+                id BIGINT PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                thesis_id BIGINT NOT NULL DEFAULT 0,
+                breach_type TEXT NOT NULL DEFAULT '',
+                breach_detail TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT 'medium',
+                detected_at TEXT NOT NULL,
+                financial_context TEXT NOT NULL DEFAULT '',
+                thesis_text TEXT NOT NULL DEFAULT '',
+                invalidation_criteria TEXT NOT NULL DEFAULT '',
+                actual_values TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open'
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_thesis_breach_core_ticker ON thesis_breach_alerts_core(ticker)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_thesis_breach_core_status ON thesis_breach_alerts_core(status)")
+
+        # Phase 3.4: Cross-Portfolio Cascade Alerts
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_cascade_alerts_core (
+                id BIGINT PRIMARY KEY,
+                trigger_ticker TEXT NOT NULL,
+                trigger_signal TEXT NOT NULL DEFAULT '',
+                trigger_proposal_id BIGINT NOT NULL DEFAULT 0,
+                affected_ticker TEXT NOT NULL,
+                effect_type TEXT NOT NULL DEFAULT '',
+                effect_summary TEXT NOT NULL DEFAULT '',
+                relationship TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                severity TEXT NOT NULL DEFAULT 'medium',
+                detected_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open'
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cascade_core_trigger ON portfolio_cascade_alerts_core(trigger_ticker)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cascade_core_affected ON portfolio_cascade_alerts_core(affected_ticker)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cascade_core_status ON portfolio_cascade_alerts_core(status)")
+
         con.commit()
         return {"ok": True}
     except Exception as exc:
@@ -2359,6 +2616,708 @@ def list_recent_portfolio_transactions_pg(limit: int = 20, ticker: str = "") -> 
     return list_portfolio_transactions_pg(limit=limit, ticker=ticker, year=0)
 
 
+def ensure_price_metrics_schema_pg() -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS price_metrics_core (
+                ticker TEXT PRIMARY KEY,
+                asof TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                ytd_return DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                m12_return DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                y5_return DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                ytd_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                ytd_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                m12_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                m12_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                y5_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                y5_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        try:
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS ytd_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS ytd_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS m12_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS m12_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS y5_start_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+            cur.execute("ALTER TABLE price_metrics_core ADD COLUMN IF NOT EXISTS y5_end_px DOUBLE PRECISION NOT NULL DEFAULT 0.0")
+        except Exception:
+            pass
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def get_price_metrics_pg(ticker: str) -> dict[str, Any]:
+    _ = ensure_price_metrics_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='price_metrics_core'
+            """
+        )
+        cols = {str(x[0] or "").strip().lower() for x in (cur.fetchall() or [])}
+        extra_sel = []
+        for nm in ("ytd_start_px", "ytd_end_px", "m12_start_px", "m12_end_px", "y5_start_px", "y5_end_px"):
+            extra_sel.append(nm if nm in cols else "0.0")
+        cur.execute(
+            f"""
+            SELECT ticker, asof, source, ytd_return, m12_return, y5_return, updated_at,
+                   {extra_sel[0]}, {extra_sel[1]}, {extra_sel[2]}, {extra_sel[3]}, {extra_sel[4]}, {extra_sel[5]}
+            FROM price_metrics_core
+            WHERE ticker=%s
+            LIMIT 1
+            """,
+            (tk,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return {}
+        return {
+            "ticker": str(r[0] or ""),
+            "asof": str(r[1] or ""),
+            "source": str(r[2] or ""),
+            "ytd_return": float(r[3] or 0.0),
+            "m12_return": float(r[4] or 0.0),
+            "y5_return": float(r[5] or 0.0),
+            "updated_at": str(r[6] or ""),
+            "ytd_start_px": float(r[7] or 0.0),
+            "ytd_end_px": float(r[8] or 0.0),
+            "m12_start_px": float(r[9] or 0.0),
+            "m12_end_px": float(r[10] or 0.0),
+            "y5_start_px": float(r[11] or 0.0),
+            "y5_end_px": float(r[12] or 0.0),
+        }
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def upsert_price_metrics_pg(
+    *,
+    ticker: str,
+    asof: str,
+    source: str,
+    ytd_return: float,
+    m12_return: float,
+    y5_return: float,
+    ytd_start_px: float = 0.0,
+    ytd_end_px: float = 0.0,
+    m12_start_px: float = 0.0,
+    m12_end_px: float = 0.0,
+    y5_start_px: float = 0.0,
+    y5_end_px: float = 0.0,
+) -> bool:
+    _ = ensure_price_metrics_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='price_metrics_core'
+            """
+        )
+        cols = {str(x[0] or "").strip().lower() for x in (cur.fetchall() or [])}
+        has_pairs = all(x in cols for x in ("ytd_start_px", "ytd_end_px", "m12_start_px", "m12_end_px", "y5_start_px", "y5_end_px"))
+        if has_pairs:
+            cur.execute(
+                """
+                INSERT INTO price_metrics_core
+                (ticker, asof, source, ytd_return, m12_return, y5_return, ytd_start_px, ytd_end_px, m12_start_px, m12_end_px, y5_start_px, y5_end_px, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (ticker) DO UPDATE SET
+                  asof=EXCLUDED.asof,
+                  source=EXCLUDED.source,
+                  ytd_return=EXCLUDED.ytd_return,
+                  m12_return=EXCLUDED.m12_return,
+                  y5_return=EXCLUDED.y5_return,
+                  ytd_start_px=EXCLUDED.ytd_start_px,
+                  ytd_end_px=EXCLUDED.ytd_end_px,
+                  m12_start_px=EXCLUDED.m12_start_px,
+                  m12_end_px=EXCLUDED.m12_end_px,
+                  y5_start_px=EXCLUDED.y5_start_px,
+                  y5_end_px=EXCLUDED.y5_end_px,
+                  updated_at=EXCLUDED.updated_at
+                """,
+                (
+                    tk,
+                    str(asof or "")[:40],
+                    str(source or "")[:40],
+                    float(ytd_return or 0.0),
+                    float(m12_return or 0.0),
+                    float(y5_return or 0.0),
+                    float(ytd_start_px or 0.0),
+                    float(ytd_end_px or 0.0),
+                    float(m12_start_px or 0.0),
+                    float(m12_end_px or 0.0),
+                    float(y5_start_px or 0.0),
+                    float(y5_end_px or 0.0),
+                    now,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO price_metrics_core
+                (ticker, asof, source, ytd_return, m12_return, y5_return, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (ticker) DO UPDATE SET
+                  asof=EXCLUDED.asof,
+                  source=EXCLUDED.source,
+                  ytd_return=EXCLUDED.ytd_return,
+                  m12_return=EXCLUDED.m12_return,
+                  y5_return=EXCLUDED.y5_return,
+                  updated_at=EXCLUDED.updated_at
+                """,
+                (
+                    tk,
+                    str(asof or "")[:40],
+                    str(source or "")[:40],
+                    float(ytd_return or 0.0),
+                    float(m12_return or 0.0),
+                    float(y5_return or 0.0),
+                    now,
+                ),
+            )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def ensure_mini_statements_schema_pg() -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mini_statements_core (
+                ticker TEXT PRIMARY KEY,
+                asof TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                currency TEXT NOT NULL DEFAULT 'USD',
+                years_json TEXT NOT NULL DEFAULT '[]',
+                revenue_json TEXT NOT NULL DEFAULT '[]',
+                gross_profit_json TEXT NOT NULL DEFAULT '[]',
+                operating_cash_flow_json TEXT NOT NULL DEFAULT '[]',
+                capex_json TEXT NOT NULL DEFAULT '[]',
+                free_cash_flow_json TEXT NOT NULL DEFAULT '[]',
+                total_cash_json TEXT NOT NULL DEFAULT '[]',
+                total_debt_json TEXT NOT NULL DEFAULT '[]',
+                total_equity_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def ensure_company_intel_schema_pg() -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_intel_core (
+                ticker TEXT PRIMARY KEY,
+                asof TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                revenue_segments_json TEXT NOT NULL DEFAULT '{}',
+                buyback_json TEXT NOT NULL DEFAULT '{}',
+                insider_trades_json TEXT NOT NULL DEFAULT '[]',
+                status_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def get_company_intel_pg(ticker: str) -> dict[str, Any]:
+    _ = ensure_company_intel_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT ticker, asof, source, revenue_segments_json, buyback_json, insider_trades_json, status_json, updated_at
+            FROM company_intel_core
+            WHERE ticker=%s
+            LIMIT 1
+            """,
+            (tk,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return {}
+
+        def _loads(v: Any, fallback: str) -> Any:
+            try:
+                return json.loads(str(v or fallback))
+            except Exception:
+                return json.loads(fallback)
+
+        return {
+            "ticker": str(r[0] or ""),
+            "asof": str(r[1] or ""),
+            "source": str(r[2] or ""),
+            "revenue_segments": _loads(r[3], "{}"),
+            "buyback": _loads(r[4], "{}"),
+            "insider_trades": _loads(r[5], "[]"),
+            "status": _loads(r[6], "{}"),
+            "updated_at": str(r[7] or ""),
+        }
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def upsert_company_intel_pg(
+    *,
+    ticker: str,
+    asof: str,
+    source: str,
+    revenue_segments: dict[str, Any] | None,
+    buyback: dict[str, Any] | None,
+    insider_trades: list[dict[str, Any]] | None,
+    status: dict[str, Any] | None,
+) -> bool:
+    _ = ensure_company_intel_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO company_intel_core
+            (ticker, asof, source, revenue_segments_json, buyback_json, insider_trades_json, status_json, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (ticker) DO UPDATE SET
+              asof=EXCLUDED.asof,
+              source=EXCLUDED.source,
+              revenue_segments_json=EXCLUDED.revenue_segments_json,
+              buyback_json=EXCLUDED.buyback_json,
+              insider_trades_json=EXCLUDED.insider_trades_json,
+              status_json=EXCLUDED.status_json,
+              updated_at=EXCLUDED.updated_at
+            """,
+            (
+                tk,
+                str(asof or "")[:40],
+                str(source or "")[:40],
+                json.dumps(dict(revenue_segments or {}), ensure_ascii=True),
+                json.dumps(dict(buyback or {}), ensure_ascii=True),
+                json.dumps(list(insider_trades or [])[:32], ensure_ascii=True),
+                json.dumps(dict(status or {}), ensure_ascii=True),
+                now,
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def ensure_earnings_transcripts_schema_pg() -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS earnings_transcripts_core (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                call_date TEXT NOT NULL DEFAULT '',
+                fiscal_year INTEGER,
+                fiscal_quarter TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL DEFAULT 'sec_filing',
+                source_url TEXT NOT NULL DEFAULT '',
+                filing_id BIGINT NOT NULL DEFAULT 0,
+                accession TEXT NOT NULL DEFAULT '',
+                excerpt TEXT NOT NULL DEFAULT '',
+                transcript_text TEXT NOT NULL DEFAULT '',
+                char_count INTEGER NOT NULL DEFAULT 0,
+                quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                is_partial BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(ticker, call_date, accession, source_type)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_et_core_ticker_date ON earnings_transcripts_core(ticker, call_date DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_et_core_quality ON earnings_transcripts_core(ticker, quality_score DESC)")
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def upsert_earnings_transcript_pg(
+    *,
+    ticker: str,
+    call_date: str,
+    fiscal_year: int | None,
+    fiscal_quarter: str,
+    title: str,
+    source_type: str,
+    source_url: str,
+    filing_id: int,
+    accession: str,
+    excerpt: str,
+    transcript_text: str,
+    char_count: int,
+    quality_score: float,
+    is_partial: bool,
+) -> bool:
+    _ = ensure_earnings_transcripts_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO earnings_transcripts_core
+            (ticker, call_date, fiscal_year, fiscal_quarter, title, source_type, source_url, filing_id, accession, excerpt, transcript_text, char_count, quality_score, is_partial, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (ticker, call_date, accession, source_type) DO UPDATE SET
+              fiscal_year=EXCLUDED.fiscal_year,
+              fiscal_quarter=EXCLUDED.fiscal_quarter,
+              title=EXCLUDED.title,
+              source_url=EXCLUDED.source_url,
+              filing_id=EXCLUDED.filing_id,
+              excerpt=EXCLUDED.excerpt,
+              transcript_text=EXCLUDED.transcript_text,
+              char_count=EXCLUDED.char_count,
+              quality_score=EXCLUDED.quality_score,
+              is_partial=EXCLUDED.is_partial,
+              updated_at=EXCLUDED.updated_at
+            """,
+            (
+                tk,
+                str(call_date or "")[:20],
+                int(fiscal_year) if fiscal_year is not None else None,
+                str(fiscal_quarter or "")[:8],
+                str(title or "")[:220],
+                str(source_type or "sec_filing")[:40],
+                str(source_url or "")[:1200],
+                int(filing_id or 0),
+                str(accession or "")[:80],
+                str(excerpt or "")[:2400],
+                str(transcript_text or "")[:220000],
+                int(char_count or 0),
+                float(quality_score or 0.0),
+                bool(is_partial),
+                now,
+                now,
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def list_earnings_transcripts_pg(ticker: str, limit: int = 24) -> list[dict[str, Any]]:
+    _ = ensure_earnings_transcripts_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return []
+    con = pg_connect()
+    if con is None:
+        return []
+    try:
+        lim = max(1, min(200, int(limit or 24)))
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT id, ticker, call_date, fiscal_year, fiscal_quarter, title, source_type, source_url,
+                   filing_id, accession, excerpt, char_count, quality_score, is_partial, updated_at
+            FROM earnings_transcripts_core
+            WHERE ticker=%s
+            ORDER BY call_date DESC, quality_score DESC, id DESC
+            LIMIT %s
+            """,
+            (tk, lim),
+        )
+        out: list[dict[str, Any]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "ticker": str(r[1] or ""),
+                    "call_date": str(r[2] or ""),
+                    "fiscal_year": int(r[3]) if r[3] is not None else None,
+                    "fiscal_quarter": str(r[4] or ""),
+                    "title": str(r[5] or ""),
+                    "source_type": str(r[6] or ""),
+                    "source_url": str(r[7] or ""),
+                    "filing_id": int(r[8] or 0),
+                    "accession": str(r[9] or ""),
+                    "excerpt": str(r[10] or ""),
+                    "char_count": int(r[11] or 0),
+                    "quality_score": float(r[12] or 0.0),
+                    "is_partial": bool(r[13]),
+                    "updated_at": str(r[14] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def delete_earnings_transcripts_by_ids_pg(ids: list[int]) -> int:
+    _ = ensure_earnings_transcripts_schema_pg()
+    clean_ids = [int(x) for x in (ids or []) if int(x or 0) > 0]
+    if not clean_ids:
+        return 0
+    con = pg_connect()
+    if con is None:
+        return 0
+    try:
+        cur = con.cursor()
+        marks = ",".join("%s" for _ in clean_ids)
+        cur.execute(f"DELETE FROM earnings_transcripts_core WHERE id IN ({marks})", tuple(clean_ids))
+        n = int(getattr(cur, "rowcount", 0) or 0)
+        con.commit()
+        return n
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        con.close()
+
+
+def get_mini_statements_pg(ticker: str) -> dict[str, Any]:
+    _ = ensure_mini_statements_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT ticker, asof, source, currency, years_json, revenue_json, gross_profit_json,
+                   operating_cash_flow_json, capex_json, free_cash_flow_json,
+                   total_cash_json, total_debt_json, total_equity_json, updated_at
+            FROM mini_statements_core
+            WHERE ticker=%s
+            LIMIT 1
+            """,
+            (tk,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return {}
+        def _loads(v: Any, fallback: str = "[]") -> Any:
+            try:
+                return json.loads(str(v or fallback))
+            except Exception:
+                return json.loads(fallback)
+        return {
+            "ticker": str(r[0] or ""),
+            "asof": str(r[1] or ""),
+            "source": str(r[2] or ""),
+            "currency": str(r[3] or "USD"),
+            "years": _loads(r[4], "[]"),
+            "revenue": _loads(r[5], "[]"),
+            "gross_profit": _loads(r[6], "[]"),
+            "operating_cash_flow": _loads(r[7], "[]"),
+            "capex": _loads(r[8], "[]"),
+            "free_cash_flow": _loads(r[9], "[]"),
+            "total_cash": _loads(r[10], "[]"),
+            "total_debt": _loads(r[11], "[]"),
+            "total_equity": _loads(r[12], "[]"),
+            "updated_at": str(r[13] or ""),
+        }
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def upsert_mini_statements_pg(
+    *,
+    ticker: str,
+    asof: str,
+    source: str,
+    currency: str,
+    years: list[int],
+    revenue: list[float | None],
+    gross_profit: list[float | None],
+    operating_cash_flow: list[float | None],
+    capex: list[float | None],
+    free_cash_flow: list[float | None],
+    total_cash: list[float | None],
+    total_debt: list[float | None],
+    total_equity: list[float | None],
+) -> bool:
+    _ = ensure_mini_statements_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO mini_statements_core
+            (ticker, asof, source, currency, years_json, revenue_json, gross_profit_json,
+             operating_cash_flow_json, capex_json, free_cash_flow_json,
+             total_cash_json, total_debt_json, total_equity_json, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (ticker) DO UPDATE SET
+              asof=EXCLUDED.asof,
+              source=EXCLUDED.source,
+              currency=EXCLUDED.currency,
+              years_json=EXCLUDED.years_json,
+              revenue_json=EXCLUDED.revenue_json,
+              gross_profit_json=EXCLUDED.gross_profit_json,
+              operating_cash_flow_json=EXCLUDED.operating_cash_flow_json,
+              capex_json=EXCLUDED.capex_json,
+              free_cash_flow_json=EXCLUDED.free_cash_flow_json,
+              total_cash_json=EXCLUDED.total_cash_json,
+              total_debt_json=EXCLUDED.total_debt_json,
+              total_equity_json=EXCLUDED.total_equity_json,
+              updated_at=EXCLUDED.updated_at
+            """,
+            (
+                tk,
+                str(asof or "")[:40],
+                str(source or "")[:40],
+                (str(currency or "USD").strip().upper() or "USD")[:8],
+                json.dumps(list(years or [])[:8]),
+                json.dumps(list(revenue or [])[:8]),
+                json.dumps(list(gross_profit or [])[:8]),
+                json.dumps(list(operating_cash_flow or [])[:8]),
+                json.dumps(list(capex or [])[:8]),
+                json.dumps(list(free_cash_flow or [])[:8]),
+                json.dumps(list(total_cash or [])[:8]),
+                json.dumps(list(total_debt or [])[:8]),
+                json.dumps(list(total_equity or [])[:8]),
+                now,
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
 def insert_portfolio_transaction_pg(
     *,
     created_at: str,
@@ -2394,11 +3353,12 @@ def insert_portfolio_transaction_pg(
         )
         con.commit()
         return True
-    except Exception:
+    except Exception as exc:
         try:
             con.rollback()
         except Exception:
             pass
+        print(f"[add_todo_pg] {type(exc).__name__}: {exc}")
         return False
     finally:
         con.close()
@@ -2749,26 +3709,61 @@ def list_todos_pg(open_only: bool = True, limit: int = 400, ticker: str = "") ->
     lim = max(1, min(2000, int(limit or 400)))
     tk = str(ticker or "").strip().upper()
     try:
-        clauses: list[str] = []
-        vals: list[Any] = []
-        if tk:
-            clauses.append("ticker = %s")
-            vals.append(tk)
-        if open_only:
-            clauses.append("status = 'open'")
-        else:
-            clauses.append("status IN ('done','archived')")
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        order = (
-            "ORDER BY CASE priority WHEN 'P1' THEN 0 WHEN 'P2' THEN 1 ELSE 2 END,"
-            " CASE WHEN due_date <> '' THEN due_date ELSE '9999-12-31' END, id DESC"
-            if open_only
-            else "ORDER BY id DESC"
-        )
+        # Compatibility: investor_annotations_core exists in two schema variants.
+        # New polymorphic schema uses `content_text`; older one used `content`.
         cur = con.cursor()
         cur.execute(
-            f"""SELECT id, task, status, priority, due_date, ticker, category, created_at
-                FROM todos_core {where} {order} LIMIT %s""",
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='investor_annotations_core'
+            """
+        )
+        cols = {str(r[0] or "").strip().lower() for r in (cur.fetchall() or [])}
+        text_col = "content" if "content" in cols else ("content_text" if "content_text" in cols else "")
+        has_priority = "priority" in cols
+        has_due_date = "due_date" in cols
+        has_snooze_until = "snooze_until" in cols
+        has_category = "category" in cols
+
+        clauses: list[str] = []
+        vals: list[Any] = []
+        clauses.append("annotation_type = 'task'")
+        if tk:
+            clauses.append("entity_type='company' AND entity_id = %s")
+            vals.append(tk)
+        if open_only:
+            # "snoozed" tasks stay hidden until snooze date is reached.
+            if has_snooze_until:
+                clauses.append("(status = 'open' OR (status = 'snoozed' AND COALESCE(snooze_until,'') <> '' AND snooze_until <= %s))")
+                vals.append(dt.date.today().isoformat())
+            else:
+                clauses.append("status = 'open'")
+        else:
+            if has_snooze_until:
+                clauses.append("(status IN ('done','archived') OR (status='snoozed' AND COALESCE(snooze_until,'') <> '' AND snooze_until > %s))")
+                vals.append(dt.date.today().isoformat())
+            else:
+                clauses.append("status IN ('done','archived')")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        order = (
+            (
+                "ORDER BY "
+                + ("CASE priority WHEN 'P1' THEN 0 WHEN 'P2' THEN 1 ELSE 2 END, " if has_priority else "")
+                + ("CASE WHEN due_date <> '' THEN due_date ELSE '9999-12-31' END, " if has_due_date else "")
+                + "created_at DESC, id DESC"
+            )
+            if open_only
+            else "ORDER BY created_at DESC, id DESC"
+        )
+        task_sel = text_col if text_col else "''"
+        pri_sel = "priority" if has_priority else "'P2'"
+        due_sel = "due_date" if has_due_date else "''"
+        snooze_sel = "snooze_until" if has_snooze_until else "''"
+        cat_sel = "category" if has_category else "'general'"
+        cur.execute(
+            f"""SELECT id, {task_sel}, status, {pri_sel}, {due_sel}, {snooze_sel}, entity_id, {cat_sel}, created_at
+                FROM investor_annotations_core {where} {order} LIMIT %s""",
             tuple(vals + [lim]),
         )
         out: list[dict[str, Any]] = []
@@ -2780,9 +3775,10 @@ def list_todos_pg(open_only: bool = True, limit: int = 400, ticker: str = "") ->
                     "status": str(r[2] or "open"),
                     "priority": str(r[3] or "P2"),
                     "due_date": str(r[4] or ""),
-                    "ticker": str(r[5] or "").upper(),
-                    "category": str(r[6] or "general"),
-                    "created_at": str(r[7] or ""),
+                    "snooze_until": str(r[5] or ""),
+                    "ticker": str(r[6] or "").upper(),
+                    "category": str(r[7] or "general"),
+                    "created_at": str(r[8] or ""),
                 }
             )
         return out
@@ -2801,6 +3797,8 @@ def add_todo_pg(task: str, *, ticker: str = "", category: str = "general", prior
         con.close()
         return False
     tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        tk = _extract_ticker_from_text(txt)
     cat = str(category or "general").strip().lower()
     pr = str(priority or "P2").strip().upper()
     dd = str(due_date or "").strip()
@@ -2813,10 +3811,70 @@ def add_todo_pg(task: str, *, ticker: str = "", category: str = "general", prior
         cur = con.cursor()
         cur.execute(
             """
-            INSERT INTO todos_core (id, task, status, created_at, priority, due_date, ticker, category)
-            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM todos_core), %s, 'open', %s, %s, %s, %s, %s)
-            """,
-            (txt[:4000], now, pr, dd, tk, cat),
+            SELECT column_name, COALESCE(column_default, '')
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='investor_annotations_core'
+            """
+        )
+        col_rows = cur.fetchall() or []
+        cols = {str(r[0] or "").strip().lower() for r in col_rows}
+        id_has_default = False
+        for r in col_rows:
+            if str(r[0] or "").strip().lower() == "id":
+                id_has_default = bool(str(r[1] or "").strip())
+                break
+        base_cols = ["entity_type", "entity_id", "annotation_type", "status", "created_at", "updated_at"]
+        base_vals: list[Any] = ["company" if tk else "global", tk, "task", "open", now, now]
+        row_id: int | None = None
+        if "id" in cols and not id_has_default:
+            cur.execute("SELECT COALESCE(MAX(id),0)+1 FROM investor_annotations_core")
+            row_id = int((cur.fetchone() or [1])[0] or 1)
+            base_cols.insert(0, "id")
+            base_vals.insert(0, row_id)
+        if "content" in cols:
+            base_cols.append("content")
+            base_vals.append(txt[:4000])
+        elif "content_text" in cols:
+            base_cols.append("content_text")
+            base_vals.append(txt[:4000])
+        if "priority" in cols:
+            base_cols.append("priority")
+            base_vals.append(pr)
+        if "due_date" in cols:
+            base_cols.append("due_date")
+            base_vals.append(dd)
+        if "category" in cols:
+            base_cols.append("category")
+            base_vals.append(cat)
+        if "snooze_until" in cols:
+            base_cols.append("snooze_until")
+            base_vals.append("")
+        if "source_ref" in cols:
+            base_cols.append("source_ref")
+            base_vals.append("")
+        if "created_by" in cols:
+            base_cols.append("created_by")
+            base_vals.append("human")
+        if "tenant_id" in cols:
+            base_cols.append("tenant_id")
+            base_vals.append("default")
+        if "user_id" in cols:
+            base_cols.append("user_id")
+            base_vals.append("default")
+        if "source_table" in cols:
+            base_cols.append("source_table")
+            base_vals.append("todos_core")
+        if "source_id" in cols:
+            sid = f"todo:{row_id}" if row_id is not None else f"todo:{int(dt.datetime.now().timestamp() * 1_000_000)}:{uuid.uuid4().hex[:8]}"
+            base_cols.append("source_id")
+            base_vals.append(sid)
+        if "content_json" in cols:
+            base_cols.append("content_json")
+            base_vals.append(json.dumps({}, ensure_ascii=True))
+        marks = ", ".join(["%s"] * len(base_cols))
+        cur.execute(
+            f"INSERT INTO investor_annotations_core ({', '.join(base_cols)}) VALUES ({marks})",
+            tuple(base_vals),
         )
         con.commit()
         return True
@@ -2835,14 +3893,23 @@ def update_todo_status_pg(todo_id: int, new_status: str) -> bool:
     if rid <= 0:
         return False
     st = str(new_status or "").strip().lower()
-    if st not in {"open", "done", "archived"}:
+    if st not in {"open", "done", "archived", "snoozed"}:
         return False
     con = pg_connect()
     if con is None:
         return False
     try:
         cur = con.cursor()
-        cur.execute("UPDATE todos_core SET status=%s WHERE id=%s", (st, rid))
+        if st == "open":
+            cur.execute(
+                "UPDATE investor_annotations_core SET status=%s, snooze_until='', updated_at=%s WHERE id=%s AND annotation_type='task'",
+                (st, dt.datetime.now().isoformat(), rid),
+            )
+        else:
+            cur.execute(
+                "UPDATE investor_annotations_core SET status=%s, updated_at=%s WHERE id=%s AND annotation_type='task'",
+                (st, dt.datetime.now().isoformat(), rid),
+            )
         con.commit()
         return int(cur.rowcount or 0) > 0
     except Exception:
@@ -2864,14 +3931,17 @@ def toggle_todo_pg(todo_id: int) -> bool:
         return False
     try:
         cur = con.cursor()
-        cur.execute("SELECT status, category FROM todos_core WHERE id=%s", (rid,))
+        cur.execute("SELECT status, category FROM investor_annotations_core WHERE id=%s AND annotation_type='task'", (rid,))
         row = cur.fetchone()
         if not row:
             return False
         cur_status = str(row[0] or "open").strip().lower()
         cat = str(row[1] or "general").strip().lower()
         nxt = ("archived" if cat == "quick" else "done") if cur_status == "open" else "open"
-        cur.execute("UPDATE todos_core SET status=%s WHERE id=%s", (nxt, rid))
+        cur.execute(
+            "UPDATE investor_annotations_core SET status=%s, updated_at=%s WHERE id=%s AND annotation_type='task'",
+            (nxt, dt.datetime.now().isoformat(), rid),
+        )
         con.commit()
         return True
     except Exception:
@@ -2893,7 +3963,7 @@ def delete_todo_pg(todo_id: int) -> bool:
         return False
     try:
         cur = con.cursor()
-        cur.execute("DELETE FROM todos_core WHERE id=%s", (rid,))
+        cur.execute("DELETE FROM investor_annotations_core WHERE id=%s AND annotation_type='task'", (rid,))
         con.commit()
         return int(cur.rowcount or 0) > 0
     except Exception:
@@ -2911,17 +3981,70 @@ def update_todo_pg(todo_id: int, *, task: str, due_date: str = "", priority: str
     txt = str(task or "").strip()
     if rid <= 0 or not txt:
         return False
-    pr = str(priority or "P2").strip().upper()
-    if pr not in {"P1", "P2", "P3"}:
-        pr = "P2"
+    pr = str(priority or "").strip().upper()
+    if pr not in {"", "P1", "P2", "P3"}:
+        pr = ""
     con = pg_connect()
     if con is None:
         return False
     try:
         cur = con.cursor()
         cur.execute(
-            "UPDATE todos_core SET task=%s, due_date=%s, priority=%s, created_at=%s WHERE id=%s",
-            (txt[:4000], str(due_date or "").strip(), pr, dt.datetime.now().isoformat(), rid),
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='investor_annotations_core'
+            """
+        )
+        cols = {str(r[0] or "").strip().lower() for r in (cur.fetchall() or [])}
+        text_col = "content" if "content" in cols else ("content_text" if "content_text" in cols else "")
+        if not text_col:
+            return False
+        tk = _extract_ticker_from_text(txt)
+        set_parts = [f"{text_col}=%s", "updated_at=%s", "entity_type=CASE WHEN %s <> '' THEN 'company' ELSE entity_type END", "entity_id=CASE WHEN %s <> '' THEN %s ELSE entity_id END"]
+        vals: list[Any] = [txt[:4000], dt.datetime.now().isoformat(), tk, tk, tk]
+        if "due_date" in cols:
+            set_parts.append("due_date=CASE WHEN %s <> '' THEN %s ELSE due_date END")
+            vals.extend([str(due_date or "").strip(), str(due_date or "").strip()])
+        if "priority" in cols:
+            set_parts.append("priority=CASE WHEN %s <> '' THEN %s ELSE priority END")
+            vals.extend([pr, pr])
+        vals.append(rid)
+        cur.execute(
+            f"UPDATE investor_annotations_core SET {', '.join(set_parts)} WHERE id=%s AND annotation_type='task'",
+            tuple(vals),
+        )
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def snooze_todo_pg(todo_id: int, snooze_until: str) -> bool:
+    rid = int(todo_id or 0)
+    if rid <= 0:
+        return False
+    su = str(snooze_until or "").strip()
+    if not su:
+        return False
+    try:
+        dt.date.fromisoformat(su)
+    except Exception:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE investor_annotations_core SET status='snoozed', snooze_until=%s, updated_at=%s WHERE id=%s AND annotation_type='task'",
+            (su, dt.datetime.now().isoformat(), rid),
         )
         con.commit()
         return int(cur.rowcount or 0) > 0
@@ -2944,39 +4067,23 @@ def list_recent_notes_pg(limit: int = 200) -> list[dict[str, str]]:
         cur = con.cursor()
         out: list[dict[str, str]] = []
         cur.execute(
-            """SELECT id, created_at, scope, ticker, note, status, created_by, ai_confidence, ai_reasoning, trace_id
-               FROM investor_notes_core ORDER BY id DESC LIMIT %s""",
+            """
+            SELECT id, entity_type, entity_id, annotation_type, content, status, created_by, created_at
+            FROM investor_annotations_core
+            WHERE annotation_type IN ('note','log')
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+            """,
             (lim,),
         )
         for r in cur.fetchall() or []:
+            et = str(r[1] or "global").strip().lower()
             out.append(
                 {
                     "id": str(r[0] or ""),
-                    "source_table": "investor_notes",
-                    "date": str(r[1] or ""),
-                    "kind": "General",
-                    "ticker": str(r[3] or "").strip().upper(),
-                    "tag": str(r[2] or "general"),
-                    "text": str(r[4] or ""),
-                    "status": str(r[5] or "approved"),
-                    "created_by": str(r[6] or "human"),
-                    "ai_confidence": str(r[7] or "0"),
-                    "ai_reasoning": str(r[8] or ""),
-                    "trace_id": str(r[9] or ""),
-                }
-            )
-        cur.execute(
-            """SELECT id, created_at, ticker, action, note, status, created_by
-               FROM workspace_journal_core ORDER BY id DESC LIMIT %s""",
-            (lim,),
-        )
-        for r in cur.fetchall() or []:
-            out.append(
-                {
-                    "id": str(r[0] or ""),
-                    "source_table": "workspace_journal",
-                    "date": str(r[1] or ""),
-                    "kind": "Company",
+                    "source_table": "workspace_journal" if et == "company" else "investor_notes",
+                    "date": str(r[7] or ""),
+                    "kind": "Company" if et == "company" else "General",
                     "ticker": str(r[2] or "").strip().upper(),
                     "tag": str(r[3] or "note"),
                     "text": str(r[4] or ""),
@@ -2987,7 +4094,6 @@ def list_recent_notes_pg(limit: int = 200) -> list[dict[str, str]]:
                     "trace_id": "",
                 }
             )
-        out.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
         return out[:lim]
     except Exception:
         return []
@@ -3013,25 +4119,25 @@ def add_investor_note_pg(
         return False
     now = dt.datetime.now().isoformat()
     try:
+        tk = str(ticker or "").strip().upper()[:16]
+        if not tk:
+            tk = _extract_ticker_from_text(str(note or ""))
         cur = con.cursor()
         cur.execute(
             """
-            INSERT INTO investor_notes_core
-            (id, scope, ticker, sentiment, note, tags, created_at, status, created_by, ai_confidence, ai_reasoning, trace_id)
-            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM investor_notes_core), %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO investor_annotations_core
+            (entity_type, entity_id, annotation_type, content, status, priority, due_date, category, snooze_until, source_ref, created_by, created_at, updated_at)
+            VALUES (%s, %s, 'note', %s, %s, 'P2', '', %s, '', '', %s, %s, %s)
             """,
             (
-                str(scope or "organizer")[:40],
-                str(ticker or "").upper()[:16],
-                str(sentiment or "neutral")[:32],
+                "company" if tk else "global",
+                tk,
                 str(note or "")[:4000],
-                str(tags or "log")[:200],
-                now,
                 str(status or "approved")[:20],
+                str(scope or "organizer")[:40],
                 str(created_by or "human")[:20],
-                float(ai_confidence or 0.0),
-                str(ai_reasoning or "")[:3000],
-                str(trace_id or "")[:120],
+                now,
+                now,
             ),
         )
         con.commit()
@@ -3057,8 +4163,15 @@ def approve_investor_note_draft_pg(note_id: int, ticker: str = "") -> bool:
     try:
         cur = con.cursor()
         cur.execute(
-            "UPDATE investor_notes_core SET status='approved', ticker=%s WHERE id=%s AND status='pending'",
-            (tk, rid),
+            """
+            UPDATE investor_annotations_core
+            SET status='approved',
+                entity_type=CASE WHEN %s <> '' THEN 'company' ELSE entity_type END,
+                entity_id=CASE WHEN %s <> '' THEN %s ELSE entity_id END,
+                updated_at=%s
+            WHERE id=%s AND annotation_type='note' AND status='pending'
+            """,
+            (tk, tk, tk, dt.datetime.now().isoformat(), rid),
         )
         con.commit()
         return int(cur.rowcount or 0) > 0
@@ -3081,7 +4194,7 @@ def discard_investor_note_draft_pg(note_id: int) -> bool:
         return False
     try:
         cur = con.cursor()
-        cur.execute("DELETE FROM investor_notes_core WHERE id=%s AND status='pending'", (rid,))
+        cur.execute("DELETE FROM investor_annotations_core WHERE id=%s AND annotation_type='note' AND status='pending'", (rid,))
         con.commit()
         return int(cur.rowcount or 0) > 0
     except Exception:
@@ -3112,31 +4225,21 @@ def delete_notes_pg(
         return out
     try:
         cur = con.cursor()
-        where = ["1=1"]
+        where = ["annotation_type IN ('note','log')"]
         vals: list[Any] = []
         if tk:
-            where.append("ticker = %s")
+            where.append("entity_id = %s")
             vals.append(tk)
         if txt:
-            where.append("LOWER(note) LIKE %s")
+            where.append("LOWER(content) LIKE %s")
             vals.append("%" + txt.lower() + "%")
         if cb:
             where.append("LOWER(created_by) = %s")
             vals.append(cb)
-        cur.execute("DELETE FROM investor_notes_core WHERE " + " AND ".join(where), tuple(vals))
+        cur.execute("DELETE FROM investor_annotations_core WHERE " + " AND ".join(where), tuple(vals))
         out["investor_notes"] = int(cur.rowcount or 0)
-        if include_company_journal:
-            where2 = ["1=1"]
-            vals2: list[Any] = []
-            if tk:
-                where2.append("ticker = %s")
-                vals2.append(tk)
-            if txt:
-                where2.append("LOWER(note) LIKE %s")
-                vals2.append("%" + txt.lower() + "%")
-            cur.execute("DELETE FROM workspace_journal_core WHERE " + " AND ".join(where2), tuple(vals2))
-            out["workspace_journal"] = int(cur.rowcount or 0)
-        out["total"] = out["investor_notes"] + out["workspace_journal"]
+        out["workspace_journal"] = 0
+        out["total"] = out["investor_notes"]
         con.commit()
         return out
     except Exception:
@@ -3149,24 +4252,35 @@ def delete_notes_pg(
         con.close()
 
 
-def add_workspace_journal_note_pg(ticker: str, note: str, action: str = "Note", emotion: str = "Calm") -> bool:
+def add_workspace_journal_note_pg(
+    ticker: str,
+    note: str,
+    action: str = "Note",
+    emotion: str = "Calm",
+    created_by: str = "human",
+) -> bool:
     con = pg_connect()
     if con is None:
         return False
     now = dt.datetime.now().isoformat()
     try:
         cur = con.cursor()
+        cb = str(created_by or "human").strip().lower()
+        if cb not in {"human", "ai"}:
+            cb = "human"
+        tk = str(ticker or "").upper()[:16]
         cur.execute(
             """
-            INSERT INTO workspace_journal_core
-            (id, ticker, action, emotion, note, created_at, status, created_by)
-            VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM workspace_journal_core), %s,%s,%s,%s,%s,'approved','human')
+            INSERT INTO investor_annotations_core
+            (entity_type, entity_id, annotation_type, content, status, priority, due_date, category, snooze_until, source_ref, created_by, created_at, updated_at)
+            VALUES ('company', %s, 'note', %s, 'approved', 'P2', '', %s, '', '', %s, %s, %s)
             """,
             (
-                str(ticker or "").upper()[:16],
-                str(action or "Note")[:80],
-                str(emotion or "Calm")[:80],
+                tk,
                 str(note or "")[:4000],
+                str(action or "note")[:80],
+                cb,
+                now,
                 now,
             ),
         )
@@ -3192,7 +4306,18 @@ def update_workspace_journal_note_pg(note_id: int, note: str) -> bool:
     try:
         cur = con.cursor()
         cur.execute(
-            "UPDATE workspace_journal_core SET note=%s, created_at=%s WHERE id=%s",
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='investor_annotations_core'
+            """
+        )
+        cols = {str(r[0] or "").strip().lower() for r in (cur.fetchall() or [])}
+        text_col = "content" if "content" in cols else ("content_text" if "content_text" in cols else "")
+        if not text_col:
+            return False
+        cur.execute(
+            f"UPDATE investor_annotations_core SET {text_col}=%s, updated_at=%s WHERE id=%s AND annotation_type='note'",
             (str(note or "")[:4000], dt.datetime.now().isoformat(), rid),
         )
         con.commit()
@@ -3216,7 +4341,244 @@ def delete_workspace_journal_note_pg(note_id: int) -> bool:
         return False
     try:
         cur = con.cursor()
-        cur.execute("DELETE FROM workspace_journal_core WHERE id=%s", (rid,))
+        cur.execute("DELETE FROM investor_annotations_core WHERE id=%s AND annotation_type='note'", (rid,))
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def set_task_company_pg(todo_id: int, ticker: str = "", due_date: str = "") -> bool:
+    rid = int(todo_id or 0)
+    if rid <= 0:
+        return False
+    tk = str(ticker or "").strip().upper()[:16]
+    dd = str(due_date or "").strip()
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            UPDATE investor_annotations_core
+            SET entity_type=CASE WHEN %s <> '' THEN 'company' ELSE 'global' END,
+                entity_id=%s,
+                due_date=CASE WHEN %s <> '' THEN %s ELSE due_date END,
+                category=CASE WHEN %s <> '' THEN 'company' ELSE category END,
+                updated_at=%s
+            WHERE id=%s AND annotation_type='task'
+            """,
+            (tk, tk, dd, dd, tk, dt.datetime.now().isoformat(), rid),
+        )
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def get_daily_note_pg(day: str) -> dict[str, Any]:
+    d = str(day or "").strip()
+    con = pg_connect()
+    if con is None:
+        return {"day": d, "content": "", "updated_at": "", "locked": False, "archived_at": "", "tags": []}
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT day, content, updated_at, locked, archived_at FROM daily_notes_core WHERE day=%s LIMIT 1",
+            (d,),
+        )
+        row = cur.fetchone()
+        cur.execute(
+            "SELECT ticker FROM daily_note_tags_core WHERE day=%s ORDER BY ticker ASC",
+            (d,),
+        )
+        tags = [str(r[0] or "").strip().upper() for r in (cur.fetchall() or []) if str(r[0] or "").strip()]
+        if not row:
+            return {"day": d, "content": "", "updated_at": "", "locked": False, "archived_at": "", "tags": tags}
+        return {
+            "day": str(row[0] or d),
+            "content": str(row[1] or ""),
+            "updated_at": str(row[2] or ""),
+            "locked": bool(int(row[3] or 0)),
+            "archived_at": str(row[4] or ""),
+            "tags": tags,
+        }
+    except Exception:
+        return {"day": d, "content": "", "updated_at": "", "locked": False, "archived_at": "", "tags": []}
+    finally:
+        con.close()
+
+
+def save_daily_note_pg(day: str, content: str, tags: list[str] | None = None) -> bool:
+    d = str(day or "").strip()
+    txt = str(content or "").strip()
+    now = dt.datetime.now().isoformat()
+    tag_rows = [str(t or "").strip().upper()[:16] for t in (tags or []) if str(t or "").strip()]
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT locked FROM daily_notes_core WHERE day=%s LIMIT 1", (d,))
+        locked_row = cur.fetchone()
+        if locked_row and bool(int(locked_row[0] or 0)):
+            return False
+        cur.execute(
+            """
+            INSERT INTO daily_notes_core(day, content, updated_at, locked, archived_at)
+            VALUES (%s, %s, %s, 0, '')
+            ON CONFLICT(day) DO UPDATE SET content=EXCLUDED.content, updated_at=EXCLUDED.updated_at
+            """,
+            (d, txt[:120000], now),
+        )
+        cur.execute("DELETE FROM daily_note_tags_core WHERE day=%s", (d,))
+        for tk in tag_rows:
+            cur.execute(
+                "INSERT INTO daily_note_tags_core(day, ticker, created_at) VALUES (%s, %s, %s)",
+                (d, tk, now),
+            )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def close_day_pg(day: str) -> bool:
+    d = str(day or "").strip()
+    now = dt.datetime.now().isoformat()
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE daily_notes_core SET locked=1, archived_at=%s, updated_at=%s WHERE day=%s",
+            (now, now, d),
+        )
+        con.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def enqueue_action_pg(
+    tool_name: str,
+    params_json: str,
+    reasoning: str,
+    confidence: float,
+    trace_id: str = "",
+) -> bool:
+    nm = str(tool_name or "").strip()
+    if not nm:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO ai_action_queue_core(created_at, status, tool_name, params_json, reasoning, confidence, trace_id)
+            VALUES (%s, 'pending', %s, %s, %s, %s, %s)
+            """,
+            (
+                dt.datetime.now().isoformat(),
+                nm[:120],
+                str(params_json or "")[:8000],
+                str(reasoning or "")[:3000],
+                float(confidence or 0.0),
+                str(trace_id or "")[:120],
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def list_action_queue_pg(limit: int = 120) -> list[dict[str, str]]:
+    lim = max(1, min(1000, int(limit or 120)))
+    con = pg_connect()
+    if con is None:
+        return []
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT id, created_at, status, tool_name, params_json, reasoning, confidence, trace_id
+            FROM ai_action_queue_core
+            WHERE status='pending'
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (lim,),
+        )
+        out: list[dict[str, str]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": str(r[0] or ""),
+                    "created_at": str(r[1] or ""),
+                    "status": str(r[2] or ""),
+                    "tool_name": str(r[3] or ""),
+                    "params_json": str(r[4] or ""),
+                    "reasoning": str(r[5] or ""),
+                    "confidence": str(r[6] or "0"),
+                    "trace_id": str(r[7] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def resolve_action_queue_pg(action_id: int, decision: str) -> bool:
+    rid = int(action_id or 0)
+    dec = str(decision or "").strip().lower()
+    if rid <= 0 or dec not in {"approved", "rejected"}:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE ai_action_queue_core SET status=%s WHERE id=%s AND status='pending'",
+            (dec, rid),
+        )
         con.commit()
         return int(cur.rowcount or 0) > 0
     except Exception:
@@ -3440,5 +4802,280 @@ def remove_blue_chip_pg(ticker: str) -> bool:
         except Exception:
             pass
         return False
+    finally:
+        con.close()
+
+
+def ensure_market_snapshots_schema_pg() -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS news_wire_snapshot_core (
+                id BIGSERIAL PRIMARY KEY,
+                panel TEXT NOT NULL DEFAULT 'general',
+                title TEXT NOT NULL DEFAULT '',
+                link TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                published_at TEXT NOT NULL DEFAULT '',
+                fetched_at TEXT NOT NULL DEFAULT '',
+                unique_key TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_news_wire_core_panel_fetched ON news_wire_snapshot_core(panel, fetched_at DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS earnings_calendar_snapshot_core (
+                id BIGSERIAL PRIMARY KEY,
+                event_date TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL DEFAULT '',
+                company TEXT NOT NULL DEFAULT '',
+                time_text TEXT NOT NULL DEFAULT '',
+                reported TEXT NOT NULL DEFAULT '0',
+                verdict TEXT NOT NULL DEFAULT '',
+                surprise_txt TEXT NOT NULL DEFAULT '',
+                eps_actual TEXT NOT NULL DEFAULT '',
+                eps_estimate TEXT NOT NULL DEFAULT '',
+                result_source TEXT NOT NULL DEFAULT '',
+                event_status TEXT NOT NULL DEFAULT 'upcoming',
+                confidence TEXT NOT NULL DEFAULT '',
+                fetched_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(event_date, symbol, time_text)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_earnings_snap_core_date ON earnings_calendar_snapshot_core(event_date, symbol)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_earnings_snap_core_fetched ON earnings_calendar_snapshot_core(fetched_at DESC)")
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def upsert_news_wire_snapshot_pg(panel: str, items: list[dict[str, str]]) -> int:
+    pnl = str(panel or "general").strip().lower()
+    if pnl not in {"general", "company"}:
+        pnl = "general"
+    rows = [x for x in (items or []) if isinstance(x, dict)]
+    if not rows:
+        return 0
+    con = pg_connect()
+    if con is None:
+        return 0
+    _ = ensure_market_snapshots_schema_pg()
+    now = dt.datetime.now().isoformat()
+    written = 0
+    try:
+        cur = con.cursor()
+        for it in rows:
+            title = str(it.get("title") or "").strip()
+            if not title:
+                continue
+            link = str(it.get("link") or "").strip()
+            source = str(it.get("source") or "").strip()
+            published_at = str(it.get("published_at") or "").strip()
+            key = " ".join(f"{pnl}|{title}|{link}".lower().split())
+            cur.execute(
+                """
+                INSERT INTO news_wire_snapshot_core(panel, title, link, source, published_at, fetched_at, unique_key)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(unique_key) DO UPDATE SET
+                  source=EXCLUDED.source,
+                  published_at=EXCLUDED.published_at,
+                  fetched_at=EXCLUDED.fetched_at
+                """,
+                (pnl, title[:600], link[:1200], source[:200], published_at[:80], now, key[:1200]),
+            )
+            written += 1
+        con.commit()
+        try:
+            cur.execute(
+                """
+                DELETE FROM news_wire_snapshot_core
+                WHERE panel=%s
+                  AND id NOT IN (
+                    SELECT id FROM news_wire_snapshot_core
+                    WHERE panel=%s
+                    ORDER BY fetched_at DESC, id DESC
+                    LIMIT 400
+                  )
+                """,
+                (pnl, pnl),
+            )
+            con.commit()
+        except Exception:
+            pass
+        return written
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        con.close()
+
+
+def list_news_wire_snapshot_pg(panel: str, limit: int = 12, max_age_hours: int = 168) -> list[dict[str, str]]:
+    pnl = str(panel or "general").strip().lower()
+    if pnl not in {"general", "company"}:
+        pnl = "general"
+    con = pg_connect()
+    if con is None:
+        return []
+    _ = ensure_market_snapshots_schema_pg()
+    out: list[dict[str, str]] = []
+    try:
+        cur = con.cursor()
+        cutoff = (dt.datetime.now() - dt.timedelta(hours=max(1, int(max_age_hours or 168)))).isoformat()
+        cur.execute(
+            """
+            SELECT title, link, source, published_at, fetched_at
+            FROM news_wire_snapshot_core
+            WHERE panel=%s AND fetched_at >= %s
+            ORDER BY fetched_at DESC, id DESC
+            LIMIT %s
+            """,
+            (pnl, cutoff, max(1, min(200, int(limit or 12)))),
+        )
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "title": str(r[0] or ""),
+                    "link": str(r[1] or ""),
+                    "source": str(r[2] or ""),
+                    "published_at": str(r[3] or ""),
+                    "fetched_at": str(r[4] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def upsert_earnings_calendar_snapshot_pg(rows: list[dict[str, str]]) -> int:
+    events = [x for x in (rows or []) if isinstance(x, dict)]
+    if not events:
+        return 0
+    con = pg_connect()
+    if con is None:
+        return 0
+    _ = ensure_market_snapshots_schema_pg()
+    now = dt.datetime.now().isoformat()
+    written = 0
+    try:
+        cur = con.cursor()
+        for ev in events:
+            d = str(ev.get("date") or "").strip()
+            sym = str(ev.get("symbol") or "").strip().upper()
+            if not d or not sym:
+                continue
+            cur.execute(
+                """
+                INSERT INTO earnings_calendar_snapshot_core
+                (event_date, symbol, company, time_text, reported, verdict, surprise_txt, eps_actual, eps_estimate, result_source, event_status, confidence, fetched_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(event_date, symbol, time_text) DO UPDATE SET
+                  company=EXCLUDED.company,
+                  reported=EXCLUDED.reported,
+                  verdict=EXCLUDED.verdict,
+                  surprise_txt=EXCLUDED.surprise_txt,
+                  eps_actual=EXCLUDED.eps_actual,
+                  eps_estimate=EXCLUDED.eps_estimate,
+                  result_source=EXCLUDED.result_source,
+                  event_status=EXCLUDED.event_status,
+                  confidence=EXCLUDED.confidence,
+                  fetched_at=EXCLUDED.fetched_at
+                """,
+                (
+                    d[:20],
+                    sym[:16],
+                    str(ev.get("company") or "-")[:300],
+                    str(ev.get("time") or "-")[:40],
+                    str(ev.get("reported") or "0")[:8],
+                    str(ev.get("verdict") or "")[:20],
+                    str(ev.get("surprise_txt") or "")[:32],
+                    str(ev.get("eps_actual") or "-")[:32],
+                    str(ev.get("eps_estimate") or "-")[:32],
+                    str(ev.get("result_source") or "")[:220],
+                    str(ev.get("event_status") or "upcoming")[:20],
+                    str(ev.get("confidence") or "")[:20],
+                    now,
+                ),
+            )
+            written += 1
+        con.commit()
+        try:
+            cutoff = (dt.datetime.now() - dt.timedelta(days=21)).isoformat()
+            cur.execute("DELETE FROM earnings_calendar_snapshot_core WHERE fetched_at < %s", (cutoff,))
+            con.commit()
+        except Exception:
+            pass
+        return written
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        con.close()
+
+
+def list_earnings_calendar_snapshot_pg(week_start: str, week_end: str, limit: int = 200) -> list[dict[str, str]]:
+    ws = str(week_start or "").strip()
+    we = str(week_end or "").strip()
+    if not ws or not we:
+        return []
+    con = pg_connect()
+    if con is None:
+        return []
+    _ = ensure_market_snapshots_schema_pg()
+    out: list[dict[str, str]] = []
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT event_date, symbol, company, time_text, reported, verdict, surprise_txt,
+                   eps_actual, eps_estimate, result_source, event_status, confidence
+            FROM earnings_calendar_snapshot_core
+            WHERE event_date >= %s AND event_date <= %s
+            ORDER BY event_date ASC, symbol ASC
+            LIMIT %s
+            """,
+            (ws, we, max(1, min(1000, int(limit or 200)))),
+        )
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "date": str(r[0] or ""),
+                    "symbol": str(r[1] or "").strip().upper(),
+                    "company": str(r[2] or "-"),
+                    "time": str(r[3] or "-"),
+                    "reported": str(r[4] or "0"),
+                    "verdict": str(r[5] or ""),
+                    "surprise_txt": str(r[6] or ""),
+                    "eps_actual": str(r[7] or "-"),
+                    "eps_estimate": str(r[8] or "-"),
+                    "result_source": str(r[9] or ""),
+                    "event_status": str(r[10] or "upcoming"),
+                    "confidence": str(r[11] or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
     finally:
         con.close()

@@ -36,7 +36,7 @@
   hx-post="{{ action }}"
   hx-target="{{ hx_target }}"
   hx-swap="{{ hx_swap }}"
-  onsubmit="var i=document.getElementById('{{ input_id }}'); if(i){ i.value=''; }"
+  hx-on::after-request="var i=document.getElementById('{{ input_id }}'); if(i){ i.value=''; }"
 >
   {% for k, v in hidden_fields.items() %}
   <input type="hidden" name="{{ k }}" value="{{ v }}">

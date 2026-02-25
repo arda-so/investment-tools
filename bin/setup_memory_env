@@ -1,0 +1,50 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="/Users/solmaz/Investment_Tools"
+cd "$ROOT"
+
+pick_python() {
+  if [ "${1:-}" != "" ]; then
+    echo "$1"
+    return 0
+  fi
+  for c in python3.12 python3.11 python3.10; do
+    if command -v "$c" >/dev/null 2>&1; then
+      echo "$c"
+      return 0
+    fi
+  done
+  echo "python3"
+}
+
+PY_BIN="$(pick_python "${1:-}")"
+VENV_DIR="${2:-.venv-memory}"
+
+echo "Using Python: $PY_BIN"
+"$PY_BIN" -m venv "$VENV_DIR"
+source "$VENV_DIR/bin/activate"
+
+PY_VER="$(python -c 'import sys; print(str(sys.version_info.major) + "." + str(sys.version_info.minor))')"
+echo "Python version in env: $PY_VER"
+if python - <<'PY'
+import sys
+raise SystemExit(0 if (sys.version_info.major == 3 and sys.version_info.minor <= 12) else 1)
+PY
+then
+  :
+else
+  echo "ERROR: Python $PY_VER is not compatible with chromadb/onnxruntime on this setup."
+  echo "Please install Python 3.12 (or 3.11), then rerun:"
+  echo "  ./bin/setup_memory_env python3.12"
+  exit 2
+fi
+
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements-memory.txt
+
+echo ""
+echo "Memory env ready at: $ROOT/$VENV_DIR"
+echo "Run migration:"
+echo "  source $VENV_DIR/bin/activate"
+echo "  python tools/migrate_memories.py --db data/core.db"

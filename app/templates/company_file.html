@@ -1,0 +1,702 @@
+{% extends "base.html" %}
+{% block title %}Company Files | Investor OS v2{% endblock %}
+{% block body %}
+{% set view_mode = request.query_params.get('view', 'table') %}
+{% set density_mode = 'compact' %}
+{% set focus_mode = request.query_params.get('focus', '0') == '1' %}
+{% set selected_industries = (industry or '').split(',') %}
+
+<style>
+  :root {
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --muted: #64748b;
+    --accent: #0ea5a4;
+    --accent-soft: #ccfbf1;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    --h1: 18px;
+    --title: 15px;
+    --body: 13px;
+    --meta: 12px;
+  }
+  .cf-page {
+    background: var(--bg);
+    color: var(--text);
+  }
+  .cf-shell {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 14px;
+    align-items: start;
+  }
+  .cf-rail {
+    position: sticky;
+    top: 12px;
+    display: grid;
+    gap: 10px;
+  }
+  .cf-main {
+    min-width: 0;
+    display: grid;
+    gap: 10px;
+  }
+  .cf-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 10px;
+  }
+  .cf-toolbar {
+    position: sticky;
+    top: 12px;
+    z-index: 3;
+    display: grid;
+    gap: 8px;
+  }
+  .cf-toolbar-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+  .cf-search {
+    width: 100%;
+    min-width: 0;
+    font-size: var(--body);
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+  }
+  .cf-controls {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .cf-control,
+  .cf-btn {
+    font-size: 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--text);
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .cf-btn.is-active,
+  .cf-chip.is-active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: #115e59;
+  }
+  .cf-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .cf-accordion {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    margin-bottom: 8px;
+    padding: 6px 8px;
+  }
+  .cf-accordion summary {
+    list-style: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    color: #334155;
+  }
+  .cf-accordion summary::-webkit-details-marker { display: none; }
+  .cf-filter-list {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .cf-industry-search {
+    margin-top: 8px;
+  }
+  .cf-industry-checks {
+    margin-top: 8px;
+    max-height: 210px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    display: grid;
+    gap: 6px;
+    background: #fff;
+  }
+  .cf-industry-item {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr);
+    align-items: start;
+    column-gap: 8px;
+    font-size: 12px;
+    color: #334155;
+    line-height: 1.25;
+  }
+  .cf-industry-item input {
+    margin: 1px 0 0 0;
+    justify-self: start;
+  }
+  .cf-industry-item span {
+    display: block;
+    text-align: left;
+    word-break: break-word;
+  }
+  .cf-chips {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .cf-chip {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: #fff;
+    color: #334155;
+    text-decoration: none;
+  }
+  .cf-list-wrap {
+    max-height: calc(100vh - 220px);
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+  }
+  .cf-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+    padding: 10px;
+  }
+  .cf-company-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fff;
+    padding: 10px;
+    display: grid;
+    gap: 8px;
+  }
+  .cf-company-card.is-compact {
+    padding: 8px;
+    gap: 6px;
+  }
+  .cf-company-card-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: start;
+  }
+  .cf-company-card-body {
+    display: grid;
+    gap: 4px;
+    font-size: var(--meta);
+    color: var(--muted);
+  }
+  .cf-company-card-kv {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .cf-company-card-kv b {
+    color: var(--text);
+    font-weight: 700;
+  }
+  .cf-industry-btn {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    margin: 0;
+    text-align: left;
+    cursor: pointer;
+  }
+  .cf-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  .cf-table th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #fff;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .cf-table td {
+    font-size: var(--body);
+    padding: 8px 10px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: top;
+  }
+  .cf-table tr:hover td {
+    background: #f1f5f9;
+  }
+  .cf-table th:first-child,
+  .cf-table td:first-child {
+    position: sticky;
+    left: 0;
+    background: #fff;
+    z-index: 1;
+  }
+  .cf-table th:first-child { z-index: 3; }
+  .cf-col-company { width: 42%; }
+  .cf-col-country { width: 16%; }
+  .cf-col-industry { width: 25%; }
+  .cf-col-mcap { width: 17%; }
+  .cf-col-add { width: 50px; }
+  .cf-company-name {
+    font-size: var(--title);
+    font-weight: 800;
+    color: var(--text);
+    text-decoration: none;
+    line-height: 1.25;
+  }
+  .cf-company-meta {
+    margin-top: 2px;
+    font-size: var(--meta);
+    color: var(--muted);
+  }
+  .cf-density-compact .cf-table td { padding-top: 7px; padding-bottom: 7px; }
+  .cf-pager {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .cf-total {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    text-align: right;
+  }
+  .cf-focus {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cf-focus .cf-rail { display: none; }
+  .cf-focus .cf-company-name { font-size: 17px; font-weight: 900; }
+  .cf-focus .cf-control,
+  .cf-focus .cf-btn,
+  .cf-focus .cf-chip { font-size: 11px; padding-top: 4px; padding-bottom: 4px; }
+  .cf-focus .cf-table th { font-size: 10px; color: #94a3b8; }
+  .cf-focus .cf-table td { font-size: 12px; padding: 6px 8px; }
+  .cf-focus .cf-card-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; padding: 8px; }
+  .cf-focus .cf-company-card { padding: 8px; }
+  @media (max-width: 1160px) {
+    .cf-shell { grid-template-columns: 1fr; }
+    .cf-rail { position: static; }
+    .cf-toolbar { position: static; }
+    .cf-list-wrap { max-height: none; }
+  }
+</style>
+
+{% if message %}
+<div class="flash">{{ message }}</div>
+{% endif %}
+
+<div class="cf-page cf-shell {% if focus_mode %}cf-focus{% endif %}" id="terminal-shell">
+  <aside class="cf-rail">
+    <details class="cf-accordion" open>
+      <summary>Scope</summary>
+      <div class="cf-filter-list">
+        <button type="button" class="cf-btn {% if scope == 'all' %}is-active{% endif %}" data-cf-group="scope" data-cf-set="scope" data-cf-value="all">All</button>
+        <button type="button" class="cf-btn {% if scope == 'us_listed' %}is-active{% endif %}" data-cf-group="scope" data-cf-set="scope" data-cf-value="us_listed">US Listed</button>
+        <button type="button" class="cf-btn {% if scope == 'us_otc' %}is-active{% endif %}" data-cf-group="scope" data-cf-set="scope" data-cf-value="us_otc">US + OTC</button>
+        <button type="button" class="cf-btn {% if scope == 'my' %}is-active{% endif %}" data-cf-group="scope" data-cf-set="scope" data-cf-value="my">My</button>
+      </div>
+    </details>
+
+    <details class="cf-accordion" {% if market_key or size_key %}open{% endif %}>
+      <summary>Market &amp; Size</summary>
+      <div class="cf-filter-list">
+        <button type="button" class="cf-btn {% if not market_key %}is-active{% endif %}" data-cf-group="market" data-cf-set="market" data-cf-value="">All Markets</button>
+        <button type="button" class="cf-btn {% if market_key == 'us_listed' %}is-active{% endif %}" data-cf-group="market" data-cf-set="market" data-cf-value="us_listed">US Listed</button>
+        <button type="button" class="cf-btn {% if market_key == 'us_otc' %}is-active{% endif %}" data-cf-group="market" data-cf-set="market" data-cf-value="us_otc">US + OTC</button>
+        <button type="button" class="cf-btn {% if market_key == 'otc_only' %}is-active{% endif %}" data-cf-group="market" data-cf-set="market" data-cf-value="otc_only">OTC Only</button>
+      </div>
+      <div class="cf-filter-list">
+        <button type="button" class="cf-btn {% if not size_key %}is-active{% endif %}" data-cf-group="size" data-cf-set="size" data-cf-value="">All Sizes</button>
+        <button type="button" class="cf-btn {% if size_key == 'xlarge' %}is-active{% endif %}" data-cf-group="size" data-cf-set="size" data-cf-value="xlarge">Extra Large (&gt; $200B)</button>
+        <button type="button" class="cf-btn {% if size_key == 'large' %}is-active{% endif %}" data-cf-group="size" data-cf-set="size" data-cf-value="large">Large ($10B-$200B)</button>
+        <button type="button" class="cf-btn {% if size_key == 'medium' %}is-active{% endif %}" data-cf-group="size" data-cf-set="size" data-cf-value="medium">Medium ($2B-$10B)</button>
+        <button type="button" class="cf-btn {% if size_key == 'small' %}is-active{% endif %}" data-cf-group="size" data-cf-set="size" data-cf-value="small">Small ($300M-$2B)</button>
+        <button type="button" class="cf-btn {% if size_key == 'micro' %}is-active{% endif %}" data-cf-group="size" data-cf-set="size" data-cf-value="micro">Micro ($50M-$300M)</button>
+        <button type="button" class="cf-btn {% if size_key == 'nano' %}is-active{% endif %}" data-cf-group="size" data-cf-set="size" data-cf-value="nano">Nano (&lt;= $50M)</button>
+      </div>
+    </details>
+
+    <details class="cf-accordion" open>
+      <summary>Industry</summary>
+      <input id="industryFilterInput" class="cf-search cf-industry-search" type="text" placeholder="Search industries...">
+      <div class="cf-filter-list">
+        <button type="button" id="industrySelectAllBtn" class="cf-btn">All</button>
+        <button type="button" id="industryClearBtn" class="cf-btn">Clear</button>
+      </div>
+      <div class="cf-industry-checks">
+        {% for ind in industries %}
+        <label class="cf-industry-item" data-industry-item="{{ ind|lower }}">
+          <input type="checkbox" class="js-industry-check" value="{{ ind }}" {% if ind in selected_industries %}checked{% endif %}>
+          <span>{{ ind }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </details>
+
+    <details class="cf-accordion" {% if index_key %}open{% endif %}>
+      <summary>Universe</summary>
+      <div class="cf-filter-list">
+        <button type="button" class="cf-btn {% if not index_key %}is-active{% endif %}" data-cf-group="index" data-cf-set="index" data-cf-value="">All</button>
+        {% for it in index_filters %}
+        <button type="button" class="cf-btn {% if index_key == it.key %}is-active{% endif %}" data-cf-group="index" data-cf-set="index" data-cf-value="{{ it.key }}">{{ it.label }}</button>
+        {% endfor %}
+      </div>
+    </details>
+
+    <details class="cf-accordion" {% if list_name %}open{% endif %}>
+      <summary>Saved Lists</summary>
+      <div class="cf-filter-list">
+        <button type="button" class="cf-btn {% if not list_name %}is-active{% endif %}" data-cf-group="list" data-cf-set="list" data-cf-value="">All</button>
+        {% for it in list_filters %}
+        <button type="button" class="cf-btn {% if list_name == it.name %}is-active{% endif %}" data-cf-group="list" data-cf-set="list" data-cf-value="{{ it.name }}">{{ it.name }}</button>
+        {% endfor %}
+      </div>
+    </details>
+
+    <details class="cf-accordion" {% if moat_key %}open{% endif %}>
+      <summary>Moat</summary>
+      <div class="cf-filter-list">
+        <button type="button" class="cf-btn {% if not moat_key %}is-active{% endif %}" data-cf-group="moat" data-cf-set="moat" data-cf-value="">All</button>
+        {% for it in moat_filters %}
+        {% if it.count > 0 or moat_key == it.key %}
+        <button type="button" class="cf-btn {% if moat_key == it.key %}is-active{% endif %}" data-cf-group="moat" data-cf-set="moat" data-cf-value="{{ it.key }}">{{ it.label }}</button>
+        {% endif %}
+        {% endfor %}
+      </div>
+    </details>
+  </aside>
+
+  <main class="cf-main">
+    <div class="cf-card cf-toolbar">
+      <form id="cfToolbarForm" class="cf-toolbar-row" method="get" action="/company_file"
+            hx-get="/company_file"
+            hx-target="#results-area"
+            hx-select="#results-area"
+            hx-trigger="submit, keyup changed delay:250ms from:#cfSearchInput"
+            hx-push-url="true">
+        <input id="cfSearchInput" class="cf-search" type="text" name="q" value="{{ query }}" placeholder="Search companies by name or ticker...">
+        <div class="cf-controls">
+          <select class="cf-control" name="sort">
+            <option value="mcap_desc" {% if sort == "mcap_desc" %}selected{% endif %}>Sort: Market Cap</option>
+            <option value="name_asc" {% if sort == "name_asc" %}selected{% endif %}>Sort: Name A-Z</option>
+            <option value="ticker_asc" {% if sort == "ticker_asc" %}selected{% endif %}>Sort: Ticker A-Z</option>
+          </select>
+          <button type="button" class="cf-btn {% if view_mode == 'table' %}is-active{% endif %}" data-cf-group="view" data-cf-set="view" data-cf-value="table">Table</button>
+          <button type="button" class="cf-btn {% if view_mode == 'card' %}is-active{% endif %}" data-cf-group="view" data-cf-set="view" data-cf-value="card">Cards</button>
+          <button type="button" class="cf-btn is-active" data-cf-group="density" data-cf-set="density" data-cf-value="compact">Compact</button>
+          <button id="cfFocusToggle" type="button" class="cf-btn {% if focus_mode %}is-active{% endif %}">{% if focus_mode %}Exit Focus{% else %}Focus Mode{% endif %}</button>
+        </div>
+        <input type="hidden" id="industryMultiInput" name="industry" value="{{ industry }}">
+        <input type="hidden" id="cfIndexInput" name="index" value="{{ index_key }}">
+        <input type="hidden" id="cfListInput" name="list" value="{{ list_name }}">
+        <input type="hidden" id="cfMoatInput" name="moat" value="{{ moat_key }}">
+        <input type="hidden" id="cfMarketInput" name="market" value="{{ market_key }}">
+        <input type="hidden" id="cfSizeInput" name="size" value="{{ size_key }}">
+        <input type="hidden" id="cfScopeInput" name="scope" value="{{ scope }}">
+        <input type="hidden" id="cfViewInput" name="view" value="{{ view_mode }}">
+        <input type="hidden" id="cfDensityInput" name="density" value="{{ density_mode }}">
+        <input type="hidden" id="cfFocusInput" name="focus" value="{{ '1' if focus_mode else '0' }}">
+        <input type="hidden" name="page" value="1">
+        <input type="hidden" name="page_size" value="{{ page_size }}">
+      </form>
+
+      <div class="cf-chips">
+        <span class="cf-chip">Scope: {{ scope|upper }}</span>
+        {% if query %}<button type="button" class="cf-chip is-active" data-cf-clear="q">Search: {{ query }} ✕</button>{% endif %}
+        {% for ind in selected_industries if ind.strip() %}
+        <button type="button" class="cf-chip is-active" data-cf-remove-industry="{{ ind }}">Industry: {{ ind.strip() }} ✕</button>
+        {% endfor %}
+        {% if index_key %}<button type="button" class="cf-chip is-active" data-cf-clear="index">Index: {{ index_key|upper }} ✕</button>{% endif %}
+        {% if list_name %}<button type="button" class="cf-chip is-active" data-cf-clear="list">List: {{ list_name }} ✕</button>{% endif %}
+        {% if moat_key %}<button type="button" class="cf-chip is-active" data-cf-clear="moat">Moat: {{ moat_key }} ✕</button>{% endif %}
+        {% if market_key %}
+        <button type="button" class="cf-chip is-active" data-cf-clear="market">
+          Market:
+          {% if market_key == 'us_listed' %}US Listed{% elif market_key == 'us_otc' %}US + OTC{% elif market_key == 'otc_only' %}OTC Only{% else %}{{ market_key }}{% endif %}
+          ✕
+        </button>
+        {% endif %}
+        {% if size_key %}
+        <button type="button" class="cf-chip is-active" data-cf-clear="size">
+          Size:
+          {% if size_key == 'xlarge' %}Extra Large{% elif size_key == 'large' %}Large{% elif size_key == 'medium' %}Medium{% elif size_key == 'small' %}Small{% elif size_key == 'micro' %}Micro{% elif size_key == 'nano' %}Nano{% else %}{{ size_key }}{% endif %}
+          ✕
+        </button>
+        {% endif %}
+      </div>
+    </div>
+
+    <div id="results-area" class="cf-card">
+      <div class="cf-list-wrap" id="results-wrap">
+        {% if view_mode == "card" %}
+        <div class="cf-card-grid">
+          {% for r in rows %}
+          <article class="cf-company-card is-compact">
+            <div class="cf-company-card-head">
+              <div>
+                <a href="/company_file?t={{ r.ticker|urlencode }}" class="cf-company-name">{{ r.name }}</a>
+                <div class="cf-company-meta">
+                  {{ r.ticker }} • <button type="button" class="cf-industry-btn" data-cf-industry="{{ r.industry }}">{{ r.industry }}</button>
+                </div>
+              </div>
+              <form method="post" action="/my_companies/watchlist/add">
+                <input type="hidden" name="ticker" value="{{ r.ticker }}">
+                <input type="hidden" name="reason" value="">
+                <button type="submit" class="cf-btn">+</button>
+              </form>
+            </div>
+            <div class="cf-company-card-body">
+              <div class="cf-company-card-kv"><span>Country</span><b>{{ r.country }}</b></div>
+              <div class="cf-company-card-kv"><span>Market Cap</span><b>{{ r.market_cap }}</b></div>
+              <div class="cf-company-card-kv"><span>5Y Move</span><b>{{ r.y5_move if r.y5_move is defined else "-" }}</b></div>
+            </div>
+          </article>
+          {% else %}
+          <div class="cf-company-meta">No companies match these filters.</div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <table class="cf-table">
+          <thead>
+            <tr>
+              <th class="cf-col-company">Company</th>
+              <th class="cf-col-country">Country</th>
+              <th class="cf-col-industry">Industry</th>
+              <th class="cf-col-mcap">Market Cap</th>
+              <th class="cf-col-add"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+            <tr>
+              <td class="cf-col-company">
+                <a href="/company_file?t={{ r.ticker|urlencode }}" class="cf-company-name">{{ r.name }}</a>
+                <div class="cf-company-meta">{{ r.ticker }} • {{ r.industry }}</div>
+              </td>
+              <td class="cf-col-country">{{ r.country }}</td>
+              <td class="cf-col-industry"><button type="button" class="cf-industry-btn" data-cf-industry="{{ r.industry }}">{{ r.industry }}</button></td>
+              <td class="cf-col-mcap">
+                <div>{{ r.market_cap }}</div>
+                <div class="cf-company-meta">5Y {{ r.y5_move if r.y5_move is defined else "-" }}</div>
+              </td>
+              <td class="cf-col-add">
+                <form method="post" action="/my_companies/watchlist/add">
+                  <input type="hidden" name="ticker" value="{{ r.ticker }}">
+                  <input type="hidden" name="reason" value="">
+                  <button type="submit" class="cf-btn">+</button>
+                </form>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="cf-company-meta">No companies match these filters.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+      <div class="cf-pager">
+        {% if page > 1 %}
+        <button type="button" class="cf-btn" data-cf-page="{{ page - 1 }}">Prev</button>
+        {% endif %}
+        {% if page < pages %}
+        <button type="button" class="cf-btn" data-cf-page="{{ page + 1 }}">Next</button>
+        {% endif %}
+      </div>
+      <div class="cf-total">Showing {{ rows|length }} of {{ total }} companies</div>
+    </div>
+  </main>
+</div>
+
+<script>
+  (function () {
+    var form = document.getElementById('cfToolbarForm');
+    var shell = document.getElementById('terminal-shell');
+    var searchInput = document.getElementById('cfSearchInput');
+    var focusInput = document.getElementById('cfFocusInput');
+    var focusToggle = document.getElementById('cfFocusToggle');
+    var checks = Array.prototype.slice.call(document.querySelectorAll('.js-industry-check'));
+    var hidden = document.getElementById('industryMultiInput');
+    var filterInput = document.getElementById('industryFilterInput');
+    var selectAllBtn = document.getElementById('industrySelectAllBtn');
+    var clearBtn = document.getElementById('industryClearBtn');
+    var lastScroll = 0;
+    var lastFocusId = '';
+
+    function setField(name, value) {
+      if (!form) return;
+      var field = form.querySelector('[name="' + name + '"]');
+      if (field) field.value = value;
+    }
+    function syncGroupActive(group, value) {
+      if (!group) return;
+      document.querySelectorAll('[data-cf-group="' + group + '"]').forEach(function (el) {
+        var v = el.getAttribute('data-cf-value') || '';
+        el.classList.toggle('is-active', String(v) === String(value || ''));
+      });
+    }
+
+    function submitFilters(resetPage) {
+      if (!form) return;
+      if (resetPage) setField('page', '1');
+      if (window.htmx) {
+        window.htmx.trigger(form, 'submit');
+      } else {
+        form.requestSubmit();
+      }
+    }
+
+    function syncIndustry() {
+      if (!hidden) return;
+      var vals = checks.filter(function (c) { return c.checked; }).map(function (c) { return (c.value || '').trim(); }).filter(Boolean);
+      hidden.value = vals.join(',');
+    }
+    function applyIndustryFilter() {
+      var q = (filterInput && filterInput.value ? filterInput.value : '').toLowerCase().trim();
+      document.querySelectorAll('[data-industry-item]').forEach(function (el) {
+        var txt = (el.getAttribute('data-industry-item') || '');
+        el.style.display = (!q || txt.indexOf(q) !== -1) ? '' : 'none';
+      });
+    }
+    checks.forEach(function (c) {
+      c.addEventListener('change', function () {
+        syncIndustry();
+        submitFilters(true);
+      });
+    });
+    if (filterInput) filterInput.addEventListener('input', applyIndustryFilter);
+    if (selectAllBtn) {
+      selectAllBtn.addEventListener('click', function () {
+        checks.forEach(function (c) {
+          var parent = c.closest('[data-industry-item]');
+          if (!parent || parent.style.display !== 'none') c.checked = true;
+        });
+        syncIndustry();
+        submitFilters(true);
+      });
+    }
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function () {
+        checks.forEach(function (c) { c.checked = false; });
+        syncIndustry();
+        submitFilters(true);
+      });
+    }
+
+    document.querySelectorAll('[data-cf-set]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-cf-set') || '';
+        var val = btn.getAttribute('data-cf-value') || '';
+        setField(key, val);
+        syncGroupActive(btn.getAttribute('data-cf-group') || '', val);
+        submitFilters(true);
+      });
+    });
+
+    document.querySelectorAll('[data-cf-clear]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-cf-clear') || '';
+        if (!key) return;
+        setField(key, '');
+        if (key === 'q' && searchInput) searchInput.value = '';
+        submitFilters(true);
+      });
+    });
+
+    document.querySelectorAll('[data-cf-remove-industry]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var removeVal = (btn.getAttribute('data-cf-remove-industry') || '').trim();
+        checks.forEach(function (c) {
+          if ((c.value || '').trim() === removeVal) c.checked = false;
+        });
+        syncIndustry();
+        submitFilters(true);
+      });
+    });
+
+    document.querySelectorAll('[data-cf-industry]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var value = (btn.getAttribute('data-cf-industry') || '').trim();
+        checks.forEach(function (c) { c.checked = ((c.value || '').trim() === value); });
+        syncIndustry();
+        submitFilters(true);
+      });
+    });
+
+    document.querySelectorAll('[data-cf-page]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        setField('page', btn.getAttribute('data-cf-page') || '1');
+        submitFilters(false);
+      });
+    });
+
+    if (focusToggle && focusInput && shell) {
+      focusToggle.addEventListener('click', function () {
+        var next = focusInput.value === '1' ? '0' : '1';
+        focusInput.value = next;
+        shell.classList.toggle('cf-focus', next === '1');
+        focusToggle.classList.toggle('is-active', next === '1');
+        focusToggle.textContent = (next === '1') ? 'Exit Focus' : 'Focus Mode';
+        submitFilters(true);
+      });
+    }
+
+    document.querySelectorAll('.cf-control').forEach(function (control) {
+      control.addEventListener('change', function () {
+        setField('page', '1');
+        submitFilters(true);
+      });
+    });
+
+    document.body.addEventListener('htmx:beforeRequest', function (e) {
+      var tgt = e && e.detail ? e.detail.target : null;
+      if (tgt && tgt.id === 'results-area') {
+        var listWrap = document.getElementById('results-wrap');
+        if (listWrap) lastScroll = listWrap.scrollTop;
+        var active = document.activeElement;
+        lastFocusId = active && active.id ? active.id : '';
+      }
+    });
+    document.body.addEventListener('htmx:afterSwap', function (e) {
+      if (e.target && e.target.id === 'results-area') {
+        var nw = document.getElementById('results-wrap');
+        if (nw) nw.scrollTop = lastScroll;
+        if (lastFocusId) {
+          var focusEl = document.getElementById(lastFocusId);
+          if (focusEl) focusEl.focus();
+        }
+      }
+    });
+    syncIndustry();
+    applyIndustryFilter();
+  })();
+</script>
+{% endblock %}

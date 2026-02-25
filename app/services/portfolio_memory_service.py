@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import urllib.parse
 from pathlib import Path
 import re
 import sqlite3
@@ -13,13 +14,17 @@ import threading
 import time
 from typing import Any
 
-from app.core.config import CORE_DB_PATH, ROOT
-from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
+from app.core.config import ROOT
+from app.core.db import core_conn as _conn, sqlite_retry
+from app.core.date import parse_datetime_flexible
+from app.core.num import to_float as _to_float
+from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.postgres_core_service import (
     core_backend,
     insert_portfolio_transaction_pg,
     list_portfolio_transactions_pg,
     list_recent_portfolio_transactions_pg,
+    pg_connect,
     pg_enabled,
     query_report_facts_pg,
     strict_postgres_mode,
@@ -32,17 +37,6 @@ from app.services.reports_service import list_reports, read_report_file
 
 _RUNTIME_CACHE_LOCK = threading.Lock()
 _RUNTIME_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-def _conn() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
-def _to_float(v: object, default: float = 0.0) -> float:
-    try:
-        return float(v)
-    except Exception:
-        return float(default)
 
 
 def _normalize_import_timestamp(raw: str) -> str:
@@ -64,10 +58,9 @@ def _normalize_import_timestamp(raw: str) -> str:
         "%d/%m/%Y %H:%M",
         "%d/%m/%Y %H:%M:%S",
     ]
-    try:
-        return dt.datetime.fromisoformat(s.replace("Z", "")).isoformat()
-    except Exception:
-        pass
+    d0 = parse_datetime_flexible(s)
+    if d0 is not None:
+        return d0.isoformat()
     for fmt in candidates:
         try:
             return dt.datetime.strptime(s, fmt).isoformat()
@@ -82,14 +75,6 @@ def _has_column(con: sqlite3.Connection, table: str, col: str) -> bool:
         return any(str(r[1] if isinstance(r, tuple) else r["name"]).strip() == col for r in rows)
     except Exception:
         return False
-
-
-def _safe_ticker(raw: str) -> str:
-    s = str(raw or "").strip().upper()
-    s = re.sub(r"[^A-Z0-9.\-]", "", s)
-    if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,11}", s):
-        return s
-    return ""
 
 
 def _latest_report_path(prefixes: tuple[str, ...]) -> Path | None:
@@ -195,6 +180,8 @@ def _extract_earnings_week_rows(txt: str, today: dt.date, row_limit: int = 18) -
 
 
 def ensure_portfolio_memory_schema() -> None:
+    if strict_postgres_mode():
+        return
     con = _conn()
     try:
         con.execute(
@@ -576,7 +563,9 @@ def forget_compact_memory(query: str, limit: int = 10) -> dict[str, Any]:
 
 def _memory_freshness_weight(updated_at: str) -> float:
     try:
-        ts = dt.datetime.fromisoformat(str(updated_at or "").replace("Z", ""))
+        ts = parse_datetime_flexible(str(updated_at or ""))
+        if ts is None:
+            return 0.5
         age_days = max(0.0, (dt.datetime.now() - ts).total_seconds() / 86400.0)
         if age_days <= 7:
             return 1.0
@@ -661,9 +650,8 @@ def compact_compact_memory(max_keep_active: int = 600, stale_days: int = 120) ->
     stale_cut = now - dt.timedelta(days=max(30, int(stale_days or 120)))
     stale_ids: list[int] = []
     for r in rows:
-        try:
-            upd = dt.datetime.fromisoformat(str(r.get("updated_at") or "").replace("Z", ""))
-        except Exception:
+        upd = parse_datetime_flexible(str(r.get("updated_at") or ""))
+        if upd is None:
             upd = now
         if upd < stale_cut and float(r.get("reliability") or 0.0) < 0.75 and int(r.get("reuse_count") or 0) <= 1:
             rid = int(r.get("id") or 0)
@@ -1664,6 +1652,132 @@ def list_recent_portfolio_transactions(limit: int = 20, ticker: str = "") -> lis
         ]
     finally:
         con.close()
+
+
+def summarize_trade_decision_reasons(
+    limit: int = 300,
+    ticker: str = "",
+    action: str = "",
+) -> dict[str, Any]:
+    lim = max(1, min(5000, int(limit or 300)))
+    tk = str(ticker or "").strip().upper()[:16]
+    act = str(action or "").strip().lower()
+    if act not in {"", "buy", "sell"}:
+        act = ""
+
+    rows: list[dict[str, Any]] = []
+    if pg_enabled():
+        try:
+            con = pg_connect()
+            if con is not None:
+                try:
+                    clauses: list[str] = []
+                    vals: list[Any] = []
+                    if tk:
+                        clauses.append("ticker = %s")
+                        vals.append(tk)
+                    if act:
+                        clauses.append("action = %s")
+                        vals.append(act)
+                    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+                    q = (
+                        "SELECT created_at, ticker, action, note, meta_json "
+                        "FROM portfolio_transactions_core"
+                        + where
+                        + " ORDER BY created_at DESC, id DESC LIMIT %s"
+                    )
+                    vals.append(lim)
+                    cur = con.cursor()
+                    cur.execute(q, tuple(vals))
+                    for r in cur.fetchall() or []:
+                        rows.append(
+                            {
+                                "created_at": str(r[0] or ""),
+                                "ticker": str(r[1] or ""),
+                                "action": str(r[2] or "").lower(),
+                                "note": str(r[3] or ""),
+                                "meta_json": r[4],
+                            }
+                        )
+                finally:
+                    con.close()
+        except Exception:
+            if strict_postgres_mode():
+                return {"rows": 0, "reason_rows": 0, "by_reason": []}
+        if strict_postgres_mode() and not rows:
+            return {"rows": 0, "reason_rows": 0, "by_reason": []}
+
+    if not rows:
+        con = _conn()
+        try:
+            clauses: list[str] = []
+            vals: list[Any] = []
+            if tk:
+                clauses.append("ticker = ?")
+                vals.append(tk)
+            if act:
+                clauses.append("action = ?")
+                vals.append(act)
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            q = (
+                "SELECT created_at, ticker, action, note, meta_json "
+                "FROM portfolio_transactions"
+                + where
+                + " ORDER BY id DESC LIMIT ?"
+            )
+            vals.append(lim)
+            for r in con.execute(q, tuple(vals)).fetchall():
+                rows.append(
+                    {
+                        "created_at": str(r["created_at"] or ""),
+                        "ticker": str(r["ticker"] or ""),
+                        "action": str(r["action"] or "").lower(),
+                        "note": str(r["note"] or ""),
+                        "meta_json": r["meta_json"],
+                    }
+                )
+        except Exception:
+            return {"rows": 0, "reason_rows": 0, "by_reason": []}
+        finally:
+            con.close()
+
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for r in rows:
+        meta_raw = r.get("meta_json")
+        meta: dict[str, Any] = {}
+        if isinstance(meta_raw, dict):
+            meta = meta_raw
+        elif isinstance(meta_raw, str) and meta_raw.strip():
+            try:
+                obj = json.loads(meta_raw)
+                if isinstance(obj, dict):
+                    meta = obj
+            except Exception:
+                meta = {}
+        reason_key = str(meta.get("decision_reason") or "").strip().lower()
+        reason_label = str(meta.get("decision_reason_label") or "").strip()
+        if not reason_key:
+            continue
+        counts[reason_key] = counts.get(reason_key, 0) + 1
+        if reason_label:
+            labels[reason_key] = reason_label
+
+    reason_rows = int(sum(counts.values()))
+    if reason_rows <= 0:
+        return {"rows": len(rows), "reason_rows": 0, "by_reason": []}
+
+    by_reason = []
+    for k, n in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+        by_reason.append(
+            {
+                "reason": k,
+                "label": labels.get(k, k.replace("_", " ").title()),
+                "count": int(n),
+                "pct": round((float(n) * 100.0 / float(reason_rows)), 1),
+            }
+        )
+    return {"rows": len(rows), "reason_rows": reason_rows, "by_reason": by_reason}
 
 
 def list_portfolio_transactions(
@@ -2882,9 +2996,8 @@ def _report_ingest_due(min_hours: int = 6) -> bool:
         raw = str(row["state_value"] or "").strip()
         if not raw:
             return True
-        try:
-            last = dt.datetime.fromisoformat(raw.replace("Z", ""))
-        except Exception:
+        last = parse_datetime_flexible(raw)
+        if last is None:
             return True
         return (dt.datetime.now() - last).total_seconds() >= float(max(1, int(min_hours))) * 3600.0
     finally:
@@ -2903,6 +3016,23 @@ def _top_runtime_tickers(limit: int = 10) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+def _extract_company_ticker_from_context(path: str, query_str: str) -> str:
+    p = str(path or "").strip()
+    if not p.startswith("/company_file"):
+        return ""
+    try:
+        qp = urllib.parse.parse_qs(str(query_str or "").lstrip("?"), keep_blank_values=False)
+    except Exception:
+        qp = {}
+    cand = ""
+    for key in ("t", "ticker"):
+        vals = qp.get(key) or []
+        if vals:
+            cand = str(vals[0] or "").strip().upper()
+            break
+    return re.sub(r"[^A-Z0-9.\-]", "", cand)[:16]
 
 
 def inject_runtime_context(context: dict[str, Any] | None, query: str = "") -> dict[str, Any]:
@@ -2926,9 +3056,68 @@ def inject_runtime_context(context: dict[str, Any] | None, query: str = "") -> d
     map_query = f"{path} {query}".strip()
     page_hits = retrieve_app_knowledge(map_query, limit=3) if map_query else []
     page_hint = page_hits[0] if page_hits else {}
+    current_query = str(ctx.get("current_query") or "").strip()
+    company_ticker = _extract_company_ticker_from_context(path, current_query)
+
+    company_context: dict[str, Any] = {}
+    if company_ticker:
+        try:
+            from app.services.price_metrics_service import get_price_metrics  # local import
+            from app.services.mini_statements_service import get_mini_statements  # local import
+            pm = get_price_metrics(company_ticker) or {}
+            ms = get_mini_statements(company_ticker) or {}
+            hold = {}
+            for r in get_holdings(limit=200):
+                if str(r.get("ticker") or "").strip().upper() == company_ticker:
+                    hold = {
+                        "shares": float(r.get("shares") or 0.0),
+                        "avg_cost": float(r.get("cost") or 0.0),
+                    }
+                    break
+            thesis = {}
+            try:
+                thesis = (get_watchlist_rationale(company_ticker).get("thesis") or {})
+            except Exception:
+                thesis = {}
+            company_context = {
+                "ticker": company_ticker,
+                "valuation": {
+                    "market_cap": str(pm.get("market_cap") or ""),
+                    "price_asof": str(pm.get("asof") or ""),
+                    "ytd_return": pm.get("ytd_return"),
+                    "m12_return": pm.get("m12_return"),
+                    "y5_return": pm.get("y5_return"),
+                    "ytd_start_px": pm.get("ytd_start_px"),
+                    "ytd_end_px": pm.get("ytd_end_px"),
+                    "m12_start_px": pm.get("m12_start_px"),
+                    "m12_end_px": pm.get("m12_end_px"),
+                    "y5_start_px": pm.get("y5_start_px"),
+                    "y5_end_px": pm.get("y5_end_px"),
+                },
+                "position": hold,
+                "thesis": thesis,
+                "financials_5y": {
+                    "asof": str(ms.get("asof") or ""),
+                    "source": str(ms.get("source") or ""),
+                    "currency": str(ms.get("currency") or "USD"),
+                    "years": list(ms.get("years") or []),
+                    "revenue": list(ms.get("revenue") or []),
+                    "gross_profit": list(ms.get("gross_profit") or []),
+                    "operating_cash_flow": list(ms.get("operating_cash_flow") or []),
+                    "capex": list(ms.get("capex") or []),
+                    "free_cash_flow": list(ms.get("free_cash_flow") or []),
+                    "total_cash": list(ms.get("total_cash") or []),
+                    "total_debt": list(ms.get("total_debt") or []),
+                    "total_equity": list(ms.get("total_equity") or []),
+                },
+            }
+        except Exception:
+            company_context = {"ticker": company_ticker}
+
     ctx["runtime"] = {
         "asof": dt.datetime.now().isoformat(timespec="seconds"),
         "current_path": path,
+        "current_query": current_query,
         "page_hint": {
             "title": str(page_hint.get("title") or ""),
             "kind": str(page_hint.get("kind") or ""),
@@ -2942,6 +3131,7 @@ def inject_runtime_context(context: dict[str, Any] | None, query: str = "") -> d
             tickers=_top_runtime_tickers(limit=10),
             limit=10,
         ),
+        "company_context": company_context,
     }
     with _RUNTIME_CACHE_LOCK:
         _RUNTIME_CACHE[cache_key] = (now_ts, json.loads(json.dumps(ctx["runtime"], ensure_ascii=True)))

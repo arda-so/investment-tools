@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+fail() { echo "FAIL: $1"; exit 1; }
+pass() { echo "PASS: $1"; }
+warn() { echo "WARN: $1"; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+echo "== Cloud Preflight =="
+
+need_cmd curl
+need_cmd python3
+
+if [ ! -f ".env" ]; then
+  fail ".env not found. copy .env.cloud.example -> .env and set real values"
+fi
+
+set -a
+source ./.env
+set +a
+
+[ -n "${POSTGRES_DSN:-}" ] || fail "POSTGRES_DSN is empty"
+[ -n "${AI_REDIS_URL:-}" ] || fail "AI_REDIS_URL is empty"
+[ "${CORE_DB_BACKEND:-}" = "postgres" ] || fail "CORE_DB_BACKEND must be postgres"
+[ "${CORE_DB_STRICT_POSTGRES:-1}" = "1" ] || fail "CORE_DB_STRICT_POSTGRES must be 1"
+[ "${CORE_DB_GUARD_ENFORCE:-1}" = "1" ] || fail "CORE_DB_GUARD_ENFORCE must be 1"
+
+pass "env variables present"
+
+python3 - <<'PY' || fail "python import preflight failed"
+import importlib
+mods = ["fastapi", "uvicorn", "jinja2", "psycopg2"]
+for m in mods:
+    importlib.import_module(m)
+print("imports_ok")
+PY
+pass "python dependencies look good"
+
+if curl -fsS --max-time 6 "http://127.0.0.1:${APP_PORT:-8766}/health/live" >/dev/null 2>&1; then
+  pass "app live endpoint reachable"
+  curl -fsS --max-time 8 "http://127.0.0.1:${APP_PORT:-8766}/health/ready" >/dev/null && pass "app ready endpoint reachable" || warn "ready endpoint failed"
+  curl -fsS --max-time 8 "http://127.0.0.1:${APP_PORT:-8766}/ai/worker/health" >/dev/null && pass "worker health endpoint reachable" || warn "worker health endpoint failed"
+else
+  warn "app not running on localhost:${APP_PORT:-8766} (skip live endpoint checks)"
+fi
+
+echo "Cloud preflight completed."

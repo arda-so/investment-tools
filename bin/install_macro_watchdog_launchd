@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+ROOT="/Users/solmaz/Investment_Tools"
+SRC="$ROOT/automations/launchd/com.solmaz.macro.watchdog.plist"
+DST="$HOME/Library/LaunchAgents/com.solmaz.macro.watchdog.plist"
+
+mkdir -p "$HOME/Library/LaunchAgents"
+cp "$SRC" "$DST"
+launchctl unload "$DST" >/dev/null 2>&1 || true
+launchctl load "$DST"
+launchctl list | grep "com.solmaz.macro.watchdog" || true
+echo "Installed launchd agent: com.solmaz.macro.watchdog"
+

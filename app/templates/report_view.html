@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Report Viewer | Investor OS v2{% endblock %}
+{% block body %}
+<div class="card">
+  <div class="topbar">
+    <a class="btn" href="/reports">Back to Reports</a>
+    <strong class="title">{{ title or "Report" }}</strong>
+    <span class="muted">{{ kind or "Report" }}{% if modified %} • {{ modified }}{% endif %}</span>
+  </div>
+</div>
+
+{% if error %}
+<div class="flash">{{ error }}</div>
+{% else %}
+<div class="card">
+  <pre style="white-space:pre-wrap;margin:0;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.45;">{{ content }}</pre>
+</div>
+{% endif %}
+{% endblock %}

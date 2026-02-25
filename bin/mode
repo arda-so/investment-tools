@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+cd /Users/solmaz/Investment_Tools
+python3 research_agent.py mode "$@"

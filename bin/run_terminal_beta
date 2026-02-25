@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+ROOT="/Users/solmaz/Investment_Tools"
+cd "$ROOT"
+
+./bin/run_terminal_daily
+python3 tools/build_beta_dashboard.py >/tmp/terminal_beta_path.txt
+DASH_PATH="$(cat /tmp/terminal_beta_path.txt)"
+echo "Beta dashboard built: $DASH_PATH"
+
+if command -v open >/dev/null 2>&1; then
+  open "$DASH_PATH" >/dev/null 2>&1 || true
+fi
+

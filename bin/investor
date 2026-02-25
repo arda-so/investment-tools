@@ -1,0 +1,594 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="/Users/solmaz/Investment_Tools"
+cd "$ROOT"
+WATCHLIST_FILE="data/my_watchlist.txt"
+PORTFOLIO_FILE="data/portfolio.csv"
+
+latest_file() {
+  pattern="$1"
+  ls -t $pattern 2>/dev/null | head -n 1 || true
+}
+
+latest_readable_file() {
+  pattern="$1"
+  for f in $(ls -t $pattern 2>/dev/null || true); do
+    sz="$(wc -c < "$f" 2>/dev/null || echo 0)"
+    if [ "${sz:-0}" -ge 120 ]; then
+      echo "$f"
+      return 0
+    fi
+  done
+  echo ""
+}
+
+pause() {
+  echo ""
+  read -r -p "Press Enter to continue..."
+}
+
+ensure_user_lists() {
+  mkdir -p data
+  if [ ! -f "$WATCHLIST_FILE" ]; then
+    cat > "$WATCHLIST_FILE" <<'EOF'
+# One ticker per line, e.g.:
+# MSFT
+# CRWD
+EOF
+  fi
+  if [ ! -f "$PORTFOLIO_FILE" ]; then
+    cat > "$PORTFOLIO_FILE" <<'EOF'
+# TICKER,SHARES,COST_BASIS,NOTES
+# MSFT,12,385.40,Core long
+EOF
+  fi
+}
+
+show_one_latest() {
+  local label="$1"
+  local pattern="$2"
+  local f
+  f="$(latest_readable_file "$pattern")"
+  echo "========== $label =========="
+  if [ -z "$f" ]; then
+    echo "No readable report found for: $pattern"
+    return 0
+  fi
+  echo "File: $ROOT/$f"
+  echo ""
+  cat "$f"
+}
+
+show_header() {
+  clear || true
+  echo "=================================================="
+  echo "              MY INVESTOR TERMINAL"
+  echo "=================================================="
+  echo "Folder: $ROOT"
+  echo "Mode: $(./bin/mode | head -n 1 | cut -d':' -f2- | sed 's/^ //')"
+  echo ""
+}
+
+show_home_panel() {
+  ensure_user_lists
+  local daily appendix weekly monthly
+  daily="$(latest_file "reports/terminal_daily_brief_*.md")"
+  appendix="$(latest_file "reports/terminal_appendix_*.md")"
+  weekly="$(latest_file "reports/terminal_weekly_outlook_*.md")"
+  monthly="$(latest_file "reports/terminal_monthly_ic_memo_*.md")"
+
+  echo "STATUS"
+  if [ -n "$daily" ]; then
+    ts="$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$daily" 2>/dev/null || echo "?")"
+    echo "- Last Daily Brief: $ts"
+  else
+    echo "- Last Daily Brief: MISSING"
+  fi
+  if [ -n "$appendix" ]; then
+    ts="$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$appendix" 2>/dev/null || echo "?")"
+    echo "- Last Appendix: $ts"
+  else
+    echo "- Last Appendix: MISSING"
+  fi
+  if [ -n "$weekly" ]; then
+    ts="$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$weekly" 2>/dev/null || echo "?")"
+    echo "- Last Weekly Outlook: $ts"
+  else
+    echo "- Last Weekly Outlook: MISSING"
+  fi
+  if [ -n "$monthly" ]; then
+    ts="$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$monthly" 2>/dev/null || echo "?")"
+    echo "- Last Monthly IC Memo: $ts"
+  else
+    echo "- Last Monthly IC Memo: MISSING"
+  fi
+  echo ""
+
+  echo "TOP 5 ALERTS"
+  alert_file="$(latest_file "reports/.terminal_inputs/red_flag_alert_*.txt")"
+  if [ -n "$alert_file" ] && [ -s "$alert_file" ]; then
+    python3 "$ROOT/tools/red_flag_rank.py" --file "$alert_file" --limit 5
+  else
+    echo "- No current red-flag lines found."
+  fi
+  echo ""
+
+  echo "TOP EARNINGS WATCH"
+  earn_file="$(latest_file "reports/.terminal_inputs/earnings_radar_*.md")"
+  if [ -n "$earn_file" ] && [ -s "$earn_file" ]; then
+    python3 "$ROOT/tools/earnings_watch_rank.py" --file "$earn_file" --limit 5 --scope upcoming
+  else
+    echo "- No current earnings radar file found."
+  fi
+  echo ""
+
+  echo "KEY EARNINGS THIS WEEK"
+  if [ -n "$earn_file" ] && [ -s "$earn_file" ]; then
+    python3 "$ROOT/tools/earnings_watch_rank.py" --file "$earn_file" --limit 5 --scope week
+  else
+    echo "- No current earnings radar file found."
+  fi
+  echo ""
+
+  echo "YOUR LISTS"
+  wl_count="$(awk '!/^[[:space:]]*($|#)/{c++} END{print c+0}' "$WATCHLIST_FILE" 2>/dev/null)"
+  pf_count="$(awk '!/^[[:space:]]*($|#)/{c++} END{print c+0}' "$PORTFOLIO_FILE" 2>/dev/null)"
+  echo "- Watchlist tickers: ${wl_count:-0}"
+  echo "- Portfolio positions: ${pf_count:-0}"
+  echo ""
+}
+
+show_menu() {
+  echo "PRIMARY"
+  echo "1) Read Terminal Daily Brief"
+  echo "2) Read Terminal Appendix (Earnings + Signals)"
+  echo "3) Run Terminal Daily refresh"
+  echo ""
+  echo "FAST ACCESS"
+  echo "4) Read latest Terminal pack"
+  echo "5) Dashboard"
+  echo "6) Morning Routine (run daily + open Daily Brief)"
+  echo "7) Launch Beta Graphical Dashboard"
+  echo ""
+  echo "MORE"
+  echo "8) Advanced menu"
+  echo "9) Exit"
+  echo ""
+}
+
+show_advanced_menu() {
+  echo "ADVANCED"
+  echo "1) Read Terminal Weekly Outlook"
+  echo "2) Read Terminal Monthly IC Memo"
+  echo "3) Read Quarterly Report (deep dive)"
+  echo "4) Read Quarterly Brief (2 min)"
+  echo "5) Run Terminal Weekly refresh"
+  echo "6) Run Terminal Monthly refresh"
+  echo "7) Run ALL Terminal refresh (daily+weekly+monthly+quarterly)"
+  echo "8) Set mode: STRICT (reliable only)"
+  echo "9) Set mode: BLOOMBERG_LIKE (broader)"
+  echo "10) Show automation schedule"
+  echo "11) Show reports folder path"
+  echo "12) Health check (agents + runs + failures)"
+  echo "13) Add note (portfolio/watchlist)"
+  echo "14) Read recent notes"
+  echo "15) Add decision memo (buy/sell/hold)"
+  echo "16) Read open decisions"
+  echo "17) Read closed decisions"
+  echo "18) List watchlist"
+  echo "19) Add watchlist ticker"
+  echo "20) Remove watchlist ticker"
+  echo "21) List portfolio"
+  echo "22) Add portfolio position"
+  echo "23) Remove portfolio position"
+  echo "24) Launch Terminal Web App"
+  echo "25) Back"
+  echo ""
+}
+
+list_watchlist() {
+  ensure_user_lists
+  echo "========== WATCHLIST =========="
+  lines="$(grep -Ev '^\s*($|#)' "$WATCHLIST_FILE" || true)"
+  if [ -z "$lines" ]; then
+    echo "No watchlist tickers yet."
+    return 0
+  fi
+  echo "$lines" | nl -w2 -s') '
+}
+
+add_watchlist_ticker() {
+  ensure_user_lists
+  echo "Ticker to add:"
+  read -r t
+  t="$(echo "$t" | tr '[:lower:]' '[:upper:]' | xargs)"
+  if [ -z "$t" ]; then
+    echo "No ticker entered."
+    return 0
+  fi
+  if grep -Eq "^\s*${t}\s*$" "$WATCHLIST_FILE"; then
+    echo "$t already exists in watchlist."
+    return 0
+  fi
+  echo "$t" >> "$WATCHLIST_FILE"
+  echo "Added $t."
+}
+
+remove_watchlist_ticker() {
+  ensure_user_lists
+  echo "Ticker to remove:"
+  read -r t
+  t="$(echo "$t" | tr '[:lower:]' '[:upper:]' | xargs)"
+  if [ -z "$t" ]; then
+    echo "No ticker entered."
+    return 0
+  fi
+  if ! grep -Eq "^\s*${t}\s*$" "$WATCHLIST_FILE"; then
+    echo "$t not found."
+    return 0
+  fi
+  tmpf="$(mktemp)"
+  grep -Ev "^\s*${t}\s*$" "$WATCHLIST_FILE" > "$tmpf" || true
+  mv "$tmpf" "$WATCHLIST_FILE"
+  echo "Removed $t."
+}
+
+list_portfolio() {
+  ensure_user_lists
+  echo "========== PORTFOLIO =========="
+  lines="$(grep -Ev '^\s*($|#)' "$PORTFOLIO_FILE" || true)"
+  if [ -z "$lines" ]; then
+    echo "No positions yet."
+    return 0
+  fi
+  echo "Ticker | Shares | Cost Basis | Notes"
+  echo "$lines"
+}
+
+add_portfolio_position() {
+  ensure_user_lists
+  local t s c n
+  echo "Ticker:"
+  read -r t
+  t="$(echo "$t" | tr '[:lower:]' '[:upper:]' | xargs)"
+  [ -z "$t" ] && echo "Ticker required." && return 0
+  echo "Shares:"
+  read -r s
+  echo "Cost basis:"
+  read -r c
+  echo "Notes (optional):"
+  read -r n
+  if grep -Eq "^\s*${t}\s*," "$PORTFOLIO_FILE"; then
+    tmpf="$(mktemp)"
+    grep -Ev "^\s*${t}\s*," "$PORTFOLIO_FILE" > "$tmpf" || true
+    mv "$tmpf" "$PORTFOLIO_FILE"
+  fi
+  echo "${t},${s},${c},${n}" >> "$PORTFOLIO_FILE"
+  echo "Saved position for $t."
+}
+
+remove_portfolio_position() {
+  ensure_user_lists
+  echo "Ticker to remove from portfolio:"
+  read -r t
+  t="$(echo "$t" | tr '[:lower:]' '[:upper:]' | xargs)"
+  if [ -z "$t" ]; then
+    echo "No ticker entered."
+    return 0
+  fi
+  if ! grep -Eq "^\s*${t}\s*," "$PORTFOLIO_FILE"; then
+    echo "$t not found in portfolio."
+    return 0
+  fi
+  tmpf="$(mktemp)"
+  grep -Ev "^\s*${t}\s*," "$PORTFOLIO_FILE" > "$tmpf" || true
+  mv "$tmpf" "$PORTFOLIO_FILE"
+  echo "Removed $t from portfolio."
+}
+
+run_morning_routine() {
+  ./bin/run_terminal_daily
+  show_one_latest "Terminal Daily Brief" "reports/terminal_daily_brief_*.md"
+}
+
+show_latest_pack() {
+  echo "========== LATEST TERMINAL PACK =========="
+  files=(
+    "$(latest_readable_file "reports/terminal_daily_brief_*.md")"
+    "$(latest_readable_file "reports/terminal_appendix_*.md")"
+    "$(latest_readable_file "reports/terminal_weekly_outlook_*.md")"
+    "$(latest_readable_file "reports/terminal_monthly_ic_memo_*.md")"
+    "$(latest_readable_file "reports/quarterly_report_*.md")"
+    "$(latest_readable_file "reports/quarterly_report_*_brief.md")"
+  )
+
+  for f in "${files[@]}"; do
+    if [ -n "$f" ]; then
+      echo ""
+      echo "----- $f -----"
+      cat "$f"
+    fi
+  done
+}
+
+run_all() {
+  local run_log="logs/manual_run_all.log"
+  echo ""
+  echo "Running all automations. This can take 5-20 minutes..."
+  echo "Log file: $ROOT/$run_log"
+  echo ""
+
+  run_step() {
+    local label="$1"
+    local cmd="$2"
+    echo "-> $label"
+    eval "$cmd" >> "$run_log" 2>&1 &
+    local pid=$!
+    local ticks=0
+    while kill -0 "$pid" 2>/dev/null; do
+      ticks=$((ticks + 1))
+      printf "."
+      sleep 2
+      if [ $((ticks % 20)) -eq 0 ]; then
+        printf " %ss\n" "$((ticks * 2))"
+      fi
+    done
+    wait "$pid"
+    local rc=$?
+    echo ""
+    if [ "$rc" -eq 0 ]; then
+      echo "   Done: $label"
+    else
+      echo "   Failed: $label (check $run_log)"
+      tail -n 8 "$run_log" || true
+    fi
+  }
+
+  {
+    echo ""
+    echo "===== Manual Run All: $(date) ====="
+  } >> "$run_log"
+
+  run_step "Terminal Daily" "./bin/run_terminal_daily"
+  run_step "Terminal Weekly" "./bin/run_terminal_weekly"
+  run_step "Terminal Monthly" "./bin/run_terminal_monthly"
+  run_step "Quarterly Report" "./bin/run_quarterly"
+
+  echo ""
+  echo "All Terminal refresh jobs finished."
+  echo "Latest reports are in: $ROOT/reports"
+}
+
+show_schedule() {
+  echo "========== AUTOMATION SCHEDULE =========="
+  echo "Terminal Daily: Mon-Fri 07:00 (recommended)"
+  echo "Terminal Weekly: Sunday 18:00"
+  echo "Terminal Monthly: day 1 at 09:00"
+  echo "Quarterly Report: Jan/Apr/Jul/Oct day 15 at 09:00"
+  echo ""
+  echo "LaunchAgents folder:"
+  echo "$HOME/Library/LaunchAgents"
+}
+
+show_health_check() {
+  echo "========== HEALTH CHECK =========="
+  echo "Time: $(date)"
+  echo ""
+
+  echo "[1] LaunchAgents loaded"
+  local labels=(
+    "com.solmaz.morning.intelligence"
+    "com.solmaz.earnings.radar"
+    "com.solmaz.signal.tracker"
+    "com.solmaz.research.daily"
+    "com.solmaz.research.weekly"
+    "com.solmaz.research.monthly"
+    "com.solmaz.research.quarterly"
+    "com.solmaz.research.redflag"
+  )
+  for lbl in "${labels[@]}"; do
+    if launchctl list 2>/dev/null | grep -q "$lbl"; then
+      echo "  OK  $lbl"
+    else
+      echo "  MISS $lbl"
+    fi
+  done
+  echo ""
+
+  echo "[2] Latest report timestamps"
+  local pats=(
+    "reports/terminal_daily_brief_*.md"
+    "reports/terminal_appendix_*.md"
+    "reports/terminal_weekly_outlook_*.md"
+    "reports/terminal_monthly_ic_memo_*.md"
+    "reports/quarterly_report_*.md"
+  )
+  for p in "${pats[@]}"; do
+    f="$(latest_file "$p")"
+    if [ -n "$f" ]; then
+      ts="$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$f" 2>/dev/null || echo "?")"
+      echo "  $ts  $f"
+    else
+      echo "  MISSING  $p"
+    fi
+  done
+  echo ""
+
+  echo "[3] Failures in logs (last 24h)"
+  local err_count=0
+  while IFS= read -r lf; do
+    [ -z "$lf" ] && continue
+    mod_epoch="$(stat -f "%m" "$lf" 2>/dev/null || echo 0)"
+    now_epoch="$(date +%s)"
+    if [ $((now_epoch - mod_epoch)) -le 86400 ]; then
+      hits="$(grep -Ei "failed|error|traceback|exception|timed out|timeout" "$lf" 2>/dev/null | tail -n 3 || true)"
+      if [ -n "$hits" ]; then
+        err_count=$((err_count + 1))
+        echo "  -- $lf"
+        echo "$hits" | sed 's/^/     /'
+      fi
+    fi
+  done < <(ls logs/*.log 2>/dev/null || true)
+  if [ "$err_count" -eq 0 ]; then
+    echo "  No error patterns found in last 24h logs."
+  fi
+}
+
+add_note_prompt() {
+  local scope ticker sentiment note tags
+  echo "Scope? (portfolio/watchlist)  [or paste full note directly]"
+  read -r scope
+  scope="$(echo "$scope" | tr '[:upper:]' '[:lower:]')"
+  if [ "$scope" != "portfolio" ] && [ "$scope" != "watchlist" ]; then
+    # User pasted a full note directly. Save as quick portfolio note.
+    note="$scope"
+    if [ -z "$note" ]; then
+      echo "No note entered."
+      return 0
+    fi
+    python3 research_agent.py journal add --scope portfolio --sentiment watch --note "$note"
+    echo "Saved as quick portfolio note."
+    return 0
+  fi
+
+  ticker=""
+  if [ "$scope" = "watchlist" ]; then
+    echo "Ticker (e.g., AAPL):"
+    read -r ticker
+    ticker="$(echo "$ticker" | tr '[:lower:]' '[:upper:]')"
+  fi
+
+  echo "Sentiment? (like/dislike/watch/change/neutral)"
+  read -r sentiment
+  sentiment="$(echo "$sentiment" | tr '[:upper:]' '[:lower:]')"
+
+  echo "Your note:"
+  read -r note
+  echo "Tags (comma separated, optional):"
+  read -r tags
+
+  cmd=(python3 research_agent.py journal add --scope "$scope" --sentiment "$sentiment" --note "$note")
+  if [ -n "$ticker" ]; then
+    cmd+=(--ticker "$ticker")
+  fi
+  IFS=',' read -ra tag_arr <<< "$tags"
+  for t in "${tag_arr[@]}"; do
+    tt="$(echo "$t" | xargs || true)"
+    [ -n "$tt" ] && cmd+=(--tag "$tt")
+  done
+  "${cmd[@]}"
+}
+
+add_decision_prompt() {
+  local ticker action exp thesis valview risks trigger killc
+  echo "Ticker (e.g., AAPL):"
+  read -r ticker
+  ticker="$(echo "$ticker" | tr '[:lower:]' '[:upper:]')"
+  echo "Action? (buy/sell/hold)"
+  read -r action
+  action="$(echo "$action" | tr '[:upper:]' '[:lower:]')"
+  echo "Expected 3Y return in % (optional, e.g., 12.5):"
+  read -r exp
+  echo "Thesis:"
+  read -r thesis
+  echo "Valuation view (optional):"
+  read -r valview
+  echo "Key risks (optional):"
+  read -r risks
+  echo "Trigger condition (optional):"
+  read -r trigger
+  echo "Kill criteria (optional):"
+  read -r killc
+
+  cmd=(python3 research_agent.py decision add "$ticker" --trade-action "$action" --thesis "$thesis")
+  [ -n "$exp" ] && cmd+=(--expected-return-3y "$exp")
+  [ -n "$valview" ] && cmd+=(--valuation-view "$valview")
+  [ -n "$risks" ] && cmd+=(--key-risks "$risks")
+  [ -n "$trigger" ] && cmd+=(--trigger-condition "$trigger")
+  [ -n "$killc" ] && cmd+=(--kill-criteria "$killc")
+  "${cmd[@]}"
+}
+
+while true; do
+  show_header
+  show_home_panel
+  show_menu
+  read -r -p "Choose a number (1-9): " choice
+
+  case "$choice" in
+    1)
+      show_one_latest "Terminal Daily Brief" "reports/terminal_daily_brief_*.md"
+      pause
+      ;;
+    2)
+      show_one_latest "Terminal Appendix (Earnings + Signals)" "reports/terminal_appendix_*.md"
+      pause
+      ;;
+    3)
+      ./bin/run_terminal_daily
+      pause
+      ;;
+    4)
+      show_latest_pack
+      pause
+      ;;
+    5)
+      ./bin/status
+      echo ""
+      [ -f "DASHBOARD.md" ] && cat DASHBOARD.md
+      pause
+      ;;
+    6)
+      run_morning_routine
+      pause
+      ;;
+    7)
+      ./bin/run_terminal_beta
+      pause
+      ;;
+    8)
+      while true; do
+        show_header
+        show_advanced_menu
+        read -r -p "Choose Advanced option (1-25): " adv
+        case "$adv" in
+          1) show_one_latest "Terminal Weekly Outlook" "reports/terminal_weekly_outlook_*.md"; pause ;;
+          2) show_one_latest "Terminal Monthly IC Memo" "reports/terminal_monthly_ic_memo_*.md"; pause ;;
+          3) show_one_latest "Quarterly Report" "reports/quarterly_report_*.md"; pause ;;
+          4) show_one_latest "Quarterly Brief (2 min)" "reports/quarterly_report_*_brief.md"; pause ;;
+          5) ./bin/run_terminal_weekly; pause ;;
+          6) ./bin/run_terminal_monthly; pause ;;
+          7) run_all; pause ;;
+          8) ./bin/mode strict; pause ;;
+          9) ./bin/mode bloomberg_like; pause ;;
+          10) show_schedule; pause ;;
+          11) echo "$ROOT/reports"; pause ;;
+          12) show_health_check; pause ;;
+          13) add_note_prompt; pause ;;
+          14) python3 research_agent.py journal list --limit 25; pause ;;
+          15) add_decision_prompt; pause ;;
+          16) python3 research_agent.py decision list --status open --limit 25; pause ;;
+          17) python3 research_agent.py decision list --status closed --limit 25; pause ;;
+          18) list_watchlist; pause ;;
+          19) add_watchlist_ticker; pause ;;
+          20) remove_watchlist_ticker; pause ;;
+          21) list_portfolio; pause ;;
+          22) add_portfolio_position; pause ;;
+          23) remove_portfolio_position; pause ;;
+          24) ./bin/run_terminal_app; pause ;;
+          25) break ;;
+          *) echo "Please choose 1 to 25."; sleep 1 ;;
+        esac
+      done
+      ;;
+    9)
+      echo "Goodbye."
+      exit 0
+      ;;
+    *)
+      echo "Please choose 1 to 9."
+      sleep 1
+      ;;
+  esac
+done

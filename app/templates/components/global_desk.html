@@ -1,0 +1,328 @@
+<style>
+  #globalDesk {
+    position: fixed;
+    right: 10px;
+    bottom: 10px;
+    width: min(430px, calc(100vw - 20px));
+    z-index: 9200;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(25, 40, 60, .16);
+  }
+  #globalDesk.min { width: auto; border-radius: 999px; }
+  #globalDeskHead { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  #globalDesk.min #globalDeskHead { border-bottom: 0; padding: 6px 10px; }
+  #globalDeskTitle { font-weight: 700; }
+  #globalDesk.min #globalDeskTitle { display: none; }
+  #globalDeskBody { padding: 8px 10px; display: grid; gap: 8px; }
+  #globalDesk.min #globalDeskBody { display: none; }
+  #globalDesk.min #globalDeskToggle { border-radius: 999px; padding: 4px 12px; }
+  #globalDeskText { min-height: 92px; }
+  #globalDeskActions { display: flex; gap: 6px; justify-content: flex-end; }
+  #globalDeskActions .btn { padding: 8px 12px; font-size: 13px; }
+  #globalDeskOut { border: 1px solid var(--border2); border-radius: 8px; background: var(--panel2); padding: 8px; font-size: 12px; white-space: pre-wrap; min-height: 34px; }
+</style>
+<div id="globalDesk" class="min">
+  <div id="globalDeskHead">
+    <strong id="globalDeskTitle">Ask Note Task</strong>
+    <button id="globalDeskToggle" type="button" class="btn">Ask</button>
+  </div>
+  <div id="globalDeskBody">
+    <textarea id="globalDeskText" placeholder="Write... (company auto-detect)"></textarea>
+    <div id="globalDeskActions">
+      <button type="button" class="btn" data-intent="ask">Ask AI</button>
+    </div>
+    <div id="globalDeskOut" class="muted">Ready.</div>
+  </div>
+</div>
+<script>
+  (function () {
+    var root = document.getElementById("globalDesk");
+    if (!root) return;
+    var toggle = document.getElementById("globalDeskToggle");
+    var text = document.getElementById("globalDeskText");
+    var out = document.getElementById("globalDeskOut");
+    var actions = root.querySelectorAll("button[data-intent]");
+
+    function syncToggle() {
+      var min = root.classList.contains("min");
+      if (toggle) toggle.textContent = min ? "Ask" : "Minimize";
+    }
+
+    function setOut(msg) {
+      if (!out) return;
+      out.textContent = msg || "";
+      out.className = "muted";
+    }
+    function refreshSoon() {
+      setTimeout(function(){ window.location.reload(); }, 220);
+    }
+
+    function parseHumanAmount(s){
+      var v = String(s || '').trim().toLowerCase().replace(/,/g,'');
+      if(!v) return 0;
+      var mul = 1;
+      if(v.endsWith('k')){ mul = 1000; v = v.slice(0,-1); }
+      else if(v.endsWith('m')){ mul = 1000000; v = v.slice(0,-1); }
+      else if(v.endsWith('b')){ mul = 1000000000; v = v.slice(0,-1); }
+      var n = Number(v);
+      if(!isFinite(n)) return 0;
+      return n * mul;
+    }
+
+    function fuzzyHas(text, term){
+      var s = String(text || '').toLowerCase();
+      var t = String(term || '').toLowerCase();
+      if(!s || !t) return false;
+      if(s.indexOf(t) >= 0) return true;
+      var toks = (s.match(/[a-z]+/g) || []);
+      function sim(a,b){
+        if(!a || !b) return 0;
+        if(a===b) return 1;
+        var m = 0;
+        for(var i=0;i<Math.min(a.length,b.length);i++){ if(a[i]===b[i]) m++; else break; }
+        return m / Math.max(a.length,b.length);
+      }
+      for(var i=0;i<toks.length;i++){
+        if(sim(toks[i], t) >= 0.72) return true;
+      }
+      return false;
+    }
+
+    function parseDirectCashCommand(q){
+      var s = String(q || '').trim();
+      var m1 = s.match(/^\s*(?:please\s+)?(?:add|set|update)\s+(?:([\d.,]+[kKmMbB]?)\s*([A-Za-z]{3})|([A-Za-z]{3})\s*([\d.,]+[kKmMbB]?))\s+cash(?:\b.*)?$/i);
+      if(!m1){
+        m1 = s.match(/^\s*(?:please\s+)?(?:add|set|update)\s+([\d.,]+[kKmMbB]?)\s+(?:to\s+)?(?:my\s+|the\s+)?cash(?:\s+balance)?(?:\s+in\s+([A-Za-z]{3}))?(?:\b.*)?$/i);
+        if(m1){
+          return { mode:'cash_upsert', currency:String(m1[2]||'USD').toUpperCase(), amount:parseHumanAmount(m1[1]) };
+        }
+      }
+      if(!m1){
+        m1 = s.match(/^\s*(?:please\s+)?(?:add|set|update)\s+cash\s+([A-Za-z]{3})\s*([\d.,]+[kKmMbB]?)(?:\b.*)?$/i);
+        if(m1){
+          return { mode:'cash_upsert', currency:String(m1[1]||'USD').toUpperCase(), amount:parseHumanAmount(m1[2]) };
+        }
+      } else {
+        var a = m1[1] || m1[4] || '';
+        var c = m1[2] || m1[3] || 'USD';
+        return { mode:'cash_upsert', currency:String(c).toUpperCase(), amount:parseHumanAmount(a) };
+      }
+      var m2 = s.match(/^\s*(?:please\s+)?remove\s+(?:([A-Za-z]{3})\s+)?cash(?:\s+([A-Za-z]{3}))?(?:\b.*)?$/i);
+      if(m2){
+        return { mode:'cash_remove', currency:String(m2[1] || m2[2] || 'USD').toUpperCase() };
+      }
+      return null;
+    }
+
+    function parseDirectWatchlistCommand(q){
+      var s = String(q || '').trim();
+      var low = s.toLowerCase();
+      var hasWatch = fuzzyHas(low, 'watchlist') || low.indexOf('watch list') >= 0 || fuzzyHas(low, 'wathclist') || fuzzyHas(low, 'watchlsit');
+      if(!hasWatch) return null;
+      var isRemove = /\b(remove|delete|drop|sell|close)\b/i.test(low);
+      var isAdd = /\b(add|set|update|buy|put)\b/i.test(low) || !isRemove;
+      var m = s.match(/\$?([A-Za-z]{1,5})\b/g) || [];
+      var stop = {ADD:1,SET:1,BUY:1,PUT:1,THE:1,TO:1,MY:1,WATCH:1,WATCHLIST:1,REMOVE:1,DELETE:1,DROP:1,SELL:1,CLOSE:1,FROM:1,AND:1,FOR:1,USD:1,EUR:1,GBP:1,PLS:1,PLEASE:1};
+      var ticker = '';
+      for(var i=0;i<m.length;i++){
+        var tk = String(m[i] || '').replace('$','').toUpperCase();
+        if(!tk || stop[tk]) continue;
+        if(tk.length >= 1 && tk.length <= 5){ ticker = tk; break; }
+      }
+      if(!ticker) return null;
+      return { mode: isRemove ? 'watchlist_remove' : (isAdd ? 'watchlist_add' : ''), ticker: ticker };
+    }
+
+    function parseDirectPortfolioCommand(q){
+      var s = String(q || '').trim();
+      var low = s.toLowerCase();
+      var hasPortfolio = fuzzyHas(low, 'portfolio');
+      var isRemove = /\b(remove|delete|drop|sell|close)\b/i.test(low);
+      var isAdd = /\b(add|set|update|buy|put)\b/i.test(low) || !isRemove;
+
+      // Shorthand: add CRM 221 at 195.11
+      var mShort = s.match(/^\s*(?:please\s+)?(?:add|buy|set|update)\s+([A-Za-z.\-]{1,12})\s+(\d+(?:\.\d+)?)\s*(?:shares?)?\s*(?:at|@|price|cost)?\s*\$?\s*(\d+(?:\.\d+)?)(?:\b.*)?$/i);
+      if(mShort){
+        return { mode:'portfolio_upsert', ticker:String(mShort[1]||'').toUpperCase(), shares:String(mShort[2]||''), cost:String(mShort[3]||'') };
+      }
+
+      var toks = s.match(/\$?([A-Za-z]{1,5})\b/g) || [];
+      var stop = {ADD:1,SET:1,BUY:1,PUT:1,THE:1,TO:1,MY:1,PORTFOLIO:1,REMOVE:1,DELETE:1,DROP:1,SELL:1,CLOSE:1,FROM:1,AND:1,FOR:1,USD:1,EUR:1,GBP:1,PLS:1,PLEASE:1,AT:1,PRICE:1,COST:1};
+      var ticker = '';
+      for(var i=0;i<toks.length;i++){
+        var tk = String(toks[i] || '').replace('$','').toUpperCase();
+        if(!tk || stop[tk]) continue;
+        if(tk.length >= 1 && tk.length <= 5){ ticker = tk; break; }
+      }
+      var nums = (low.match(/\b\d+(?:\.\d+)?\b/g) || []);
+      if((hasPortfolio || isAdd || isRemove) && ticker){
+        if(isRemove && (hasPortfolio || /\bfrom\b/i.test(low))){
+          return { mode:'portfolio_remove', ticker:ticker };
+        }
+        if(nums.length >= 2){
+          return { mode:'portfolio_upsert', ticker:ticker, shares:String(nums[0]), cost:String(nums[1]) };
+        }
+      }
+      return null;
+    }
+
+    async function run(intent) {
+      var q = text ? String(text.value || "").trim() : "";
+      if (!q) {
+        setOut("Type something first.");
+        return;
+      }
+      setOut("Working...");
+      var fd = new URLSearchParams();
+      fd.set("text", q);
+      fd.set("intent", intent);
+      try {
+        // Fast direct path for cash/watchlist/portfolio commands (avoids slow generic desk route).
+        var ccmd = parseDirectCashCommand(q);
+        if(ccmd){
+          if(ccmd.mode === 'cash_upsert'){
+            if(!ccmd.amount || ccmd.amount <= 0){
+              setOut("Invalid cash amount.");
+              return;
+            }
+            var f1 = new URLSearchParams();
+            f1.set('currency', ccmd.currency);
+            f1.set('amount', String(ccmd.amount));
+            var r1 = await fetch('/my_universe/cash/upsert', {
+              method:'POST',
+              headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
+              body:f1.toString()
+            });
+            var d1 = await r1.json();
+            setOut((d1 && d1.message) ? d1.message : 'Cash updated.');
+            refreshSoon();
+            return;
+          }
+          if(ccmd.mode === 'cash_remove'){
+            var f2 = new URLSearchParams();
+            f2.set('currency', ccmd.currency);
+            var r2 = await fetch('/my_universe/cash/remove', {
+              method:'POST',
+              headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
+              body:f2.toString()
+            });
+            var d2 = await r2.json();
+            setOut((d2 && d2.message) ? d2.message : 'Cash removed.');
+            refreshSoon();
+            return;
+          }
+        }
+        var wcmd = parseDirectWatchlistCommand(q);
+        if(wcmd && wcmd.mode === 'watchlist_add'){
+          var fw1 = new URLSearchParams();
+          fw1.set('ticker', wcmd.ticker);
+          fw1.set('reason', 'Added via Ask AI');
+          var rw1 = await fetch('/my_universe/watchlist/add', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
+            body:fw1.toString()
+          });
+          var dw1 = await rw1.json();
+          setOut((dw1 && dw1.message) ? dw1.message : 'Watchlist updated.');
+          refreshSoon();
+          return;
+        }
+        if(wcmd && wcmd.mode === 'watchlist_remove'){
+          var fw2 = new URLSearchParams();
+          fw2.set('ticker', wcmd.ticker);
+          var rw2 = await fetch('/my_universe/watchlist/remove', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
+            body:fw2.toString()
+          });
+          var dw2 = await rw2.json();
+          setOut((dw2 && dw2.message) ? dw2.message : 'Removed from watchlist.');
+          refreshSoon();
+          return;
+        }
+        var pcmd = parseDirectPortfolioCommand(q);
+        if(pcmd && pcmd.mode === 'portfolio_upsert'){
+          if(!pcmd.ticker || !pcmd.shares || !pcmd.cost){
+            setOut('Portfolio command needs ticker + shares + average price.');
+            return;
+          }
+          var fp1 = new URLSearchParams();
+          fp1.set('ticker', pcmd.ticker);
+          fp1.set('shares', pcmd.shares);
+          fp1.set('cost', pcmd.cost);
+          fp1.set('note', 'Added via Ask AI');
+          var rp1 = await fetch('/my_universe/portfolio/upsert', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
+            body:fp1.toString()
+          });
+          var dp1 = await rp1.json();
+          setOut((dp1 && dp1.message) ? dp1.message : 'Portfolio updated.');
+          refreshSoon();
+          return;
+        }
+        if(pcmd && pcmd.mode === 'portfolio_remove'){
+          var fp2 = new URLSearchParams();
+          fp2.set('ticker', pcmd.ticker);
+          fp2.set('shares', '0');
+          fp2.set('cost', '0');
+          var rp2 = await fetch('/my_universe/portfolio/upsert', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
+            body:fp2.toString()
+          });
+          var dp2 = await rp2.json();
+          setOut((dp2 && dp2.message) ? dp2.message : 'Removed from portfolio.');
+          refreshSoon();
+          return;
+        }
+        var ctl = new AbortController();
+        var tmr = setTimeout(function () { ctl.abort(); }, 12000);
+        var res = await fetch("/desk/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+          body: fd.toString(),
+          signal: ctl.signal
+        });
+        clearTimeout(tmr);
+        var data = await res.json();
+        if (!res.ok || !data.ok) {
+          setOut(data.message || "Action failed.");
+          return;
+        }
+        if (data.mode === "ask") {
+          setOut(String(data.answer || "No answer found."));
+        } else {
+          var msg = String(data.message || "Saved.");
+          if (data.ticker) msg += " Linked: " + data.ticker;
+          setOut(msg);
+          if (data.mode === 'watchlist_add' || data.mode === 'watchlist_remove' || data.mode === 'portfolio_upsert' || data.mode === 'portfolio_remove' || data.mode === 'cash_upsert' || data.mode === 'cash_remove') {
+            refreshSoon();
+          }
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") {
+          setOut("Request timed out. Refresh page or restart app.");
+          return;
+        }
+        setOut("Network error.");
+      }
+    }
+
+    if (toggle) {
+      toggle.addEventListener("click", function () {
+        root.classList.toggle("min");
+        syncToggle();
+        if (!root.classList.contains("min") && text) text.focus();
+      });
+    }
+    actions.forEach(function (b) {
+      b.addEventListener("click", function () {
+        run(String(b.getAttribute("data-intent") || "note"));
+      });
+    });
+    syncToggle();
+  })();
+</script>

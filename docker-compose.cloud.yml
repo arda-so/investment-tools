@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: investor_app
+    env_file:
+      - .env
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: ${APP_PORT:-8766}
+      CORE_DB_BACKEND: postgres
+      CORE_DB_GUARD_ENFORCE: "1"
+      CORE_DB_STRICT_POSTGRES: "1"
+      PHASE2_POSTGRES_ENABLED: "1"
+      AI_QUEUE_BACKEND: ${AI_QUEUE_BACKEND:-postgres}
+      AI_QUEUE_STRICT_PROD: "1"
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      AI_REDIS_URL: ${AI_REDIS_URL}
+      APP_ENV: ${APP_ENV:-production}
+      AI_ADMIN_API_ENABLED: ${AI_ADMIN_API_ENABLED:-0}
+      AI_ADMIN_API_KEY: ${AI_ADMIN_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "${APP_PORT:-8766}:${APP_PORT:-8766}"
+    command: ["/app/bin/run_v2_app"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${APP_PORT:-8766}/health/ready | grep -q '\"ok\":true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    build: .
+    container_name: investor_worker
+    env_file:
+      - .env
+    environment:
+      CORE_DB_BACKEND: postgres
+      CORE_DB_GUARD_ENFORCE: "1"
+      CORE_DB_STRICT_POSTGRES: "1"
+      PHASE2_POSTGRES_ENABLED: "1"
+      AI_QUEUE_BACKEND: ${AI_QUEUE_BACKEND:-postgres}
+      AI_QUEUE_STRICT_PROD: "1"
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      AI_REDIS_URL: ${AI_REDIS_URL}
+      APP_ENV: ${APP_ENV:-production}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    command: ["/app/bin/run_ai_worker"]
+    restart: unless-stopped
+

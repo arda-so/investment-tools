@@ -1,0 +1,32 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="/Users/solmaz/Investment_Tools"
+NOTES_FILE="$ROOT/SESSION_NOTES.md"
+
+completed="${1:-}"
+next_step="${2:-}"
+
+if [ -z "$completed" ] || [ -z "$next_step" ]; then
+  echo "Usage: ./bin/session_note \"completed summary\" \"next step\""
+  exit 1
+fi
+
+stamp="$(date '+%Y-%m-%d %H:%M %Z')"
+
+if [ ! -f "$NOTES_FILE" ]; then
+  cat > "$NOTES_FILE" <<'HEADER'
+# Session Notes
+
+Purpose: quick checkpoint log so we can resume exactly where we left off after interruptions.
+HEADER
+fi
+
+{
+  echo ""
+  echo "## $stamp"
+  echo "- Completed: $completed"
+  echo "- Next step: $next_step"
+} >> "$NOTES_FILE"
+
+echo "Saved session note to $NOTES_FILE"

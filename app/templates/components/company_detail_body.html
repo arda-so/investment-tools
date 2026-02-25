@@ -6,11 +6,42 @@
 
   {% set initials = ((detail.name or detail.ticker or "C").split(" ")[0][:1] ~ ((detail.name or "").split(" ")[1][:1] if (detail.name or "").split(" ")|length > 1 else (detail.ticker or "")[:1]))|upper %}
 
-  <section class="deal-card hero">
+  <section class="company-header">
     <div class="logo-box">{{ initials }}</div>
     <div>
       <h1 class="co-name">{{ detail.name }}</h1>
-      <div class="co-meta">{{ detail.industry }} • {{ detail.country }} • {{ detail.market_cap }} • {{ detail.ticker }}</div>
+      <div class="co-meta">
+        {{ detail.industry }} • {{ detail.country }} • {{ detail.market_cap }} • {{ detail.ticker }}
+        {% if portfolio_context and portfolio_context.is_held %}
+        • Held {{ "%.2f"|format(portfolio_context.shares or 0) }} shares • Avg ${{ "%.2f"|format(portfolio_context.avg_cost or 0) }}
+        {% endif %}
+      </div>
+      {% set cov = detail.data_coverage or {} %}
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+        <span style="font-size:11px;font-weight:800;color:#fff;background:{{ cov.color or '#64748b' }};padding:4px 8px;border-radius:999px;">
+          {{ cov.label or "Unknown" }}
+        </span>
+        {% if cov.stale %}
+        <span class="muted">Stale data (> {{ cov.sla_days or 3 }}d)</span>
+        {% endif %}
+        {% if cov.schema_version %}
+        <span class="muted">{{ cov.schema_version }}</span>
+        {% endif %}
+      </div>
+      {% set pm = detail.price_metrics or {} %}
+      {% if pm and (pm.y5_return is not none or pm.m12_return is not none or pm.ytd_return is not none) %}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+        <span class="ticker-chip">5Y {{ "%+.1f%%"|format(pm.y5_return or 0) }}</span>
+        <span class="ticker-chip">12M {{ "%+.1f%%"|format(pm.m12_return or 0) }}</span>
+        <span class="ticker-chip">YTD {{ "%+.1f%%"|format(pm.ytd_return or 0) }}</span>
+        {% if pm.asof %}<span class="muted">asof {{ pm.asof }}</span>{% endif %}
+      </div>
+      <div style="margin-top:6px;display:grid;gap:2px;">
+        <div class="muted">5Y: ${{ "%.2f"|format(pm.y5_start_px or 0) }} → ${{ "%.2f"|format(pm.y5_end_px or 0) }}</div>
+        <div class="muted">12M: ${{ "%.2f"|format(pm.m12_start_px or 0) }} → ${{ "%.2f"|format(pm.m12_end_px or 0) }}</div>
+        <div class="muted">YTD: ${{ "%.2f"|format(pm.ytd_start_px or 0) }} → ${{ "%.2f"|format(pm.ytd_end_px or 0) }}</div>
+      </div>
+      {% endif %}
     </div>
   </section>
 
@@ -20,28 +51,19 @@
     "#companyCenterPane",
     "innerHTML",
     "companyOmniboxInput",
-    "Type a thought, or add a task... (e.g., 'Review $AAPL margins #task')",
+    "Type a thought, or add a task... (e.g., 'Review margins for this quarter')",
     {"ticker": detail.ticker, "show_ai": detail.show_ai or "0"}
   ) }}
-
-  {% if portfolio_context and portfolio_context.is_held %}
-  <section class="deal-card" style="border-left:4px solid #2563eb;">
-    <div class="todo-meta" style="font-size:12px;">Portfolio Context</div>
-    <div style="font-weight:800;color:#0f172a;">
-      Held: {{ "%.2f"|format(portfolio_context.shares or 0) }} shares · Avg cost ${{ "%.2f"|format(portfolio_context.avg_cost or 0) }} · Cost basis ${{ "%.2f"|format(portfolio_context.position_cost or 0) }}
-    </div>
-  </section>
-  {% endif %}
 
   <section class="deal-grid">
     <div class="brain-col">
       {% if detail.active_proposal %}
-      <article class="deal-card">
-        <h3 class="sec-head">Active Proposal</h3>
+      <article class="canvas-sec">
+        <h3 class="sec-head">Latest Fundamental Insight</h3>
         <div class="todo-meta" style="margin-bottom:8px;">
           {{ detail.active_proposal.status|upper }} • {{ detail.active_proposal.kind }} • Conf {{ "%.0f"|format((detail.active_proposal.confidence or 0) * 100) }}% • Priority {{ "%.1f"|format(detail.active_proposal.priority_score or 0) }}
         </div>
-        <div style="font-weight:800;color:#0f172a;margin-bottom:8px;">{{ detail.active_proposal.title or ("Proposal for " ~ detail.ticker) }}</div>
+        <div style="font-weight:800;color:#0f172a;margin-bottom:8px;">{{ detail.active_proposal.title or ("Insight for " ~ detail.ticker) }}</div>
         {% if detail.active_proposal.insights %}
           <div class="note-stream" style="margin-bottom:8px;">
             {% for i in detail.active_proposal.insights %}
@@ -55,7 +77,7 @@
         {% set rz = detail.active_proposal.reasoning or {} %}
         {% if rz.actionable_proposal %}
         <div class="note-item" style="margin-bottom:8px;background:#f8fafc;">
-          <div class="note-top"><span>Actionable Proposal</span></div>
+          <div class="note-top"><span>Key Takeaway</span></div>
           <div class="note-body">{{ rz.actionable_proposal }}</div>
         </div>
         {% endif %}
@@ -71,7 +93,7 @@
       </article>
       {% endif %}
 
-      <article class="deal-card">
+      <article class="canvas-sec">
         <h3 class="sec-head">Investment Thesis (Moat)</h3>
         <form method="post" action="/company_file/moat-save"
               hx-post="/company_file/moat-save" hx-target="#companyDetailRoot" hx-swap="outerHTML">
@@ -90,7 +112,7 @@
         </form>
       </article>
 
-      <article class="deal-card">
+      <article class="canvas-sec">
         <h3 class="sec-head">Conviction Box</h3>
         <div class="conv-grid">
           <div class="conv-box bull">
@@ -104,7 +126,7 @@
         </div>
       </article>
 
-      <article class="deal-card">
+      <article class="canvas-sec">
         <h3 class="sec-head">Valuation & Quality Engine</h3>
         <div class="val-grid">
           <label class="buy">
@@ -118,66 +140,347 @@
           <div id="gStatus" class="g-status neu" style="margin-top:6px;">Set a buy bound to evaluate zone.</div>
         </div>
 
-        <div class="q-grid">
-          <div class="q-box">
-            <div class="q-k">ROIC (%)</div>
-            <div class="q-v"><input id="qRoic" placeholder="e.g. 18.5"></div>
+      </article>
+
+      {% set ms = detail.mini_statements or {} %}
+      {% set ms_years = ms.years or [] %}
+      <article class="canvas-sec" id="miniStatementsBlock" data-has-years="{{ '1' if ms_years else '0' }}">
+        <h3 class="sec-head">Mini Statements (5Y)</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+          <div class="todo-meta">Revenue, gross profit, OCF, CapEx, FCF, cash, debt, equity {% if ms.asof %}• asof {{ ms.asof }}{% endif %}</div>
+          <form id="miniStatementsRefreshForm" method="post" action="/company_file/mini-statements-refresh"
+                hx-post="/company_file/mini-statements-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
+            <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+            <button type="submit" class="btn">Refresh Mini Statements</button>
+          </form>
+        </div>
+        {% if ms_years %}
+        {% set d = detail.financial_deltas or {} %}
+        {% if d.ok and d.metrics and d.metrics.revenue and d.metrics.revenue.delta %}
+        <div class="todo-meta" style="margin-bottom:8px;">
+          YoY ({{ d.metrics.revenue.prev_year }}→{{ d.metrics.revenue.cur_year }}):
+          Revenue {{ "%+.1f%%"|format(d.metrics.revenue.delta.pct or 0) if d.metrics.revenue.delta.pct is not none else "-" }},
+          FCF {{ "%+.1f%%"|format(d.metrics.free_cash_flow.delta.pct or 0) if d.metrics.free_cash_flow.delta.pct is not none else "-" }},
+          Debt {{ "%+.1f%%"|format(d.metrics.total_debt.delta.pct or 0) if d.metrics.total_debt.delta.pct is not none else "-" }}
+        </div>
+        {% endif %}
+        <div style="overflow:auto;">
+          <table class="mini-table" style="width:100%;font-size:12px;">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                {% for y in ms_years %}<th>{{ y }}</th>{% endfor %}
+                <th class="spark-col">Trend</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="mini-row" data-series="{% for sv in (ms.revenue or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>Revenue</td>
+                {% for v in (ms.revenue or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+              <tr class="mini-row" data-series="{% for sv in (ms.gross_profit or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>Gross Profit</td>
+                {% for v in (ms.gross_profit or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+              <tr class="mini-row" data-series="{% for sv in (ms.operating_cash_flow or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>Operating CF</td>
+                {% for v in (ms.operating_cash_flow or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+              <tr class="mini-row" data-series="{% for sv in (ms.capex or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>CapEx</td>
+                {% for v in (ms.capex or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+              <tr class="mini-row" data-series="{% for sv in (ms.free_cash_flow or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>Free Cash Flow</td>
+                {% for v in (ms.free_cash_flow or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+              <tr class="mini-row" data-series="{% for sv in (ms.total_cash or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>Total Cash</td>
+                {% for v in (ms.total_cash or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+              <tr class="mini-row" data-series="{% for sv in (ms.total_debt or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>Total Debt</td>
+                {% for v in (ms.total_debt or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+              <tr class="mini-row" data-series="{% for sv in (ms.total_equity or []) %}{{ '' if loop.first else ',' }}{{ sv if sv is not none else '' }}{% endfor %}">
+                <td>Total Equity</td>
+                {% for v in (ms.total_equity or []) %}<td>{{ v|abbr_money if v is not none else "-" }}</td>{% endfor %}
+                <td class="spark-col"><svg class="sparkline" viewBox="0 0 82 20" preserveAspectRatio="none"><path d=""></path></svg></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="muted">No statement snapshot yet. Click refresh.</div>
+        {% endif %}
+        {% if ms.source or ms.asof %}
+        <div class="muted" style="margin-top:8px;">Provenance: {{ ms.source or "-" }} • asof {{ ms.asof or "-" }}</div>
+        {% endif %}
+      </article>
+
+      {% set seg = detail.revenue_segments or {} %}
+      {% set seg_product = seg.product or [] %}
+      {% set seg_geo = seg.geography or [] %}
+      {% set intel_status = detail.intel_status or {} %}
+      <article class="canvas-sec">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+          <h3 class="sec-head" style="margin:0;">Revenue Segmentation</h3>
+          <form method="post" action="/company_file/intel-refresh"
+                hx-post="/company_file/intel-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
+            <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+            <button type="submit" class="btn">Refresh Company Intel</button>
+          </form>
+        </div>
+        <div class="todo-meta" style="margin-bottom:8px;">
+          Product and geography mix from latest 10-K XBRL{% if detail.intel_asof %} • asof {{ detail.intel_asof }}{% endif %}
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;">
+          <div>
+            <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">Product Mix</div>
+            <div class="seg-donut" data-series='{{ seg_product|tojson }}'></div>
+            <div style="display:grid;gap:4px;">
+              {% for row in seg_product[:6] %}
+              <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;">
+                <span style="color:#334155;max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ row.label or "-" }}</span>
+                <span style="font-weight:700;color:#0f172a;">{{ "%.1f%%"|format(row.pct or 0) }}</span>
+              </div>
+              {% else %}
+              <div class="muted">No product segmentation available.</div>
+              {% endfor %}
+            </div>
           </div>
-          <div class="q-box">
-            <div class="q-k">Gross Margin (%)</div>
-            <div class="q-v"><input id="qGross" placeholder="e.g. 72.1"></div>
+          <div>
+            <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">Geographic Mix</div>
+            <div class="seg-donut" data-series='{{ seg_geo|tojson }}'></div>
+            <div style="display:grid;gap:4px;">
+              {% for row in seg_geo[:6] %}
+              <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;">
+                <span style="color:#334155;max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ row.label or "-" }}</span>
+                <span style="font-weight:700;color:#0f172a;">{{ "%.1f%%"|format(row.pct or 0) }}</span>
+              </div>
+              {% else %}
+              <div class="muted">No geographic segmentation available.</div>
+              {% endfor %}
+            </div>
           </div>
-          <div class="q-box">
-            <div class="q-k">Rev Growth 3Y CAGR (%)</div>
-            <div class="q-v"><input id="qGrowth" placeholder="e.g. 14.2"></div>
+        </div>
+        {% if intel_status.error %}
+        <div class="muted" style="margin-top:8px;">{{ intel_status.error }}</div>
+        {% endif %}
+      </article>
+
+      {% set bb = detail.buyback or {} %}
+      {% set bb_q = bb.quarters or [] %}
+      <article class="canvas-sec">
+        <h3 class="sec-head">Share Buybacks (TTM)</h3>
+        <div style="display:grid;grid-template-columns:1fr 180px;gap:12px;align-items:end;">
+          <div>
+            <div style="font-size:24px;font-weight:800;color:#0f172a;">{{ bb.ttm_value|abbr_money if bb.ttm_value is not none else "-" }}</div>
+            <div class="todo-meta">Treasury stock acquired / repurchase concepts.</div>
           </div>
-          <div class="q-box">
-            <div class="q-k">Insider Ownership (%)</div>
-            <div class="q-v"><input id="qInsider" placeholder="e.g. 1.3"></div>
-          </div>
+          <div class="buyback-bars" data-series="{% for q in bb_q %}{{ '' if loop.first else ',' }}{{ q.value if q.value is not none else 0 }}{% endfor %}"></div>
         </div>
       </article>
 
-      <article class="deal-card">
+      {% set insiders = detail.insider_trades or [] %}
+      <article class="canvas-sec">
+        <h3 class="sec-head">Insider Trades (Form 4)</h3>
+        <div class="todo-meta" style="margin-bottom:8px;">Recent reported insider transactions.</div>
+        <div style="display:grid;gap:6px;">
+          {% for it in insiders[:8] %}
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+            <div style="min-width:0;">
+              <div style="font-size:12px;font-weight:700;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                {{ it.owner or "-" }}{% if it.title %} • {{ it.title }}{% endif %}
+              </div>
+              <div class="muted" style="font-size:11px;">{{ it.date or "-" }}</div>
+            </div>
+            <div style="font-size:12px;font-weight:700;{% if (it.tx_type or '') == 'BUY' %}color:#15803d;{% elif (it.tx_type or '') == 'SELL' %}color:#b91c1c;{% else %}color:#334155;{% endif %}">
+              {% if (it.tx_type or '') == 'BUY' %}+{% elif (it.tx_type or '') == 'SELL' %}-{% endif %}
+              {{ "{:,.0f}".format((it.net_shares or 0)|float|abs) }} {{ it.tx_type or "" }}
+            </div>
+          </div>
+          {% else %}
+          <div class="muted">No recent Form 4 insider trades found.</div>
+          {% endfor %}
+        </div>
+      </article>
+      <script>
+        (function(){
+          var block = document.getElementById('miniStatementsBlock');
+          var form = document.getElementById('miniStatementsRefreshForm');
+          if(!block || !form){ return; }
+          var hasYears = String(block.getAttribute('data-has-years') || '0') === '1';
+          if(hasYears){ return; }
+          var tk = "{{ detail.ticker }}";
+          var key = "mini_statements_autorefresh_once:" + tk;
+          try{
+            if(sessionStorage.getItem(key) === "1"){ return; }
+            sessionStorage.setItem(key, "1");
+          }catch(_e){}
+          setTimeout(function(){ try { form.requestSubmit(); } catch(_e) { try { form.submit(); } catch(_e2){} } }, 120);
+        })();
+      </script>
+
+      <article class="canvas-sec">
         <h3 class="sec-head">Quick Actions</h3>
         <button type="button" class="big-btn primary" id="openIrEmail">✉️ Email Investor Relations</button>
         <a class="big-btn secondary" href="/company_file/sec?t={{ detail.ticker|urlencode }}">📂 View {{ detail.filings|length }} SEC Filings</a>
+        <form method="post" action="/company_file/price-metrics-refresh"
+              hx-post="/company_file/price-metrics-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
+          <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+          <button type="submit" class="big-btn secondary">Refresh Price Metrics</button>
+        </form>
       </article>
 
-      <article class="deal-card">
-        <h3 class="sec-head">Competitors</h3>
-        <div>
-          {% for c in detail.competitors %}
-          <a class="ticker-chip" href="/company_file?t={{ (c.ticker or '')|urlencode }}">{{ c.ticker or c.name or "-" }}</a>
+      <article class="canvas-sec">
+        <h3 class="sec-head">Similar Companies</h3>
+        <div class="todo-meta" style="margin-bottom:8px;">Same industry with closest market cap.</div>
+        <div style="display:grid;gap:8px;">
+          {% for c in detail.similar_companies or [] %}
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+            <div>
+              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+                <a href="/company_file?t={{ (c.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ c.ticker or "-" }}</a>
+                <span class="muted">· {{ c.name or "-" }}</span>
+              </div>
+              <div class="todo-meta">{{ c.industry or "-" }} • {{ c.market_cap or "-" }}</div>
+            </div>
+            <form method="post" action="/my_universe/watchlist/add"
+                  hx-post="/my_universe/watchlist/add" hx-target="#companyCenterPane" hx-swap="innerHTML">
+              <input type="hidden" name="ticker" value="{{ c.ticker or '' }}">
+              <input type="hidden" name="reason" value="Added from Similar Companies">
+              <button type="submit" class="btn">Add to Watchlist</button>
+            </form>
+          </div>
           {% else %}
-          <span class="muted">No competitors yet.</span>
+          <div class="muted">No similar companies found.</div>
           {% endfor %}
         </div>
-        <form method="post" action="/company_file/competitor-add"
-              hx-post="/company_file/competitor-add" hx-target="#companyDetailRoot" hx-swap="outerHTML"
-              style="display:grid;grid-template-columns:92px 1fr;gap:6px;margin-top:8px;">
-          <input type="hidden" name="ticker" value="{{ detail.ticker }}">
-          <input name="competitor_ticker" placeholder="Ticker">
-          <input name="competitor_name" placeholder="Company name">
-          <input name="evidence" placeholder="Evidence note" style="grid-column:1 / -1;">
-          <button type="submit" style="grid-column:1 / -1;">Add Competitor</button>
-        </form>
       </article>
     </div>
 
     <aside class="timeline-col">
-      <article class="deal-card">
+      <article class="timeline-surface">
         <div class="timeline-wrap" id="companyTimelineWrap">
           <div class="timeline-head">
-            <div style="font-size:13px;font-weight:800;color:#1f2f46;">Unified Activity Timeline</div>
+            <div style="font-size:13px;font-weight:800;color:#1f2f46;">Activity</div>
             <div style="display:flex;align-items:center;gap:8px;">
               {% if detail.show_ai == "1" %}
-              <a class="btn" href="/company_file?t={{ detail.ticker|urlencode }}&show_ai=0">Hide AI System Activity</a>
+              <a class="btn" href="/company_file?t={{ detail.ticker|urlencode }}&show_ai=0">Hide AI notes</a>
               {% else %}
-              <a class="btn" href="/company_file?t={{ detail.ticker|urlencode }}&show_ai=1">Show AI System Activity</a>
+              <a class="btn" href="/company_file?t={{ detail.ticker|urlencode }}&show_ai=1">Show AI notes</a>
               {% endif %}
             </div>
           </div>
+          {% set calls = detail.earnings_calls or [] %}
+          {% set call_src = detail.earnings_call_source_counts or {} %}
+          <div style="margin:10px 0;padding:10px;border-radius:10px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+              <div style="font-size:12px;font-weight:800;color:#334155;">Earnings Calls (SEC)</div>
+              <form method="post" action="/company_file/transcripts-refresh"
+                    hx-post="/company_file/transcripts-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
+                <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+                <button type="submit" class="btn">Refresh</button>
+              </form>
+            </div>
+            {% if call_src %}
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+              {% for src, cnt in call_src.items() %}
+              <span class="ticker-chip">{{ src|upper }} {{ cnt }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
+            <div style="display:grid;gap:8px;">
+              {% for tr in calls[:12] %}
+              <article class="timeline-item" style="background:#fff;">
+                <div class="timeline-icon">🎧</div>
+                <div>
+                  <div class="timeline-title">{{ tr.title or "Earnings Call" }}</div>
+                  <div class="timeline-meta">
+                    {{ tr.call_date or "-" }}
+                    {% if tr.fiscal_year and tr.fiscal_quarter %} • {{ tr.fiscal_year }} {{ tr.fiscal_quarter }}{% endif %}
+                    {% if tr.char_count %} • {{ tr.char_count }} chars{% endif %}
+                  </div>
+                  {% if tr.excerpt %}
+                  <details class="timeline-text">
+                    <summary class="timeline-summary">{{ tr.excerpt|truncate(150, True, "...") }} <span style="font-size:11px;font-weight:700;">Read More</span></summary>
+                    <div style="margin-top:6px;white-space:pre-wrap;">{{ tr.excerpt }}</div>
+                  </details>
+                  {% endif %}
+                  {% if tr.source_url %}
+                  <a class="ticker-chip" href="{{ tr.source_url }}" target="_blank" rel="noopener noreferrer">Source</a>
+                  {% endif %}
+                </div>
+              </article>
+              {% else %}
+              <div class="muted">No earnings call transcripts indexed yet.</div>
+              {% endfor %}
+            </div>
+          </div>
+
+          {% set rels = detail.earnings_releases or [] %}
+          <div style="margin:10px 0;padding:10px;border-radius:10px;background:#f8fafc;">
+            <div style="font-size:12px;font-weight:800;color:#334155;margin-bottom:8px;">Earnings Releases (SEC)</div>
+            <div style="display:grid;gap:8px;">
+              {% for tr in rels[:12] %}
+              <article class="timeline-item" style="background:#fff;">
+                <div class="timeline-icon">🧾</div>
+                <div>
+                  <div class="timeline-title">{{ tr.title or "Earnings Release" }}</div>
+                  <div class="timeline-meta">
+                    {{ tr.call_date or "-" }}{% if tr.form %} • {{ tr.form }}{% endif %}
+                    {% if tr.char_count %} • {{ tr.char_count }} chars{% endif %}
+                  </div>
+                  {% if tr.excerpt %}
+                  <details class="timeline-text">
+                    <summary class="timeline-summary">{{ tr.excerpt|truncate(150, True, "...") }} <span style="font-size:11px;font-weight:700;">Read More</span></summary>
+                    <div style="margin-top:6px;white-space:pre-wrap;">{{ tr.excerpt }}</div>
+                  </details>
+                  {% endif %}
+                  {% if tr.source_url %}
+                  <a class="ticker-chip" href="{{ tr.source_url }}" target="_blank" rel="noopener noreferrer">Source</a>
+                  {% endif %}
+                </div>
+              </article>
+              {% else %}
+              <div class="muted">No SEC earnings releases extracted yet.</div>
+              {% endfor %}
+            </div>
+          </div>
+
+          {% set qsig = detail.quarterly_signals or [] %}
+          <div style="margin:10px 0;padding:10px;border-radius:10px;background:#f8fafc;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+              <div style="font-size:12px;font-weight:800;color:#334155;">Quarterly Results Signals (10-Q / 8-K / 10-K)</div>
+              <form method="post" action="/company_file/sec-facts-refresh"
+                    hx-post="/company_file/sec-facts-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
+                <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+                <button type="submit" class="btn">Refresh SEC Facts</button>
+              </form>
+            </div>
+            <div style="display:grid;gap:6px;">
+              {% for s in qsig[:8] %}
+              <article class="timeline-item" style="background:#fff;">
+                <div class="timeline-icon">📌</div>
+                <div>
+                  <div class="timeline-title">{{ s.text|truncate(150, True, "...") }}</div>
+                  <div class="timeline-meta">{{ s.date or "-" }}{% if s.source %} • {{ s.source|truncate(80, True, "...") }}{% endif %}</div>
+                </div>
+              </article>
+              {% else %}
+              <div class="muted">No quarterly result signals yet.</div>
+              {% endfor %}
+            </div>
+          </div>
+
           <div class="timeline-list">
             {% for e in (detail.timeline_events_visible or detail.timeline_events or [])[:150] %}
             <article class="timeline-item {% if e.is_ai %}ai{% endif %}">
@@ -296,11 +599,7 @@
       var data = {
         bull: (document.getElementById("bullCase").value || ""),
         bear: (document.getElementById("bearCase").value || ""),
-        buy: (document.getElementById("buyBelow").value || ""),
-        roic: (document.getElementById("qRoic").value || ""),
-        gross: (document.getElementById("qGross").value || ""),
-        growth: (document.getElementById("qGrowth").value || ""),
-        insider: (document.getElementById("qInsider").value || "")
+        buy: (document.getElementById("buyBelow").value || "")
       };
       try { localStorage.setItem(storageKey, JSON.stringify(data)); } catch(_e){}
       refreshGauge();
@@ -314,18 +613,103 @@
         if (d.bull != null) document.getElementById("bullCase").value = d.bull;
         if (d.bear != null) document.getElementById("bearCase").value = d.bear;
         if (d.buy != null) document.getElementById("buyBelow").value = d.buy;
-        if (d.roic != null) document.getElementById("qRoic").value = d.roic;
-        if (d.gross != null) document.getElementById("qGross").value = d.gross;
-        if (d.growth != null) document.getElementById("qGrowth").value = d.growth;
-        if (d.insider != null) document.getElementById("qInsider").value = d.insider;
       } catch(_e){}
     }
-    ["bullCase","bearCase","buyBelow","qRoic","qGross","qGrowth","qInsider"].forEach(function(id){
+    function renderMiniSparks(){
+      var rows = document.querySelectorAll('#miniStatementsBlock .mini-row');
+      rows.forEach(function(row){
+        var raw = String(row.getAttribute('data-series') || '').trim();
+        var vals = raw.split(',').map(function(x){
+          var n = parseFloat(String(x || '').trim());
+          return isNaN(n) ? null : n;
+        }).filter(function(v){ return v !== null; });
+        var spark = row.querySelector('svg.sparkline');
+        if(!spark){ return; }
+        var path = spark.querySelector('path');
+        if(!path){ return; }
+        if(vals.length < 2){
+          path.setAttribute('d', '');
+          spark.classList.add('neutral');
+          return;
+        }
+        var min = Math.min.apply(null, vals);
+        var max = Math.max.apply(null, vals);
+        var span = Math.max(1e-9, max - min);
+        var w = 82, h = 20;
+        var pts = vals.map(function(v, i){
+          var x = (i * (w - 2)) / Math.max(1, vals.length - 1) + 1;
+          var y = (h - 2) - ((v - min) / span) * (h - 4) + 1;
+          return [x, y];
+        });
+        var d = 'M ' + pts.map(function(p){ return p[0].toFixed(2) + ' ' + p[1].toFixed(2); }).join(' L ');
+        path.setAttribute('d', d);
+        var first = vals[0], last = vals[vals.length - 1];
+        spark.classList.remove('neutral', 'negative');
+        if(last < first){ spark.classList.add('negative'); }
+      });
+    }
+    function renderDonuts(){
+      var palette = ['#1e3a8a','#334155','#6366f1','#0f766e','#475569','#4338ca'];
+      document.querySelectorAll('.seg-donut').forEach(function(el){
+        var rows = [];
+        try { rows = JSON.parse(el.getAttribute('data-series') || '[]'); } catch(_e) { rows = []; }
+        var pcts = rows.map(function(r){ var v = parseFloat(String((r && r.pct) || 0)); return isNaN(v) ? 0 : Math.max(0, v); });
+        var total = pcts.reduce(function(a,b){ return a+b; }, 0);
+        if(total <= 0){
+          el.style.background = '#e2e8f0';
+          return;
+        }
+        var cum = 0;
+        var parts = [];
+        pcts.slice(0,6).forEach(function(v, i){
+          var start = cum;
+          cum += v;
+          parts.push(palette[i % palette.length] + ' ' + start + '% ' + cum + '%');
+        });
+        if(cum < 100){ parts.push('#cbd5e1 ' + cum + '% 100%'); }
+        el.style.background = 'conic-gradient(' + parts.join(',') + ')';
+      });
+    }
+    function renderBuybackBars(){
+      document.querySelectorAll('.buyback-bars').forEach(function(el){
+        var vals = String(el.getAttribute('data-series') || '').split(',').map(function(x){
+          var n = parseFloat(String(x || '').trim());
+          return isNaN(n) ? 0 : Math.abs(n);
+        });
+        var max = vals.reduce(function(a,b){ return b > a ? b : a; }, 0);
+        if(max <= 0){
+          el.innerHTML = '<div class="muted">No buyback series yet.</div>';
+          return;
+        }
+        var html = '<div style="display:flex;align-items:flex-end;gap:6px;height:44px;">';
+        vals.forEach(function(v){
+          var h = Math.max(6, Math.round((v / max) * 44));
+          html += '<div style="width:18px;height:' + h + 'px;background:#22c55e33;border:1px solid #22c55e66;border-radius:4px 4px 0 0;"></div>';
+        });
+        html += '</div>';
+        el.innerHTML = html;
+      });
+    }
+    ["bullCase","bearCase","buyBelow"].forEach(function(id){
       var el = document.getElementById(id);
       if (!el) return;
       el.addEventListener("input", saveDeal);
     });
     loadDeal();
     refreshGauge();
+    renderMiniSparks();
+    renderDonuts();
+    renderBuybackBars();
   })();
 </script>
+
+<style>
+  .seg-donut{
+    width:132px;
+    height:132px;
+    border-radius:999px;
+    margin:2px auto 8px auto;
+    border:1px solid #e2e8f0;
+    box-shadow: inset 0 0 0 16px #fff;
+  }
+</style>

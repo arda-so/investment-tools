@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+cd /Users/solmaz/Investment_Tools
+./automations/macro_watchdog.sh
+

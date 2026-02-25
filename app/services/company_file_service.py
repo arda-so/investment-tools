@@ -4,11 +4,17 @@ import datetime as dt
 import json
 import re
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.config import CORE_DB_PATH, DATA_DIR, ROOT
-from app.core.sqlite_hardening import connect_sqlite
+from app.core.config import DATA_DIR, ROOT
+from app.core.db import core_conn as _conn_core
+from app.core.date import parse_datetime_flexible
+from app.core.filing_text import resolve_filing_path
+from app.core.proposal_text import clean_task_text, is_ai_task_text
+from app.core.ticker import normalize_ticker as _normalize_ticker
 from app.services.postgres_core_service import (
     add_company_reminder_pg,
     add_todo_pg,
@@ -27,6 +33,15 @@ from app.services.postgres_core_service import (
     update_todo_pg,
     update_workspace_journal_note_pg,
 )
+from app.services.price_metrics_service import get_price_metrics
+from app.services.mini_statements_service import get_mini_statements, compute_financial_deltas
+from app.services.company_intel_service import get_company_intel
+from app.services.earnings_transcript_service import (
+    list_earnings_transcripts,
+    list_quarterly_result_signals,
+    list_sec_earnings_releases,
+)
+from app.services.company_lookup_service import market_cap_map, prefetch_market_cap_async
 
 
 INDEX_FILES: list[tuple[str, str, str]] = [
@@ -63,6 +78,51 @@ FILING_CATEGORY_ORDER: list[tuple[str, str]] = [
     ("other", "Other Filings"),
 ]
 
+_LOOKUP_CACHE_LOCK = threading.Lock()
+_LOOKUP_CACHE_TTL_SEC = 45.0
+_PROFILES_CACHE: tuple[float, dict[str, dict[str, str]]] = (0.0, {})
+_NAMES_CACHE: tuple[float, dict[str, str]] = (0.0, {})
+_UNIVERSE_CACHE_TTL_SEC = 45.0
+_UNIVERSE_ALL_CACHE: tuple[float, list[str]] = (0.0, [])
+_UNIVERSE_REG_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+
+def _clean_seg_label(label: str) -> str:
+    s = str(label or "").strip()
+    if not s:
+        return "Other"
+    if ":" in s:
+        s = s.split(":", 1)[1]
+    s = re.sub(r"(Member|Axis)$", "", s, flags=re.I)
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    s = s.replace("_", " ").replace("-", " ")
+    s = re.sub(r"\bi Phone\b", "iPhone", s, flags=re.I)
+    s = re.sub(r"\bi Pad\b", "iPad", s, flags=re.I)
+    s = re.sub(r"\bU S\b", "U.S.", s, flags=re.I)
+    s = re.sub(r"\bUsa\b", "U.S.", s, flags=re.I)
+    s = re.sub(r"\bUs And Canada\b", "U.S. and Canada", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:60] if s else "Other"
+
+
+def _normalize_segments_for_view(seg: dict[str, object]) -> dict[str, object]:
+    out_product: list[dict[str, object]] = []
+    out_geo: list[dict[str, object]] = []
+    for row in list((seg or {}).get("product") or []):
+        if not isinstance(row, dict):
+            continue
+        lbl = _clean_seg_label(str(row.get("label") or ""))
+        out_product.append({"label": lbl, "value": row.get("value"), "pct": row.get("pct")})
+    for row in list((seg or {}).get("geography") or []):
+        if not isinstance(row, dict):
+            continue
+        lbl = _clean_seg_label(str(row.get("label") or ""))
+        pct = float(row.get("pct") or 0.0)
+        if pct <= 0:
+            continue
+        out_geo.append({"label": lbl, "value": row.get("value"), "pct": pct})
+    return {"product": out_product[:8], "geography": out_geo[:8]}
+
 
 @dataclass
 class CompanyRow:
@@ -73,34 +133,8 @@ class CompanyRow:
     market_cap: str
 
 
-def _conn_core() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
-def _conn_cache() -> sqlite3.Connection:
-    return connect_sqlite(str(DATA_DIR / "cache.db"), row_factory=True)
-
-
 def safe_resolve_filing_path(path_s: str) -> Path | None:
-    raw = str(path_s or "").strip()
-    if not raw:
-        return None
-    p = Path(raw).expanduser()
-    if not p.is_absolute():
-        p = (ROOT / p).resolve()
-    else:
-        p = p.resolve()
-    allowed = [ROOT / "filings", ROOT / "filing_docs", ROOT / "reports"]
-    if not any(str(p).startswith(str(a.resolve())) for a in allowed):
-        return None
-    if not p.exists() or not p.is_file():
-        return None
-    return p
-
-
-def _normalize_ticker(raw: str) -> str:
-    s = str(raw or "").strip().upper()
-    return re.sub(r"[^A-Z0-9.\-]", "", s)[:12]
+    return resolve_filing_path(path_s)
 
 
 def _filing_category(form: str) -> str:
@@ -141,33 +175,6 @@ def _parse_mcap_num(text: str) -> float:
         return -1.0
 
 
-def _mcap_map(tickers: list[str]) -> dict[str, str]:
-    if not tickers:
-        return {}
-    keys = [f"mcap:t:{t}" for t in tickers]
-    out = {t: "-" for t in tickers}
-    con = _conn_cache()
-    try:
-        marks = ",".join("?" for _ in keys)
-        sql = f"SELECT key, payload FROM cache_entries WHERE key IN ({marks})"
-        for r in con.execute(sql, tuple(keys)).fetchall():
-            key = str(r["key"] or "")
-            payload = str(r["payload"] or "").strip()
-            t = key.split("mcap:t:", 1)[-1].strip().upper()
-            if not t:
-                continue
-            try:
-                # Some rows may be json encoded strings.
-                val = json.loads(payload)
-                payload_txt = str(val or "").strip()
-            except Exception:
-                payload_txt = payload
-            out[t] = payload_txt or "-"
-    finally:
-        con.close()
-    return out
-
-
 def _load_index_tickers(index_key: str) -> list[str]:
     k = str(index_key or "").strip().lower()
     file_name = ""
@@ -192,6 +199,12 @@ def _load_index_tickers(index_key: str) -> list[str]:
 
 
 def _company_profiles() -> dict[str, dict[str, str]]:
+    global _PROFILES_CACHE
+    now = time.time()
+    with _LOOKUP_CACHE_LOCK:
+        ts, cached = _PROFILES_CACHE
+        if cached and (now - float(ts)) <= _LOOKUP_CACHE_TTL_SEC:
+            return dict(cached)
     con = _conn_core()
     out: dict[str, dict[str, str]] = {}
     try:
@@ -209,10 +222,77 @@ def _company_profiles() -> dict[str, dict[str, str]]:
             }
     finally:
         con.close()
+    with _LOOKUP_CACHE_LOCK:
+        _PROFILES_CACHE = (now, dict(out))
+    return out
+
+
+def _similar_companies_for(
+    ticker: str,
+    *,
+    industry: str,
+    market_cap: str,
+    profiles: dict[str, dict[str, str]],
+    names: dict[str, str],
+    existing_competitors: list[dict[str, str | int]],
+    limit: int = 8,
+) -> list[dict[str, str]]:
+    tk = _normalize_ticker(ticker)
+    if not tk:
+        return []
+    ind = str(industry or "").strip()
+    base_mcap = _parse_mcap_num(market_cap)
+    existing = {
+        _normalize_ticker(str(x.get("ticker") or ""))
+        for x in list(existing_competitors or [])
+        if _normalize_ticker(str(x.get("ticker") or ""))
+    }
+
+    candidates: list[str] = []
+    for t, p in profiles.items():
+        ct = _normalize_ticker(t)
+        if not ct or ct == tk or ct in existing:
+            continue
+        if ind and str(p.get("industry") or "").strip() != ind:
+            continue
+        candidates.append(ct)
+    if not candidates:
+        return []
+
+    mcap_map = market_cap_map(candidates)
+    scored: list[tuple[float, str]] = []
+    for ct in candidates:
+        cmp_mcap = _parse_mcap_num(str(mcap_map.get(ct) or "-"))
+        if base_mcap > 0 and cmp_mcap > 0:
+            score = abs((cmp_mcap - base_mcap) / base_mcap)
+        elif cmp_mcap > 0:
+            score = 10.0
+        else:
+            score = 99.0
+        scored.append((score, ct))
+    scored.sort(key=lambda x: (x[0], x[1]))
+
+    out: list[dict[str, str]] = []
+    for _score, ct in scored[: max(1, min(20, int(limit or 8)))]:
+        p = profiles.get(ct, {})
+        out.append(
+            {
+                "ticker": ct,
+                "name": str(p.get("name") or names.get(ct) or ct).strip(),
+                "industry": str(p.get("industry") or "").strip(),
+                "market_cap": str(mcap_map.get(ct) or "-").strip() or "-",
+            }
+        )
     return out
 
 
 def _companies_name_map() -> dict[str, str]:
+    global _NAMES_CACHE
+    now = time.time()
+    with _LOOKUP_CACHE_LOCK:
+        ts, cached = _NAMES_CACHE
+        if cached and (now - float(ts)) <= _LOOKUP_CACHE_TTL_SEC:
+            return dict(cached)
     con = _conn_core()
     out: dict[str, str] = {}
     try:
@@ -223,6 +303,8 @@ def _companies_name_map() -> dict[str, str]:
             out[t] = str(r["name"] or "").strip()
     finally:
         con.close()
+    with _LOOKUP_CACHE_LOCK:
+        _NAMES_CACHE = (now, dict(out))
     return out
 
 
@@ -321,6 +403,12 @@ def _moat_tickers(moat_key: str) -> list[str]:
 
 
 def _all_universe() -> list[str]:
+    global _UNIVERSE_ALL_CACHE
+    now = time.time()
+    with _LOOKUP_CACHE_LOCK:
+        ts, cached = _UNIVERSE_ALL_CACHE
+        if cached and (now - float(ts)) <= _UNIVERSE_CACHE_TTL_SEC:
+            return list(cached)
     con = _conn_core()
     seen: set[str] = set()
     out: list[str] = []
@@ -329,8 +417,13 @@ def _all_universe() -> list[str]:
             "SELECT ticker FROM company_profile_cache",
             "SELECT ticker FROM companies",
             "SELECT ticker FROM company_list_items",
+            "SELECT ticker FROM universe_registry WHERE is_us_listed = 1",
         ):
-            for r in con.execute(sql).fetchall():
+            try:
+                rows = con.execute(sql).fetchall()
+            except Exception:
+                continue
+            for r in rows:
                 t = _normalize_ticker(str(r["ticker"] or ""))
                 if not t or t in seen:
                     continue
@@ -338,6 +431,46 @@ def _all_universe() -> list[str]:
                 out.append(t)
     finally:
         con.close()
+    with _LOOKUP_CACHE_LOCK:
+        _UNIVERSE_ALL_CACHE = (now, list(out))
+    return out
+
+
+def _registry_universe(mode: str) -> list[str]:
+    global _UNIVERSE_REG_CACHE
+    m = str(mode or "").strip().lower()
+    if m not in {"us_listed", "us_otc", "otc_only"}:
+        return []
+    now = time.time()
+    with _LOOKUP_CACHE_LOCK:
+        row = _UNIVERSE_REG_CACHE.get(m)
+        if row:
+            ts, cached = row
+            if cached and (now - float(ts)) <= _UNIVERSE_CACHE_TTL_SEC:
+                return list(cached)
+    con = _conn_core()
+    seen: set[str] = set()
+    out: list[str] = []
+    try:
+        if m == "us_listed":
+            sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1"
+        elif m == "otc_only":
+            sql = "SELECT ticker FROM universe_registry WHERE is_otc = 1"
+        else:
+            sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1 OR is_otc = 1"
+        rows = con.execute(sql).fetchall()
+        for r in rows:
+            t = _normalize_ticker(str(r["ticker"] or ""))
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+    except Exception:
+        return []
+    finally:
+        con.close()
+    with _LOOKUP_CACHE_LOCK:
+        _UNIVERSE_REG_CACHE[m] = (now, list(out))
     return out
 
 
@@ -398,23 +531,36 @@ def list_companies(
     index_key: str = "",
     list_name: str = "",
     moat_key: str = "",
+    market: str = "",
+    size: str = "",
     scope: str = "all",
     sort: str = "mcap_desc",
     page: int = 1,
     page_size: int = 80,
 ) -> dict[str, object]:
     q = str(query or "").strip().lower()
-    ind = str(industry or "").strip()
+    ind_raw = str(industry or "").strip()
+    ind_set = {x.strip() for x in ind_raw.split(",") if x.strip()}
     idx = str(index_key or "").strip().lower()
     lst = str(list_name or "").strip()
     moat = str(moat_key or "").strip().lower()
+    market_key = str(market or "").strip().lower()
+    size_key = str(size or "").strip().lower()
     if sort not in {"mcap_desc", "mcap_asc", "name_asc", "ticker_asc"}:
         sort = "mcap_desc"
     ps = max(20, min(200, int(page_size or 80)))
     pg = max(1, int(page or 1))
 
     sc = str(scope or "all").strip().lower()
-    base = _read_my_companies() if sc == "my" else _all_universe()
+    if sc not in {"all", "my", "us_listed", "us_otc"}:
+        sc = "all"
+    if sc == "my":
+        base = _read_my_companies()
+    elif sc in {"us_listed", "us_otc"}:
+        reg = _registry_universe(sc)
+        base = reg if reg else _all_universe()
+    else:
+        base = _all_universe()
     if idx:
         idx_set = set(_load_index_tickers(idx))
         base = [t for t in base if t in idx_set]
@@ -424,24 +570,55 @@ def list_companies(
     if moat:
         moat_set = set(_moat_tickers(moat))
         base = [t for t in base if t in moat_set]
+    if market_key in {"us_listed", "us_otc", "otc_only"}:
+        market_set = set(_registry_universe(market_key))
+        if market_set:
+            base = [t for t in base if t in market_set]
 
     profiles = _company_profiles()
     names = _companies_name_map()
-    mcap_map = _mcap_map(base)
 
-    rows: list[CompanyRow] = []
+    # First pass: cheap text filters before market-cap lookup.
+    pre_rows: list[tuple[str, str, str, str]] = []
     for t in base:
         p = profiles.get(t, {})
         nm = str(p.get("name") or names.get(t) or t).strip()
         ctry = str(p.get("country") or "-").strip() or "-"
         ind_txt = str(p.get("industry") or "Unknown").strip() or "Unknown"
-        mcap = str(mcap_map.get(t) or "-").strip() or "-"
-        row = CompanyRow(ticker=t, name=nm, country=ctry, industry=ind_txt, market_cap=mcap)
-        if ind and row.industry != ind:
+        if ind_set and ind_txt not in ind_set:
             continue
         if q:
-            hay = f"{row.ticker} {row.name} {row.industry}".lower()
+            hay = f"{t} {nm} {ind_txt}".lower()
             if q not in hay:
+                continue
+        pre_rows.append((t, nm, ctry, ind_txt))
+
+    # Fetch market caps only for prefiltered candidates (large speedup on search).
+    pre_tickers = [r[0] for r in pre_rows]
+    mcap_map = market_cap_map(pre_tickers, live_fetch=False)
+
+    rows: list[CompanyRow] = []
+    for t, nm, ctry, ind_txt in pre_rows:
+        mcap = str(mcap_map.get(t) or "-").strip() or "-"
+        row = CompanyRow(ticker=t, name=nm, country=ctry, industry=ind_txt, market_cap=mcap)
+        mcap_num = _parse_mcap_num(mcap)
+        if size_key == "xlarge":
+            if mcap_num <= 200_000_000_000:
+                continue
+        elif size_key == "large":
+            if not (10_000_000_000 < mcap_num <= 200_000_000_000):
+                continue
+        elif size_key == "medium":
+            if not (2_000_000_000 < mcap_num <= 10_000_000_000):
+                continue
+        elif size_key == "small":
+            if not (300_000_000 < mcap_num <= 2_000_000_000):
+                continue
+        elif size_key == "micro":
+            if not (50_000_000 < mcap_num <= 300_000_000):
+                continue
+        elif size_key == "nano":
+            if not (0 <= mcap_num <= 50_000_000):
                 continue
         rows.append(row)
 
@@ -463,6 +640,22 @@ def list_companies(
     start = (pg - 1) * ps
     end = start + ps
     page_rows = rows[start:end]
+    # Ensure visible rows have market cap populated even when global fallback
+    # budget is exhausted for very large universes.
+    visible_tickers = [r.ticker for r in page_rows if r.ticker and (not str(r.market_cap or "").strip() or str(r.market_cap).strip() == "-")]
+    if visible_tickers:
+        # Read cache only for visible rows, then fetch missing caps in background.
+        page_mcap = market_cap_map(visible_tickers, live_fetch=False)
+        if page_mcap:
+            refreshed: list[CompanyRow] = []
+            for r in page_rows:
+                m = str(page_mcap.get(r.ticker) or "").strip()
+                if m and m != "-":
+                    refreshed.append(CompanyRow(ticker=r.ticker, name=r.name, country=r.country, industry=r.industry, market_cap=m))
+                else:
+                    refreshed.append(r)
+            page_rows = refreshed
+        prefetch_market_cap_async(visible_tickers, limit=80)
     return {
         "rows": page_rows,
         "total": total,
@@ -482,14 +675,16 @@ def company_detail(ticker: str) -> dict[str, object]:
     profiles = _company_profiles()
     names = _companies_name_map()
     p = profiles.get(t, {})
-    mcap = _mcap_map([t]).get(t, "-")
+    mcap = market_cap_map([t]).get(t, "-")
 
     con = _conn_core()
     moats: list[str] = []
     competitors: list[dict[str, str | int]] = []
     notes: list[dict[str, str | int]] = []
+    system_logs: list[dict[str, str | int]] = []
     tasks: list[dict[str, str | int]] = []
     reminders: list[dict[str, str | int]] = []
+    timeline_events: list[dict[str, object]] = []
     filings: list[dict[str, str]] = []
     active_proposal: dict[str, object] = {}
     try:
@@ -519,16 +714,25 @@ def company_detail(ticker: str) -> dict[str, object]:
                     continue
                 if str(r.get("ticker") or "").strip().upper() != t:
                     continue
-                notes.append(
-                    {
-                        "id": int(r.get("id") or 0),
-                        "created_at": str(r.get("date") or ""),
-                        "action": str(r.get("tag") or "Note"),
-                        "emotion": "",
-                        "note": str(r.get("text") or ""),
-                    }
+                row = {
+                    "id": int(r.get("id") or 0),
+                    "created_at": str(r.get("date") or ""),
+                    "action": str(r.get("tag") or "Note"),
+                    "emotion": "",
+                    "note": str(r.get("text") or ""),
+                }
+                action_txt = str(row.get("action") or "").strip().lower()
+                note_txt = str(row.get("note") or "").strip().lower()
+                is_system = (
+                    str(r.get("created_by") or "human").strip().lower() != "human"
+                    or ("proposal" in action_txt)
+                    or ("proposal" in note_txt)
                 )
-                if len(notes) >= 120:
+                if not is_system:
+                    notes.append(row)
+                else:
+                    system_logs.append(row)
+                if len(notes) >= 120 and len(system_logs) >= 120:
                     break
             for r in list_todos_pg(open_only=True, limit=300, ticker=t) + list_todos_pg(open_only=False, limit=300, ticker=t):
                 tasks.append(
@@ -545,21 +749,30 @@ def company_detail(ticker: str) -> dict[str, object]:
             reminders = list_company_reminders_pg(ticker=t, limit=160)
         else:
             for r in con.execute(
-                """SELECT id, created_at, action, emotion, note
+                """SELECT id, created_at, action, emotion, note, COALESCE(created_by,'human') AS created_by
                    FROM workspace_journal
                    WHERE ticker = ?
                    ORDER BY id DESC LIMIT 120""",
                 (t,),
             ).fetchall():
-                notes.append(
-                    {
-                        "id": int(r["id"] or 0),
-                        "created_at": str(r["created_at"] or ""),
-                        "action": str(r["action"] or "Note"),
-                        "emotion": str(r["emotion"] or ""),
-                        "note": str(r["note"] or ""),
-                    }
+                row = {
+                    "id": int(r["id"] or 0),
+                    "created_at": str(r["created_at"] or ""),
+                    "action": str(r["action"] or "Note"),
+                    "emotion": str(r["emotion"] or ""),
+                    "note": str(r["note"] or ""),
+                }
+                action_txt = str(row.get("action") or "").strip().lower()
+                note_txt = str(row.get("note") or "").strip().lower()
+                is_system = (
+                    str(r["created_by"] or "human").strip().lower() != "human"
+                    or ("proposal" in action_txt)
+                    or ("proposal" in note_txt)
                 )
+                if not is_system:
+                    notes.append(row)
+                else:
+                    system_logs.append(row)
             for r in con.execute(
                 """SELECT id, task, status, priority, due_date, created_at, category
                    FROM todos
@@ -698,7 +911,150 @@ def company_detail(ticker: str) -> dict[str, object]:
             }
         )
 
+    for n in notes:
+        timeline_events.append(
+            {
+                "kind": "note",
+                "icon": "📝",
+                "created_at": str(n.get("created_at") or ""),
+                "is_ai": False,
+                "ticker": t,
+                "title": str(n.get("action") or "Note"),
+                "text": str(n.get("note") or ""),
+                "note_id": int(n.get("id") or 0),
+            }
+        )
+    for n in system_logs:
+        timeline_events.append(
+            {
+                "kind": "log",
+                "icon": "🤖",
+                "created_at": str(n.get("created_at") or ""),
+                "is_ai": True,
+                "ticker": t,
+                "title": str(n.get("action") or "System Log"),
+                "text": str(n.get("note") or ""),
+                "note_id": int(n.get("id") or 0),
+            }
+        )
+    for r in tasks:
+        is_ai_task = is_ai_task_text(str(r.get("task") or ""), str(r.get("category") or ""))
+        title = clean_task_text(str(r.get("task") or "Task"))[:140]
+        timeline_events.append(
+            {
+                "kind": "log" if is_ai_task else "task",
+                "icon": "🤖" if is_ai_task else "✅",
+                "created_at": str(r.get("created_at") or ""),
+                "is_ai": is_ai_task,
+                "ticker": t,
+                "title": title or "Task",
+                "text": (
+                    f"AI follow-up • {str(r.get('status') or 'open')}"
+                    if is_ai_task
+                    else f"Task • {str(r.get('status') or 'open')}"
+                ),
+                "todo_id": int(r.get("id") or 0),
+                "status": str(r.get("status") or "open"),
+                "due_date": str(r.get("due_date") or ""),
+            }
+        )
+    for r in reminders:
+        note_txt = str(r.get("note") or "")
+        low_note = note_txt.lower()
+        is_ai_reminder = ("proposal" in low_note)
+        timeline_events.append(
+            {
+                "kind": "log" if is_ai_reminder else "reminder",
+                "icon": "🤖" if is_ai_reminder else "⏰",
+                "created_at": str(r.get("created_at") or ""),
+                "is_ai": is_ai_reminder,
+                "ticker": t,
+                "title": clean_task_text(note_txt)[:140] or "Reminder",
+                "text": (
+                    f"AI follow-up • {str(r.get('status') or 'open')}"
+                    if is_ai_reminder
+                    else f"Reminder • {str(r.get('status') or 'open')}"
+                ),
+                "reminder_id": int(r.get("id") or 0),
+                "status": str(r.get("status") or "open"),
+                "remind_at": str(r.get("remind_at") or ""),
+            }
+        )
     moat_map = {k: v for k, v in MOAT_OPTIONS}
+    mini = get_mini_statements(t)
+    intel = get_company_intel(t, refresh=False)
+    revenue_segments = _normalize_segments_for_view(dict(intel.get("revenue_segments") or {}))
+    buyback = dict(intel.get("buyback") or {})
+    insider_trades = [x for x in list(intel.get("insider_trades") or []) if isinstance(x, dict)][:16]
+    intel_status = dict(intel.get("status") or {})
+    intel_asof = str(intel.get("asof") or "").strip()
+    intel_source = str(intel.get("source") or "").strip()
+    deltas = compute_financial_deltas(ticker=t, years=5)
+    earnings_calls = list_earnings_transcripts(t, limit=36)
+    earnings_releases = list_sec_earnings_releases(t, limit=12, lookback_years=10, max_filings=260)
+    earnings_call_source_counts: dict[str, int] = {}
+    for tr in earnings_calls:
+        src = str((tr or {}).get("source_type") or "").strip().lower() or "unknown"
+        earnings_call_source_counts[src] = int(earnings_call_source_counts.get(src, 0)) + 1
+    quarterly_signals = list_quarterly_result_signals(t, limit=10)
+
+    def _days_old(asof_s: str) -> int | None:
+        s = str(asof_s or "").strip()
+        if not s:
+            return None
+        try:
+            d = dt.date.fromisoformat(s[:10])
+            return int((dt.date.today() - d).days)
+        except Exception:
+            return None
+
+    mini_asof = str((mini or {}).get("asof") or "").strip()
+    mini_days = _days_old(mini_asof)
+    intel_days = _days_old(intel_asof)
+    quant_ready = bool((mini or {}).get("years")) and bool(revenue_segments or buyback)
+    qual_ready = bool((intel or {}).get("status"))
+    stale = bool((mini_days is not None and mini_days > 3) or (intel_days is not None and intel_days > 3))
+    data_coverage = "quant_ready" if quant_ready else ("qual_only" if qual_ready else "missing")
+    data_coverage_label = "Quant Ready" if data_coverage == "quant_ready" else ("Qual Only" if data_coverage == "qual_only" else "Missing")
+    data_coverage_color = "#166534" if data_coverage == "quant_ready" else ("#92400e" if data_coverage == "qual_only" else "#b91c1c")
+    data_coverage_meta = {
+        "state": data_coverage,
+        "label": data_coverage_label,
+        "color": data_coverage_color,
+        "stale": stale,
+        "mini_asof": mini_asof,
+        "intel_asof": intel_asof,
+        "mini_days_old": mini_days,
+        "intel_days_old": intel_days,
+        "sla_days": 3,
+        "schema_version": "financials_schema_v1",
+        "provenance": {
+            "mini_statements_source": str((mini or {}).get("source") or ""),
+            "intel_source": intel_source,
+        },
+    }
+
+    timeline_events.sort(
+        key=lambda e: (
+            parse_datetime_flexible(str(e.get("created_at") or ""))
+            or parse_datetime_flexible(
+                str(e.get("remind_at") or ""),
+                formats=("%Y-%m-%d %H:%M", "%Y-%m-%d"),
+            )
+            or dt.datetime.min
+        ),
+        reverse=True,
+    )
+
+    similar_companies = _similar_companies_for(
+        t,
+        industry=str(p.get("industry") or "Unknown").strip() or "Unknown",
+        market_cap=str(mcap or "-"),
+        profiles=profiles,
+        names=names,
+        existing_competitors=competitors,
+        limit=8,
+    )
     return {
         "ticker": t,
         "name": str(p.get("name") or names.get(t) or t).strip(),
@@ -710,10 +1066,27 @@ def company_detail(ticker: str) -> dict[str, object]:
         "moats": [{"key": k, "label": moat_map.get(k, k)} for k in moats],
         "moat_options": [{"key": k, "label": v} for k, v in MOAT_OPTIONS],
         "competitors": competitors,
+        "similar_companies": similar_companies,
         "notes": notes,
+        "system_logs": system_logs,
         "tasks": tasks,
         "reminders": reminders,
+        "timeline_events": timeline_events,
         "active_proposal": active_proposal,
+        "price_metrics": get_price_metrics(t),
+        "mini_statements": mini,
+        "financial_deltas": deltas,
+        "revenue_segments": revenue_segments,
+        "buyback": buyback,
+        "insider_trades": insider_trades,
+        "intel_status": intel_status,
+        "intel_asof": intel_asof,
+        "intel_source": intel_source,
+        "data_coverage": data_coverage_meta,
+        "earnings_calls": earnings_calls,
+        "earnings_releases": earnings_releases,
+        "earnings_call_source_counts": earnings_call_source_counts,
+        "quarterly_signals": quarterly_signals,
         "filings": filings,
         "filing_groups": filing_groups,
         "filing_form_counts": filing_form_counts,
@@ -798,19 +1171,34 @@ def remove_competitor(row_id: int) -> bool:
         con.close()
 
 
-def add_company_note(ticker: str, note: str, action: str = "Note", emotion: str = "Calm") -> bool:
+def add_company_note(
+    ticker: str,
+    note: str,
+    action: str = "Note",
+    emotion: str = "Calm",
+    created_by: str = "human",
+) -> bool:
     t = _normalize_ticker(ticker)
     txt = str(note or "").strip()
     if not t or not txt:
         return False
+    cb = str(created_by or "human").strip().lower()
+    if cb not in {"human", "ai"}:
+        cb = "human"
     if core_backend() == "postgres":
-        return add_workspace_journal_note_pg(ticker=t, note=txt, action=action, emotion=emotion)
+        return add_workspace_journal_note_pg(ticker=t, note=txt, action=action, emotion=emotion, created_by=cb)
     con = _conn_core()
     try:
-        con.execute(
-            "INSERT INTO workspace_journal (ticker, action, emotion, note, created_at) VALUES (?, ?, ?, ?, ?)",
-            (t, str(action or "Note")[:80], str(emotion or "Calm")[:80], txt[:4000], dt.datetime.now().isoformat()),
-        )
+        try:
+            con.execute(
+                "INSERT INTO workspace_journal (ticker, action, emotion, note, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+                (t, str(action or "Note")[:80], str(emotion or "Calm")[:80], txt[:4000], dt.datetime.now().isoformat(), cb),
+            )
+        except Exception:
+            con.execute(
+                "INSERT INTO workspace_journal (ticker, action, emotion, note, created_at) VALUES (?, ?, ?, ?, ?)",
+                (t, str(action or "Note")[:80], str(emotion or "Calm")[:80], txt[:4000], dt.datetime.now().isoformat()),
+            )
         con.commit()
         return True
     finally:

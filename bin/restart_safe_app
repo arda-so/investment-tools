@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+HOST="${APP_HOST:-127.0.0.1}"
+PORT="${APP_PORT:-8766}"
+BASE="http://${HOST}:${PORT}"
+LOG="${APP_RESTART_LOG:-/tmp/investor_os_app_restart.log}"
+STRICT_PG="${CORE_DB_STRICT_POSTGRES:-1}"
+PG_HOST="${POSTGRES_HOST:-127.0.0.1}"
+PG_PORT="${POSTGRES_PORT:-5432}"
+FORCE_RESTART="${RESTART_FORCE:-0}"
+
+check_postgres() {
+  python3 - "$PG_HOST" "$PG_PORT" <<'PY'
+import socket, sys
+host = sys.argv[1]
+port = int(sys.argv[2])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(1.5)
+try:
+    sock.connect((host, port))
+    print("ok")
+    sys.exit(0)
+except Exception:
+    print("fail")
+    sys.exit(1)
+finally:
+    try:
+        sock.close()
+    except Exception:
+        pass
+PY
+}
+
+if [[ "$STRICT_PG" == "1" ]] && [[ "$FORCE_RESTART" != "1" ]]; then
+  if ! check_postgres >/dev/null 2>&1; then
+    echo "[restart-safe] ABORT: Postgres not reachable at ${PG_HOST}:${PG_PORT}"
+    echo "[restart-safe] Hint: start postgres first, or run RESTART_FORCE=1 if intentional."
+    exit 1
+  fi
+fi
+
+echo "[restart-safe] stopping listeners on ${HOST}:${PORT} (if any)"
+pids="$(lsof -ti tcp:"$PORT" 2>/dev/null || true)"
+if [[ -n "$pids" ]]; then
+  echo "$pids" | xargs kill -9 >/dev/null 2>&1 || true
+  sleep 1
+fi
+
+echo "[restart-safe] starting app"
+nohup ./bin/run_v2_app >"$LOG" 2>&1 &
+APP_PID=$!
+echo "[restart-safe] pid=${APP_PID} log=${LOG}"
+
+ok_live=0
+for _ in $(seq 1 60); do
+  if curl -fsS "${BASE}/health/live" >/dev/null 2>&1; then
+    ok_live=1
+    break
+  fi
+  sleep 0.5
+done
+
+if [[ "$ok_live" != "1" ]]; then
+  echo "[restart-safe] FAILED: /health/live did not become ready"
+  tail -n 80 "$LOG" || true
+  exit 1
+fi
+
+if ! curl -fsS "${BASE}/health/ready" >/dev/null 2>&1; then
+  echo "[restart-safe] FAILED: /health/ready failed"
+  tail -n 80 "$LOG" || true
+  exit 1
+fi
+
+echo "[restart-safe] OK"
+curl -fsS "${BASE}/health/live"
+echo
+curl -fsS "${BASE}/health/ready"
+echo
+lsof -nP -iTCP:"$PORT" -sTCP:LISTEN || true

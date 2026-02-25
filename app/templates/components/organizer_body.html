@@ -15,60 +15,10 @@
       overflow: hidden;
     }
 
-    .app-shell {
-      display: flex;
-      width: 100vw;
-      height: 100vh;
-      overflow: hidden;
-    }
-
-    .app-sidebar {
-      width: 260px;
-      min-width: 260px;
-      height: 100%;
-      background: #1e293b;
-      color: #e2e8f0;
-      padding: 16px 14px;
-      box-sizing: border-box;
-      border-right: 1px solid #2b3a52;
-    }
-
-    .app-brand {
-      margin: 0 0 12px 0;
-      font-size: 15px;
-      font-weight: 800;
-      letter-spacing: .02em;
-    }
-
-    .app-link {
-      display: block;
-      color: #dbe7f5;
-      text-decoration: none;
-      padding: 8px 10px;
-      margin: 3px 0;
-      border-left: 2px solid transparent;
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .app-link:hover { background: rgba(255,255,255,.06); border-left-color: #90a4c0; }
-    .app-link.active { background: rgba(255,255,255,.10); border-left-color: #ffffff; }
-
-    .app-meta {
-      margin-top: 14px;
-      font-size: 11px;
-      color: #9fb0c5;
-      line-height: 1.4;
-    }
-
-    .app-main {
-      flex-grow: 1;
-      height: 100%;
-      overflow-y: auto;
-      background: #f8fafc;
-    }
-
-    .app-content { padding: 32px; }
+    .app-shell { display:block; width:100%; height:auto; overflow:visible; }
+    .app-sidebar { display:none; }
+    .app-main { width:100%; height:auto; overflow:visible; background:transparent; }
+    .app-content { padding: 0; }
 
     .header {
       display: flex;
@@ -253,7 +203,7 @@
       display:grid; grid-template-columns:auto 1fr; gap:8px; align-items:start;
     }
     .timeline-icon { font-size:14px; line-height:1; margin-top:2px; }
-    .timeline-title { font-size:12px; font-weight:800; color:#0f172a; }
+    .timeline-title { font-size:12px; font-weight:500; color:#0f172a; }
     .timeline-meta { font-size:11px; color:#64748b; margin-top:2px; }
     .timeline-text { font-size:12px; color:#334155; margin-top:4px; }
     .timeline-summary {
@@ -263,26 +213,10 @@
     .timeline-item.ai { background:#f8fafc; border-color:#dbe4ee; }
     .ai-hidden .timeline-item.ai { display:none; }
 
-    @media (max-width: 900px) {
-      .app-shell { flex-direction: column; height: auto; }
-      .app-sidebar { width: 100%; min-width: 0; height: auto; }
-      .app-content { padding: 16px; }
-    }
+    @media (max-width: 900px) { .app-content { padding: 0; } }
   </style>
 
   <div class="app-shell">
-    <aside class="app-sidebar">
-      <h3 class="app-brand">Investor OS v2</h3>
-      <a class="app-link active" href="/organizer">Organizer</a>
-      <a class="app-link" href="/dashboard">Home</a>
-      <a class="app-link" href="/company_file">Company Files</a>
-      <a class="app-link" href="/organizer/memory">Memory</a>
-      <a class="app-link" href="/organizer/approvals?day={{ day|urlencode }}">Approvals</a>
-      <a class="app-link" href="/observability">Observability</a>
-      <div class="app-meta">Organizer (Modular FastAPI)</div>
-      <div class="app-meta">Today: {{ day }}</div>
-    </aside>
-
     <main class="app-main">
       <div class="app-content">
         {{ omnibox_form(
@@ -291,7 +225,7 @@
           "#organizerRoot",
           "outerHTML",
           "omniboxInput",
-          "Type a thought, or add a task... (e.g., 'Review $AAPL margins #task')",
+          "Type a thought, or add a task... (e.g., 'Review $AAPL margins')",
           {"q": query, "day": day}
         ) }}
 
@@ -317,25 +251,33 @@
                 <article class="timeline-item">
                   <div class="timeline-icon">{% if e.kind == "task" %}✅{% else %}📝{% endif %}</div>
                   <div>
-                    <div class="timeline-title">{{ e.title or "-" }}</div>
-                    <div class="timeline-meta">{{ e.created_at or "-" }}</div>
-                    {% if e.kind == "task" %}
-                    <form method="post" action="/organizer/inbox/task-update" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
-                      <input type="hidden" name="todo_id" value="{{ e.id }}">
-                      <input type="hidden" name="q" value="{{ query }}">
-                      <input type="hidden" name="day" value="{{ day }}">
-                      <input name="ticker" placeholder="Ticker (e.g. AAPL)" style="height:30px;min-height:30px;border:1px solid #dbe4ee;border-radius:8px;padding:0 8px;width:120px;">
-                      <input name="due_date" type="date" style="height:30px;min-height:30px;border:1px solid #dbe4ee;border-radius:8px;padding:0 8px;">
-                      <button type="submit" class="btn-lite">Assign</button>
-                    </form>
-                    <form method="post" action="/organizer/task-snooze" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
-                      <input type="hidden" name="todo_id" value="{{ e.id }}">
-                      <input type="hidden" name="q" value="{{ query }}">
-                      <input type="hidden" name="day" value="{{ day }}">
-                      <input name="snooze_until" type="date" style="height:30px;min-height:30px;border:1px solid #dbe4ee;border-radius:8px;padding:0 8px;">
-                      <button type="submit" class="btn-lite">Snooze</button>
-                    </form>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                      <div class="timeline-title">{{ (e.title or "-")|urlize(40, true, target="_blank", rel="noopener noreferrer") }}</div>
+                      <form method="post" action="/organizer/item-delete"
+                            hx-post="/organizer/item-delete" hx-target="#organizerRoot" hx-swap="outerHTML"
+                            style="display:flex;gap:6px;margin:0;">
+                        <input type="hidden" name="item_id" value="{{ e.id }}">
+                        <input type="hidden" name="kind" value="{{ e.kind }}">
+                        <input type="hidden" name="source_table" value="{{ e.source_table or '' }}">
+                        <input type="hidden" name="q" value="{{ query }}">
+                        <input type="hidden" name="day" value="{{ day }}">
+                        <button type="button" class="icon-btn" title="Edit" onclick="organizerEdit('editForm-inbox-{{ e.kind }}-{{ e.id }}','editText-inbox-{{ e.kind }}-{{ e.id }}', {{ (e.title or '')|tojson }})">✎</button>
+                        <button type="submit" class="icon-btn" title="Delete">✕</button>
+                      </form>
+                    </div>
+                    {% if e.ticker %}
+                    <div class="timeline-meta"><a class="ticker-pill" href="/company_file?t={{ e.ticker|urlencode }}">${{ e.ticker }}</a></div>
                     {% endif %}
+                    <form id="editForm-inbox-{{ e.kind }}-{{ e.id }}" method="post" action="/organizer/item-edit"
+                          hx-post="/organizer/item-edit" hx-target="#organizerRoot" hx-swap="outerHTML"
+                          style="display:none;">
+                      <input type="hidden" name="item_id" value="{{ e.id }}">
+                      <input type="hidden" name="kind" value="{{ e.kind }}">
+                      <input type="hidden" name="source_table" value="{{ e.source_table or '' }}">
+                      <input type="hidden" name="new_text" id="editText-inbox-{{ e.kind }}-{{ e.id }}" value="">
+                      <input type="hidden" name="q" value="{{ query }}">
+                      <input type="hidden" name="day" value="{{ day }}">
+                    </form>
                   </div>
                 </article>
                 {% else %}
@@ -362,7 +304,20 @@
                 <article class="timeline-item {% if e.is_ai %}ai{% endif %}">
                   <div class="timeline-icon">{{ e.icon }}</div>
                   <div>
-                    <div class="timeline-title">{{ e.title or "-" }}</div>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                      <div class="timeline-title">{{ (e.title or "-")|urlize(40, true, target="_blank", rel="noopener noreferrer") }}</div>
+                      <form method="post" action="/organizer/item-delete"
+                            hx-post="/organizer/item-delete" hx-target="#organizerRoot" hx-swap="outerHTML"
+                            style="display:flex;gap:6px;margin:0;">
+                        <input type="hidden" name="item_id" value="{{ e.id or 0 }}">
+                        <input type="hidden" name="kind" value="{{ e.kind }}">
+                        <input type="hidden" name="source_table" value="{{ e.source_table or '' }}">
+                        <input type="hidden" name="q" value="{{ query }}">
+                        <input type="hidden" name="day" value="{{ day }}">
+                        <button type="button" class="icon-btn" title="Edit" onclick="organizerEdit('editForm-tl-{{ e.kind }}-{{ e.id }}','editText-tl-{{ e.kind }}-{{ e.id }}', {{ ((e.text if (e.kind == 'note' or e.kind == 'log') else e.title) or '')|tojson }})">✎</button>
+                        <button type="submit" class="icon-btn" title="Delete">✕</button>
+                      </form>
+                    </div>
                     <div class="timeline-meta">{{ e.created_at or "-" }}{% if e.ticker %} • <a class="ticker-pill" href="/company_file?t={{ e.ticker|urlencode }}">{{ e.ticker }}</a>{% endif %}</div>
                     {% if e.kind == "note" or e.kind == "log" %}
                     <details class="timeline-text">
@@ -370,6 +325,16 @@
                       <div style="margin-top:6px;white-space:pre-wrap;">{{ e.text }}</div>
                     </details>
                     {% endif %}
+                    <form id="editForm-tl-{{ e.kind }}-{{ e.id }}" method="post" action="/organizer/item-edit"
+                          hx-post="/organizer/item-edit" hx-target="#organizerRoot" hx-swap="outerHTML"
+                          style="display:none;">
+                      <input type="hidden" name="item_id" value="{{ e.id or 0 }}">
+                      <input type="hidden" name="kind" value="{{ e.kind }}">
+                      <input type="hidden" name="source_table" value="{{ e.source_table or '' }}">
+                      <input type="hidden" name="new_text" id="editText-tl-{{ e.kind }}-{{ e.id }}" value="">
+                      <input type="hidden" name="q" value="{{ query }}">
+                      <input type="hidden" name="day" value="{{ day }}">
+                    </form>
                   </div>
                 </article>
                 {% else %}
@@ -483,5 +448,17 @@
         });
       });
     })();
+
+    function organizerEdit(formId, inputId, currentText) {
+      var nextText = window.prompt('Edit item', String(currentText || ''));
+      if (nextText === null) return;
+      nextText = String(nextText || '').trim();
+      if (!nextText) return;
+      var inp = document.getElementById(inputId);
+      var frm = document.getElementById(formId);
+      if (!inp || !frm) return;
+      inp.value = nextText;
+      frm.submit();
+    }
   </script>
 </div>

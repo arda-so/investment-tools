@@ -1,0 +1,54 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="/Users/solmaz/Investment_Tools"
+SRC="$ROOT/automations/launchd"
+DST="$HOME/Library/LaunchAgents"
+
+mkdir -p "$DST"
+
+# Remove old jobs (legacy app stack).
+for lbl in \
+  com.solmaz.research.monthly \
+  com.solmaz.macro.watchdog \
+  com.solmaz.research.weekly \
+  com.solmaz.research.daily \
+  com.solmaz.signal.tracker \
+  com.solmaz.research.quarterly \
+  com.solmaz.morning.intelligence \
+  com.solmaz.research.redflag \
+  com.solmaz.insider.intraday \
+  com.solmaz.earnings.radar; do
+  launchctl remove "$lbl" >/dev/null 2>&1 || true
+done
+
+# Refresh v2 jobs.
+for lbl in \
+  com.solmaz.v2.morning \
+  com.solmaz.v2.earnings \
+  com.solmaz.v2.signals \
+  com.solmaz.v2.daily \
+  com.solmaz.v2.catchup \
+  com.solmaz.v2.insider.deep \
+  com.solmaz.v2.sec.nightly; do
+  launchctl remove "$lbl" >/dev/null 2>&1 || true
+done
+
+cp "$SRC/com.solmaz.v2.morning.plist" "$DST/com.solmaz.v2.morning.plist"
+cp "$SRC/com.solmaz.v2.earnings.plist" "$DST/com.solmaz.v2.earnings.plist"
+cp "$SRC/com.solmaz.v2.signals.plist" "$DST/com.solmaz.v2.signals.plist"
+cp "$SRC/com.solmaz.v2.daily.plist" "$DST/com.solmaz.v2.daily.plist"
+cp "$SRC/com.solmaz.v2.catchup.plist" "$DST/com.solmaz.v2.catchup.plist"
+cp "$SRC/com.solmaz.v2.insider.deep.plist" "$DST/com.solmaz.v2.insider.deep.plist"
+cp "$SRC/com.solmaz.v2.sec.nightly.plist" "$DST/com.solmaz.v2.sec.nightly.plist"
+
+launchctl load "$DST/com.solmaz.v2.morning.plist"
+launchctl load "$DST/com.solmaz.v2.earnings.plist"
+launchctl load "$DST/com.solmaz.v2.signals.plist"
+launchctl load "$DST/com.solmaz.v2.daily.plist"
+launchctl load "$DST/com.solmaz.v2.catchup.plist"
+launchctl load "$DST/com.solmaz.v2.insider.deep.plist"
+launchctl load "$DST/com.solmaz.v2.sec.nightly.plist"
+
+echo "Loaded v2 LaunchAgents:"
+launchctl list | rg "com\\.solmaz\\.v2\\." -N || true

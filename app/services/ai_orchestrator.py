@@ -15,13 +15,20 @@ import uuid
 from dataclasses import dataclass
 from contextvars import ContextVar
 
-from app.core.config import CORE_DB_PATH, app_env
+from app.core.config import app_env
 from app.core.config import ROOT
-from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
+from app.core.db import core_conn as _conn, sqlite_retry
+from app.core.normalize import normalize_text as _norm
+from app.core.ticker import safe_ticker_flexible as _safe_ticker
 from app.services.agent_service import ask_agent
 from app.services.app_knowledge_service import format_app_knowledge, retrieve_app_knowledge
 from app.services.ai_react_service import run_react_information
 from app.services.observability_service import log_system_event
+from app.services.blue_chip_service import (
+    list_blue_chips_rows as _read_blue_chips_companies,
+    remove_blue_chip as _remove_blue_chip,
+    upsert_blue_chip as _upsert_blue_chip,
+)
 from app.services.memory_engine import OnyxMemory
 from app.services.portfolio_memory_service import (
     backfill_trade_history,
@@ -57,9 +64,13 @@ from app.services.organizer_service import (
 )
 from app.services.reports_service import list_reports, read_report_file
 try:
-    from tools.llm_engine import ask_ai
+    from tools.llm_engine import ask_ai, ask_ai_with_tools
 except Exception:  # pragma: no cover - optional at runtime
     ask_ai = None  # type: ignore[assignment]
+    ask_ai_with_tools = None  # type: ignore[assignment]
+
+from app.services.mini_statements_service import fetch_historical_financials
+from app.services.postgres_core_service import strict_postgres_mode
 
 
 @dataclass
@@ -201,11 +212,9 @@ class IntentCandidate:
     rationale: str = ""
 
 
-def _conn() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
 def ensure_ai_schema() -> None:
+    if strict_postgres_mode():
+        return
     con = _conn()
     try:
         con.execute(
@@ -287,6 +296,8 @@ def ensure_ai_schema() -> None:
 
 
 def _log_action(query: str, res: AICommandResult) -> None:
+    if strict_postgres_mode():
+        return
     payload = {
         "message": res.message,
         "redirect_url": res.redirect_url,
@@ -327,6 +338,8 @@ def _log_tool_call(
     model_name: str = "deterministic",
     capability: str = "",
 ) -> None:
+    if strict_postgres_mode():
+        return
     def _write() -> None:
         con = _conn()
         try:
@@ -353,24 +366,44 @@ def _log_tool_call(
 
 
 def _log_quality_event(event_type: str, query: str, detail: dict[str, object] | None = None) -> None:
-    def _write() -> None:
-        con = _conn()
-        try:
-            con.execute(
-                """INSERT INTO ai_quality_log (created_at, event_type, query, detail_json)
-                   VALUES (?, ?, ?, ?)""",
-                (
-                    dt.datetime.now().isoformat(),
-                    str(event_type or "unknown")[:120],
-                    str(query or "")[:4000],
-                    json.dumps(detail or {}, ensure_ascii=True),
-                ),
-            )
-            con.commit()
-        finally:
-            con.close()
+    _et = str(event_type or "unknown")[:120]
+    _q = str(query or "")[:4000]
+    _dj = json.dumps(detail or {}, ensure_ascii=True)
+    _now = dt.datetime.now().isoformat()
 
-    sqlite_retry(_write)
+    if strict_postgres_mode():
+        try:
+            from app.services.postgres_core_service import pg_connect
+            con_pg = pg_connect()
+            if con_pg is not None:
+                try:
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        """INSERT INTO ai_quality_log_core
+                           (id, created_at, event_type, query, detail_json)
+                           VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM ai_quality_log_core),
+                                   %s, %s, %s, %s::jsonb)""",
+                        (_now, _et, _q, _dj),
+                    )
+                    con_pg.commit()
+                finally:
+                    con_pg.close()
+        except Exception:
+            pass
+    else:
+        def _write() -> None:
+            con = _conn()
+            try:
+                con.execute(
+                    """INSERT INTO ai_quality_log (created_at, event_type, query, detail_json)
+                       VALUES (?, ?, ?, ?)""",
+                    (_now, _et, _q, _dj),
+                )
+                con.commit()
+            finally:
+                con.close()
+        sqlite_retry(_write)
+
     try:
         from app.services.proactive_ai_service import record_reflexion_from_quality_event
 
@@ -393,6 +426,8 @@ def _log_risk_veto_decision(
     metrics: dict[str, object] | None = None,
     detail: dict[str, object] | None = None,
 ) -> None:
+    if strict_postgres_mode():
+        return
     def _write() -> None:
         con = _conn()
         try:
@@ -436,6 +471,8 @@ def _risk_veto_defaults() -> dict[str, object]:
 
 
 def get_risk_veto_config() -> dict[str, object]:
+    if strict_postgres_mode():
+        return dict(_risk_veto_defaults())
     ensure_ai_schema()
     cfg = dict(_risk_veto_defaults())
     con = _conn()
@@ -464,6 +501,13 @@ def get_risk_veto_config() -> dict[str, object]:
 
 
 def update_risk_veto_config(patch: dict[str, object]) -> dict[str, object]:
+    if strict_postgres_mode():
+        base = get_risk_veto_config()
+        allowed = set(_risk_veto_defaults().keys())
+        for k, v in dict(patch or {}).items():
+            if k in allowed:
+                base[k] = v
+        return base
     base = get_risk_veto_config()
     allowed = set(_risk_veto_defaults().keys())
     for k, v in dict(patch or {}).items():
@@ -508,18 +552,45 @@ def get_ai_quality_report(hours: int = 168, limit: int = 300) -> dict[str, objec
     h = max(1, min(24 * 30, int(hours or 168)))
     lim = max(1, min(2000, int(limit or 300)))
     since = (dt.datetime.now() - dt.timedelta(hours=h)).isoformat()
-    con = _conn()
-    try:
-        rows = con.execute(
-            """SELECT created_at, event_type, query, detail_json
-               FROM ai_quality_log
-               WHERE created_at >= ?
-               ORDER BY id DESC
-               LIMIT ?""",
-            (since, lim),
-        ).fetchall()
-    finally:
-        con.close()
+
+    rows: list[dict[str, object]] = []
+    if strict_postgres_mode():
+        try:
+            from app.services.postgres_core_service import pg_connect
+            con_pg = pg_connect()
+            if con_pg is not None:
+                try:
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        """SELECT created_at, event_type, query, detail_json
+                           FROM ai_quality_log_core
+                           WHERE created_at >= %s
+                           ORDER BY id DESC
+                           LIMIT %s""",
+                        (since, lim),
+                    )
+                    cols = [d[0] for d in cur.description] if cur.description else []
+                    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                finally:
+                    con_pg.close()
+        except Exception:
+            pass
+    else:
+        con = _conn()
+        try:
+            rows = [
+                dict(r)
+                for r in con.execute(
+                    """SELECT created_at, event_type, query, detail_json
+                       FROM ai_quality_log
+                       WHERE created_at >= ?
+                       ORDER BY id DESC
+                       LIMIT ?""",
+                    (since, lim),
+                ).fetchall()
+            ]
+        finally:
+            con.close()
 
     counts: dict[str, int] = {}
     recent: list[dict[str, object]] = []
@@ -527,10 +598,12 @@ def get_ai_quality_report(hours: int = 168, limit: int = 300) -> dict[str, objec
         event_type = str(r["event_type"] or "unknown")
         counts[event_type] = int(counts.get(event_type, 0)) + 1
         detail_obj: dict[str, object] = {}
-        raw_detail = str(r["detail_json"] or "").strip()
-        if raw_detail:
+        raw_detail = r.get("detail_json") if isinstance(r, dict) else r["detail_json"]
+        if isinstance(raw_detail, dict):
+            detail_obj = dict(raw_detail)
+        elif raw_detail:
             try:
-                parsed = json.loads(raw_detail)
+                parsed = json.loads(str(raw_detail))
                 if isinstance(parsed, dict):
                     detail_obj = dict(parsed)
             except Exception:
@@ -555,6 +628,8 @@ def get_ai_quality_report(hours: int = 168, limit: int = 300) -> dict[str, objec
 
 
 def list_recent_risk_veto_decisions(limit: int = 30) -> list[dict[str, object]]:
+    if strict_postgres_mode():
+        return []
     lim = max(1, min(300, int(limit or 30)))
     con = _conn()
     try:
@@ -670,7 +745,8 @@ def _extract_ticker(text: str) -> str:
     tk_from_hint = _resolve_ticker_from_company_hint(s)
     if tk_from_hint:
         return tk_from_hint
-    # Fallback: choose first non-stopword 2-5 char token.
+    # Fallback: choose first non-stopword ALL-CAPS 2-5 char token only.
+    # This prevents accidental extraction from natural words like "can", "read", etc.
     stop = {
         "OPEN", "COMPANY", "TICKER", "SHOW", "RESEARCH", "ADD", "TASK",
         "NOTE", "DRAFT", "SUMMARIZE", "LATEST", "REPORT", "REPORTS", "FIND",
@@ -682,11 +758,10 @@ def _extract_ticker(text: str) -> str:
         "OUR", "IN", "ON", "AT", "BY", "SAVE", "SET",
         "OWN",
     }
-    for tok in re.findall(r"\b([A-Za-z]{2,5})\b", s):
-        up = tok.upper()
-        if up in stop:
+    for tok in re.findall(r"\b([A-Z]{2,5})\b", s):
+        if tok in stop:
             continue
-        return up
+        return tok
     return ""
 
 
@@ -819,14 +894,6 @@ def _extract_ticker_for_sec_query(text: str) -> str:
             continue
         if _is_known_ticker_for_user_scope(tk):
             return tk
-    return ""
-
-
-def _safe_ticker(raw: str) -> str:
-    s = str(raw or "").strip().upper()
-    s = re.sub(r"[^A-Z0-9.\-]", "", s)
-    if re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,11}", s) and re.search(r"[A-Z]", s):
-        return s
     return ""
 
 
@@ -1559,6 +1626,24 @@ def _looks_like_portfolio_status_query(text: str) -> bool:
     return (has_time_anchor and perf_terms) or ask_pattern
 
 
+def _looks_like_company_navigation_query(raw_query: str) -> bool:
+    q = str(raw_query or "").strip()
+    low = _norm(q)
+    if not q or not low:
+        return False
+    if re.search(r"\b(open|show|go|take|navigate)\b.*\b(company|ticker)\b", low):
+        return True
+    if re.search(r"\b(company|ticker)\b.*\b(open|show|go|take|navigate)\b", low):
+        return True
+    if re.search(r"\bresearch\b.*\b(company|ticker)\b", low):
+        return True
+    if re.search(r"\$[A-Za-z]{1,5}\b", q):
+        return True
+    if re.search(r"\b(?:company|ticker)\s+\$?[A-Za-z]{1,5}\b", q, flags=re.I):
+        return True
+    return False
+
+
 def _strict_finance_parse(query: str) -> ParsedCommand:
     q = str(query or "").strip()
     low = _norm(q)
@@ -1579,7 +1664,7 @@ def _strict_finance_parse(query: str) -> ParsedCommand:
         action = "portfolio_today_status"
     elif any(k in low for k in ["dashboard", "my companies", "my universe", "organizer", "reports", "intel feed"]) and any(k in low for k in ["open", "go", "show", "navigate"]):
         action = "open_page"
-    elif any(k in low for k in ["open company", "research", "company ", "ticker "]):
+    elif _looks_like_company_navigation_query(q):
         action = "open_company"
     elif "summarize latest report" in low or _fuzzy_match(
         low,
@@ -1601,7 +1686,14 @@ def _strict_finance_parse(query: str) -> ParsedCommand:
         form = "10-Q"
     elif re.search(r"\b8[\s-]?k\b", low):
         form = "8-K"
-    tk = _extract_ticker(q)
+    ticker_actions = {
+        "open_company",
+        "open_sec_filings",
+        "add_task",
+        "add_note_draft",
+        "manage_blue_chips",
+    }
+    tk = _extract_ticker(q) if action in ticker_actions else ""
     if action in {"summarize_latest_report", "search_reports"} and tk in {"DAILY", "BRIEF", "BRIEFING", "REPORT", "REPORTS"}:
         tk = ""
     due = ""
@@ -1609,10 +1701,6 @@ def _strict_finance_parse(query: str) -> ParsedCommand:
     if action == "add_task":
         due, body = _extract_due_date(q)
     return ParsedCommand(action=action, ticker=tk, form=form, due_date=due, body=body, notes="strict_finance_parse")
-
-
-def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())).strip()
 
 
 def _fuzzy_match(query: str, patterns: list[str], threshold: float = FUZZY_THRESHOLD) -> str:
@@ -2007,7 +2095,7 @@ def _intent_open_company(query: str) -> AICommandResult | None:
     if not q:
         return None
     low = q.lower()
-    if not any(k in low for k in ["open", "research", "company", "ticker", "show"]):
+    if not _looks_like_company_navigation_query(q):
         return None
     # Strict extraction for navigation to avoid accidental ticker creation from normal words.
     tk = ""
@@ -2163,7 +2251,7 @@ def _route_alias_target(query: str) -> tuple[str, str] | None:
         ({"blue chips", "blue chip", "bluechips", "macro radar"}, "/my_universe?tab=bluechips", "Blue Chips"),
         ({"intel feed", "feed", "live wire"}, "/dashboard", "Intel Feed"),
         ({"organizer", "tasks", "daily log", "approvals"}, "/organizer", "Organizer"),
-        ({"notes file", "notes page", "my notes"}, "/organizer/file/notes", "Notes File"),
+        ({"notes file", "notes page", "my notes"}, "/organizer", "Notes"),
         ({"reports", "report library", "deep dive", "daily brief"}, "/reports", "Reports"),
         ({"observability", "system events", "latency"}, "/observability", "Observability"),
     ]
@@ -2657,7 +2745,7 @@ def _intent_add_daily_log(query: str) -> AICommandResult | None:
         intent="add_daily_log",
         message=f"Added to Daily Log ({day}).",
         confidence=0.95,
-        redirect_url=f"/organizer/file/daily?day={day}",
+        redirect_url=f"/organizer?day={day}",
         citations=[],
         traces=[{"step": "tool", "detail": "append_daily_log"}],
     )
@@ -3080,7 +3168,7 @@ def _intent_delete_notes(query: str, context: dict | None = None) -> AICommandRe
             intent="delete_notes",
             message="No matching notes found to delete.",
             confidence=0.9,
-            redirect_url="/organizer/file/notes",
+            redirect_url="/organizer",
             citations=[],
             traces=[{"step": "tool", "detail": "delete_notes"}],
         )
@@ -3097,7 +3185,7 @@ def _intent_delete_notes(query: str, context: dict | None = None) -> AICommandRe
         intent="delete_notes",
         message=f"Deleted {total} note(s){scope_msg}.",
         confidence=0.95,
-        redirect_url="/organizer/file/notes",
+        redirect_url="/organizer",
         citations=[],
         traces=[{"step": "tool", "detail": "delete_notes"}],
     )
@@ -3188,7 +3276,9 @@ def _intent_search_reports(query: str) -> AICommandResult | None:
                 prompt = (
                     "You are a skeptical Buy-Side Analyst. Use only provided documents. "
                     "Prioritize disconfirming evidence first. Think step-by-step internally, "
-                    "but do not reveal chain-of-thought.\n\n"
+                    "but do not reveal chain-of-thought. "
+                    "Do NOT extract/calculate financial metrics from raw SEC text; if numerical data is not provided as structured JSON, "
+                    "state exactly: Data not available in structured filings.\n\n"
                     "Return STRICT JSON:\n"
                     '{"summary_bullets":["..."],"risk_bullets":["..."],"confidence":0.0}\n\n'
                     "DOCUMENTS:\n"
@@ -3494,6 +3584,8 @@ def _intent_summarize_current_report(query: str, context: dict | None = None) ->
             prompt = (
                 "You are a skeptical buy-side analyst.\n"
                 "Read the report and explain what is happening in plain language.\n"
+                "Do NOT extract/calculate financial metrics from raw SEC text; if numerical data is not provided as structured JSON, "
+                "state exactly: Data not available in structured filings.\n"
                 "Return STRICT JSON only, concise and non-repetitive.\n"
                 "Schema:\n"
                 '{"whats_happening":["<=18 words","..."],'
@@ -3597,7 +3689,7 @@ def _intent_open_notes(query: str) -> AICommandResult | None:
         intent="open_notes",
         message="Opening your notes file.",
         confidence=0.92 if matched_by == "rule" else 0.84,
-        redirect_url="/organizer/file/notes",
+        redirect_url="/organizer",
         citations=[],
         matched_by=matched_by,
         version=ORCHESTRATOR_VERSION,
@@ -3634,97 +3726,6 @@ def _read_watchlist_companies(limit: int = 120) -> list[dict[str, str]]:
     except Exception:
         return []
     return out
-
-
-def _ensure_blue_chips_schema() -> None:
-    def _write() -> None:
-        con = _conn()
-        try:
-            con.execute(
-                """CREATE TABLE IF NOT EXISTS blue_chips (
-                    ticker TEXT PRIMARY KEY,
-                    added_at TEXT NOT NULL,
-                    reason TEXT NOT NULL DEFAULT ''
-                )"""
-            )
-            con.execute("CREATE INDEX IF NOT EXISTS idx_blue_chips_added ON blue_chips(added_at DESC)")
-            con.commit()
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
-
-
-def _read_blue_chips_companies(limit: int = 120) -> list[dict[str, str]]:
-    _ensure_blue_chips_schema()
-    out: list[dict[str, str]] = []
-    con = _conn()
-    try:
-        rows = con.execute(
-            "SELECT ticker, reason FROM blue_chips ORDER BY added_at DESC, ticker ASC LIMIT ?",
-            (max(1, min(500, int(limit))),),
-        ).fetchall()
-        for r in rows:
-            out.append(
-                {
-                    "ticker": str(r["ticker"] or "").strip().upper(),
-                    "name": str(r["reason"] or "").strip(),
-                }
-            )
-    except Exception:
-        return []
-    finally:
-        con.close()
-    return out
-
-
-def _upsert_blue_chip(ticker: str, reason: str = "") -> bool:
-    tk = _safe_ticker(ticker)
-    if not tk:
-        return False
-    _ensure_blue_chips_schema()
-
-    def _write() -> None:
-        con = _conn()
-        try:
-            con.execute(
-                """INSERT INTO blue_chips(ticker, added_at, reason)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(ticker) DO UPDATE SET
-                     added_at=excluded.added_at,
-                     reason=excluded.reason""",
-                (
-                    tk,
-                    dt.datetime.now().isoformat(timespec="seconds"),
-                    str(reason or "").strip(),
-                ),
-            )
-            con.commit()
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
-    return True
-
-
-def _remove_blue_chip(ticker: str) -> bool:
-    tk = _safe_ticker(ticker)
-    if not tk:
-        return False
-    _ensure_blue_chips_schema()
-    removed = {"ok": False}
-
-    def _write() -> None:
-        con = _conn()
-        try:
-            cur = con.execute("DELETE FROM blue_chips WHERE ticker=?", (tk,))
-            con.commit()
-            removed["ok"] = int(cur.rowcount or 0) > 0
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
-    return bool(removed["ok"])
 
 
 def _is_info_request(low: str) -> bool:
@@ -4454,7 +4455,7 @@ def _intent_navigation_followup(query: str, context: dict | None = None) -> AICo
         "list_watchlist": ("/my_universe?tab=all", "Watchlist"),
         "list_portfolio": ("/my_universe?tab=all", "Portfolio"),
         "list_blue_chips": ("/my_universe?tab=bluechips", "Blue Chips"),
-        "list_notes": ("/organizer/file/notes", "Notes"),
+        "list_notes": ("/organizer", "Notes"),
         "list_reports": ("/reports", "Reports"),
         "list_tasks": ("/organizer", "Organizer"),
     }
@@ -5535,6 +5536,52 @@ def _intent_portfolio_interview(query: str, context: dict | None = None) -> AICo
     return None
 
 
+def _extract_query_tickers_for_tools(query: str, context: dict | None = None, max_items: int = 4) -> list[str]:
+    q = str(query or "")
+    out: list[str] = []
+    for m in re.findall(r"\b[A-Z][A-Z0-9.\-]{0,5}\b", q):
+        tk = str(m or "").strip().upper()
+        if tk and tk not in out:
+            out.append(tk)
+        if len(out) >= max_items:
+            return out
+    ctx = context or {}
+    rt = ctx.get("runtime") if isinstance(ctx.get("runtime"), dict) else {}
+    cc = rt.get("company_context") if isinstance(rt.get("company_context"), dict) else {}
+    tk = str(cc.get("ticker") or "").strip().upper()
+    if tk and tk not in out:
+        out.append(tk)
+    return out[:max_items]
+
+
+def _wants_financial_tooling(query: str) -> bool:
+    low = _norm(query)
+    keys = {
+        "revenue", "margin", "gross", "debt", "cash flow", "fcf", "cagr",
+        "balance sheet", "income statement", "valuation", "equity",
+        "compare", "comparison", "peer", "trend", "historical", "5 year", "5y",
+    }
+    return any(k in low for k in keys)
+
+
+def _execute_financial_tool_call(name: str, args: dict[str, object], context: dict | None = None) -> dict[str, object]:
+    if str(name or "").strip() != "fetch_historical_financials":
+        return {"ok": False, "error": "unknown_tool", "name": str(name or "")}
+    t = str((args or {}).get("ticker") or "").strip().upper()
+    metric = str((args or {}).get("metric") or "all").strip().lower()
+    years_raw = (args or {}).get("years")
+    refresh_raw = (args or {}).get("refresh")
+    if not t:
+        cands = _extract_query_tickers_for_tools("", context=context, max_items=1)
+        t = str(cands[0] or "").strip().upper() if cands else ""
+    try:
+        years = int(years_raw) if years_raw is not None else 5
+    except Exception:
+        years = 5
+    refresh = bool(refresh_raw) if isinstance(refresh_raw, bool) else (str(refresh_raw or "").strip().lower() in {"1", "true", "yes", "on"})
+    return fetch_historical_financials(ticker=t, metric=metric or "all", years=years, refresh=refresh)
+
+
 def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResult:
     q = str(query or "").strip()
     ctx = context or {}
@@ -5552,6 +5599,7 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
         evs = runtime.get("watcher_events") if isinstance(runtime.get("watcher_events"), list) else []
         txs = runtime.get("recent_transactions") if isinstance(runtime.get("recent_transactions"), list) else []
         rfacts = runtime.get("report_facts") if isinstance(runtime.get("report_facts"), list) else []
+        company_ctx = runtime.get("company_context") if isinstance(runtime.get("company_context"), dict) else {}
         page_line = f"{str(page.get('title') or '-')}: {str(page.get('content') or '-')[:220]}"
         live_line = (
             f"holdings={int(live.get('holdings_count') or 0)}, "
@@ -5585,6 +5633,17 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
             + ("Recent transactions:\n" + "\n".join(tx_lines) + "\n" if tx_lines else "")
             + ("Report facts:\n" + "\n".join(fact_lines) if fact_lines else "")
         )
+        if company_ctx:
+            cc_ticker = str(company_ctx.get("ticker") or "").strip().upper()
+            val = company_ctx.get("valuation") if isinstance(company_ctx.get("valuation"), dict) else {}
+            fin = company_ctx.get("financials_5y") if isinstance(company_ctx.get("financials_5y"), dict) else {}
+            yrs = list(fin.get("years") or [])
+            runtime_txt += (
+                "\nCompany page context:\n"
+                f"- ticker={cc_ticker or '-'}\n"
+                f"- valuation: ytd={val.get('ytd_return')} m12={val.get('m12_return')} y5={val.get('y5_return')}\n"
+                f"- financial_years={yrs}\n"
+            )
     hits = retrieve_app_knowledge(q, limit=10)
     knowledge_ctx = format_app_knowledge(hits)
     hist_lines: list[str] = []
@@ -5614,6 +5673,9 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                 "Execution honesty:\n"
                 "- Never claim an action was completed unless tool/runtime evidence in context confirms it.\n"
                 "- If data is stale/missing, say so briefly and state what is needed.\n"
+                "Data policy:\n"
+                "- If a request needs SEC quantitative metrics and structured_financial_data_json is missing, respond exactly: Data not available in structured filings.\n"
+                "- Do not extract/calculate new numbers from raw SEC text.\n"
                 "Reasoning discipline:\n"
                 "- Think internally before answering, but do not reveal private reasoning.\n"
                 "- If citing numbers, re-check them against runtime context before final output.\n"
@@ -5628,6 +5690,8 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                 "2) App knowledge\n"
                 "3) Memory/preferences\n"
                 "4) Ask one clarifying question if still uncertain\n\n"
+                "Policy marker: structured_financial_data_json\n"
+                "Fallback marker: Data not available in structured filings.\n\n"
                 "USER PROFILE:\n"
                 f"{user_profile or '(none)'}\n\n"
                 "USER PREFERENCES:\n"
@@ -5648,15 +5712,72 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                 "USER QUERY:\n"
                 f"{q}"
             )
-            out = str(
-                ask_ai(
+            sys_ctx = "Senior partner copilot for Investor OS. Conversational first, action-honest, evidence-first."
+            out = ""
+            if ask_ai_with_tools is not None and _wants_financial_tooling(q):
+                tools = [
+                    {
+                        "name": "fetch_historical_financials",
+                        "description": "Fetch normalized 5Y financial statements for a ticker. Supports metric-specific or full financial snapshot.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "ticker": {"type": "string", "description": "Ticker symbol, e.g. AAPL"},
+                                "metric": {
+                                    "type": "string",
+                                    "description": "One of: all,revenue,gross_profit,operating_cash_flow,capex,free_cash_flow,total_cash,total_debt,total_equity",
+                                },
+                                "years": {"type": "integer", "description": "Number of years to fetch (1-10)"},
+                                "refresh": {"type": "boolean", "description": "Refresh from provider before returning data"},
+                            },
+                            "required": ["ticker"],
+                        },
+                    }
+                ]
+                first = ask_ai_with_tools(
                     prompt,
-                    "Senior partner copilot for Investor OS. Conversational first, action-honest, evidence-first.",
+                    sys_ctx,
+                    tools=tools,
                     mode="smart",
                     temperature=0.1,
-                )
-                or ""
-            ).strip()
+                ) or {}
+                calls = list(first.get("function_calls") or [])
+                if calls:
+                    tool_lines: list[str] = []
+                    for fc in calls[:4]:
+                        nm = str(fc.get("name") or "")
+                        args = fc.get("args") if isinstance(fc.get("args"), dict) else {}
+                        tool_res = _execute_financial_tool_call(nm, args, context=ctx)
+                        tool_lines.append(
+                            f"{nm}({json.dumps(args, ensure_ascii=True)}) => {json.dumps(tool_res, ensure_ascii=True)[:3000]}"
+                        )
+                    follow = (
+                        prompt
+                        + "\n\nTOOL RESULTS (trusted runtime data):\n"
+                        + "\n".join(tool_lines)
+                        + "\n\nUse the tool results above in your final answer."
+                    )
+                    out = str(
+                        ask_ai(
+                            follow,
+                            sys_ctx,
+                            mode="smart",
+                            temperature=0.1,
+                        )
+                        or ""
+                    ).strip()
+                else:
+                    out = str(first.get("text") or "").strip()
+            if not out:
+                out = str(
+                    ask_ai(
+                        prompt,
+                        sys_ctx,
+                        mode="smart",
+                        temperature=0.1,
+                    )
+                    or ""
+                ).strip()
             out = re.sub(r"<thought>[\s\S]*?</thought>", "", out, flags=re.I).strip()
             out = re.sub(r"^\s*```thought[\s\S]*?```\s*", "", out, flags=re.I).strip()
             if out:

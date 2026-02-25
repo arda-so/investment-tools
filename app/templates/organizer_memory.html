@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Organizer Memory | Investor OS v2{% endblock %}
+{% block body %}
+<div class="card">
+  <strong class="title">Memory Inspector</strong>
+</div>
+
+{% if message %}
+<div class="flash">{{ message }}</div>
+{% endif %}
+
+{% if not available %}
+<div class="card">
+  <h3 style="margin:0 0 8px 0;">Memory Engine Unavailable</h3>
+  <div class="muted">Run app with the memory environment and dependencies installed.</div>
+  <div style="margin-top:8px;"><code>source .venv-memory/bin/activate && ./bin/run_v2_app</code></div>
+</div>
+{% else %}
+<div class="card">
+  <h3 style="margin:0 0 8px 0;">Memory Store</h3>
+  <div class="stats">
+    <span class="chip">Total vectors: {{ total }}</span>
+    <span class="chip">Showing: {{ rows|length }}</span>
+  </div>
+  <form method="get" action="/organizer/memory" style="display:grid;grid-template-columns:1fr 120px 170px 120px auto;gap:8px;margin-top:8px;">
+    <input name="q" value="{{ query }}" placeholder="Semantic query (e.g. why did I buy CRM?)">
+    <input name="ticker" value="{{ ticker }}" placeholder="Ticker">
+    <select name="source">
+      <option value="" {% if not source %}selected{% endif %}>All sources</option>
+      <option value="holding_thesis" {% if source == "holding_thesis" %}selected{% endif %}>Holding thesis</option>
+      <option value="journal" {% if source == "journal" %}selected{% endif %}>Journal</option>
+      <option value="investor_note" {% if source == "investor_note" %}selected{% endif %}>Investor note</option>
+      <option value="daily_note" {% if source == "daily_note" %}selected{% endif %}>Daily note</option>
+      <option value="task" {% if source == "task" %}selected{% endif %}>Task</option>
+    </select>
+    <input name="limit" type="number" min="20" max="500" value="{{ limit }}">
+    <button type="submit">Refresh</button>
+  </form>
+</div>
+
+<div class="card">
+  <form id="bulkDeleteForm" method="post" action="/organizer/memory/delete-selected">
+    <input type="hidden" name="q" value="{{ query }}">
+    <input type="hidden" name="ticker" value="{{ ticker }}">
+    <input type="hidden" name="source" value="{{ source }}">
+    <input type="hidden" name="limit" value="{{ limit }}">
+  </form>
+  <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;">
+    <button type="button" id="memSelectAll" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Select All Shown</button>
+    <button type="button" id="memSelectNone" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Clear Selection</button>
+    <button type="submit" form="bulkDeleteForm" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Delete Selected</button>
+  </div>
+  <table>
+    <thead><tr><th>Timestamp</th><th>Source</th><th>Ticker</th><th>Text</th><th>Action</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      {% set md = r.metadata if r.metadata is defined else {} %}
+      <tr>
+        <td>{{ md.timestamp or md.created_at or "-" }}</td>
+        <td>{{ md.source_type or "-" }}</td>
+        <td>{{ md.ticker or "-" }}</td>
+        <td>{{ r.text }}</td>
+        <td style="white-space:nowrap;">
+          <label style="margin-right:8px;"><input class="memCheck" form="bulkDeleteForm" type="checkbox" name="memory_ids" value="{{ r.id }}" style="width:auto;"> select</label>
+          <form method="post" action="/organizer/memory/delete" style="display:inline;">
+            <input type="hidden" name="memory_id" value="{{ r.id }}">
+            <input type="hidden" name="q" value="{{ query }}">
+            <input type="hidden" name="ticker" value="{{ ticker }}">
+            <input type="hidden" name="source" value="{{ source }}">
+            <input type="hidden" name="limit" value="{{ limit }}">
+            <button type="submit" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">No memory rows found.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/organizer/memory/delete-filtered" style="margin-top:8px;">
+    <input type="hidden" name="q" value="{{ query }}">
+    <input type="hidden" name="ticker" value="{{ ticker }}">
+    <input type="hidden" name="source" value="{{ source }}">
+    <input type="hidden" name="limit" value="{{ limit }}">
+    <button type="submit" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Delete All Filtered ({{ rows|length }})</button>
+  </form>
+</div>
+<script>
+  (function(){
+    var allBtn = document.getElementById('memSelectAll');
+    var noneBtn = document.getElementById('memSelectNone');
+    function checks(){ return Array.prototype.slice.call(document.querySelectorAll('.memCheck')); }
+    if (allBtn){ allBtn.addEventListener('click', function(){ checks().forEach(function(c){ c.checked = true; }); }); }
+    if (noneBtn){ noneBtn.addEventListener('click', function(){ checks().forEach(function(c){ c.checked = false; }); }); }
+  })();
+</script>
+{% endif %}
+{% endblock %}

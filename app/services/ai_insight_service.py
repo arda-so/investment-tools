@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import re
 import sqlite3
 from collections import Counter, defaultdict
 from typing import Any
 
-from app.core.config import CORE_DB_PATH
-from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
+from app.core.db import core_conn as _conn, sqlite_retry
+from app.core.normalize import normalize_text as _norm
 from app.services.portfolio_memory_service import get_holdings, query_report_facts
+from app.services.postgres_core_service import core_backend, pg_connect
 
-
-def _conn() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
+try:
+    from tools.llm_engine import ask_ai
+except Exception:
+    ask_ai = None  # type: ignore[assignment]
 
 
 def ensure_ai_insight_schema() -> None:
@@ -42,16 +43,35 @@ def ensure_ai_insight_schema() -> None:
     sqlite_retry(_write)
 
 
-def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())).strip()
-
-
-def _recent_quality_rows(days: int = 30) -> list[sqlite3.Row]:
+def _recent_quality_rows(days: int = 30) -> list[dict[str, Any]]:
     ensure_ai_insight_schema()
     since = (dt.datetime.now() - dt.timedelta(days=max(1, int(days or 30)))).isoformat()
+
+    if core_backend() == "postgres":
+        try:
+            con_pg = pg_connect()
+            if con_pg is not None:
+                try:
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        """SELECT created_at, event_type, query, detail_json
+                           FROM ai_quality_log_core
+                           WHERE created_at >= %s
+                           ORDER BY id DESC
+                           LIMIT 6000""",
+                        (since,),
+                    )
+                    cols = [d[0] for d in cur.description] if cur.description else []
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+                finally:
+                    con_pg.close()
+        except Exception:
+            pass
+        return []
+
     con = _conn()
     try:
-        return con.execute(
+        rows = con.execute(
             """SELECT created_at, event_type, query, detail_json
                FROM ai_quality_log
                WHERE created_at >= ?
@@ -59,11 +79,13 @@ def _recent_quality_rows(days: int = 30) -> list[sqlite3.Row]:
                LIMIT 6000""",
             (since,),
         ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         con.close()
 
 
-def _build_missing_tool_suggestions(rows: list[sqlite3.Row], min_count: int = 4) -> list[dict[str, Any]]:
+def _build_missing_tool_suggestions(rows: list[dict[str, Any]], min_count: int = 4) -> list[dict[str, Any]]:
+    """LLM-driven: analyze blocked/gated queries to identify missing capabilities."""
     gated_events = {"action_confidence_gate", "needs_clarification", "risk_veto_review", "risk_veto_blocked"}
     q_counts: Counter[str] = Counter()
     for r in rows:
@@ -74,45 +96,59 @@ def _build_missing_tool_suggestions(rows: list[sqlite3.Row], min_count: int = 4)
         if qn:
             q_counts[qn] += 1
 
-    out: list[dict[str, Any]] = []
-    for qn, c in q_counts.most_common(80):
-        if c < int(min_count or 4):
-            continue
-        title = ""
-        summary = ""
-        tool_name = ""
-        if any(k in qn for k in {"option", "greek", "delta", "gamma", "theta", "vega"}):
-            tool_name = "calculate_options_greeks"
-            title = "Missing Tool: Options Greeks"
-            summary = f"Detected {c} blocked intents around options/greeks. Add `{tool_name}` tool."
-        elif "blue chip" in qn and any(k in qn for k in {"add", "remove", "rebalance"}):
-            tool_name = "rebalance_blue_chips"
-            title = "Missing Flow: Blue Chip Rebalancing"
-            summary = f"Detected {c} blocked blue-chip management intents. Add `{tool_name}` action flow."
-        elif any(k in qn for k in {"tax loss", "harvest"}):
-            tool_name = "tax_loss_harvest"
-            title = "Missing Tool: Tax-Loss Harvest"
-            summary = f"Detected {c} blocked tax-harvest intents. Add `{tool_name}` tool."
-        elif any(k in qn for k in {"supply chain exposure", "supplier risk"}):
-            tool_name = "supply_chain_exposure_scan"
-            title = "Missing Tool: Supply Chain Exposure"
-            summary = f"Detected {c} blocked supply-chain exposure queries. Add `{tool_name}` tool."
-        if not title:
-            continue
-        out.append(
-            {
+    # Collect queries that hit gates repeatedly
+    frequent = [(qn, c) for qn, c in q_counts.most_common(30) if c >= int(min_count or 4)]
+    if not frequent or ask_ai is None:
+        return []
+
+    formatted = "\n".join(f"- \"{qn}\" (blocked {c} times)" for qn, c in frequent[:20])
+    prompt = (
+        "You are an AI product intelligence engine for an investment assistant app.\n"
+        "Analyze these blocked/gated user queries — these are things users tried to do but the system couldn't handle.\n\n"
+        f"Blocked queries:\n{formatted}\n\n"
+        "Identify what tools, features, or capabilities are missing.\n"
+        "Think about: what was the user trying to accomplish? What tool would solve it?\n\n"
+        "Return strict JSON only:\n"
+        '{"suggestions": [{"tool_name": "snake_case_name", "title": "Missing Tool: ...", '
+        '"summary": "What it should do and why users need it", "confidence": 0.0, "blocked_count": 0}]}\n\n'
+        "Rules:\n"
+        "- Only suggest for clear patterns (not one-off queries)\n"
+        "- tool_name: plausible function name (snake_case)\n"
+        "- confidence: 0.0-1.0 based on pattern clarity and user need\n"
+        "- blocked_count: total times this capability was requested\n"
+        "- Group similar queries into one suggestion\n"
+        "- Maximum 8 suggestions, ordered by importance"
+    )
+    try:
+        raw = str(ask_ai(prompt, "AI product intelligence. JSON only.", mode="fast", json_mode=True, temperature=0.0) or "").strip()
+        if not raw:
+            return []
+        parsed = json.loads(raw)
+        suggestions = parsed.get("suggestions") or []
+        out: list[dict[str, Any]] = []
+        for s in suggestions[:8]:
+            title = str(s.get("title") or "").strip()
+            summary = str(s.get("summary") or "").strip()
+            tool_name = str(s.get("tool_name") or "").strip()
+            conf = float(s.get("confidence") or 0.0)
+            bc = int(s.get("blocked_count") or 0)
+            if not title or not summary or conf < 0.5:
+                continue
+            out.append({
                 "category": "missing_tool",
-                "title": title,
-                "summary": summary,
-                "priority": min(99.0, 60.0 + (c * 2.5)),
-                "detail": {"count": c, "example_query": qn, "suggested_tool": tool_name},
-                "source": "intent_gap_analysis",
-            }
-        )
-    return out[:10]
+                "title": title[:200],
+                "summary": summary[:500],
+                "priority": min(99.0, 60.0 + (conf * 30.0)),
+                "detail": {"suggested_tool": tool_name, "blocked_count": bc, "confidence": conf},
+                "source": "llm_intent_gap_analysis",
+            })
+        return out
+    except Exception:
+        return []
 
 
-def _build_behavioral_friction_suggestions(rows: list[sqlite3.Row], min_repeats: int = 3) -> list[dict[str, Any]]:
+def _build_behavioral_friction_suggestions(rows: list[dict[str, Any]], min_repeats: int = 3) -> list[dict[str, Any]]:
+    """LLM-driven: analyze repeated friction events to identify UX improvement opportunities."""
     friction_events = {"needs_clarification", "action_confidence_gate", "risk_veto_review"}
     q_counts: Counter[str] = Counter()
     q_event_counts: dict[str, Counter[str]] = defaultdict(Counter)
@@ -124,83 +160,163 @@ def _build_behavioral_friction_suggestions(rows: list[sqlite3.Row], min_repeats:
         q_counts[qn] += 1
         q_event_counts[qn][ev] += 1
 
-    out: list[dict[str, Any]] = []
-    for qn, c in q_counts.most_common(60):
-        if c < int(min_repeats or 3):
-            continue
-        if "blue chip" in qn:
-            out.append(
-                {
-                    "category": "behavioral_friction",
-                    "title": "High Friction: Blue Chips Flow",
-                    "summary": f"`manage_blue_chips` style requests need ~{c} clarification/review turns. Build a dedicated widget.",
-                    "priority": min(98.0, 55.0 + (c * 4.0)),
-                    "detail": {"query": qn, "count": c, "events": dict(q_event_counts[qn]), "suggested_fix": "dedicated_blue_chip_widget"},
-                    "source": "friction_tracker",
-                }
-            )
-        elif any(k in qn for k in {"watchlist", "portfolio"}) and c >= 4:
-            out.append(
-                {
-                    "category": "behavioral_friction",
-                    "title": "High Friction: Repeated Portfolio/Watchlist Commands",
-                    "summary": f"Detected repeated command retries ({c}) for similar request. Improve disambiguation or add one-click action chip.",
-                    "priority": min(95.0, 50.0 + (c * 3.0)),
-                    "detail": {"query": qn, "count": c, "events": dict(q_event_counts[qn]), "suggested_fix": "intent_shortcuts_widget"},
-                    "source": "friction_tracker",
-                }
-            )
-    return out[:10]
+    frequent = [(qn, c, dict(q_event_counts[qn])) for qn, c in q_counts.most_common(30) if c >= int(min_repeats or 3)]
+    if not frequent or ask_ai is None:
+        return []
+
+    formatted = "\n".join(
+        f"- \"{qn}\" (hit friction {c} times — breakdown: {evts})"
+        for qn, c, evts in frequent[:20]
+    )
+    prompt = (
+        "You are an AI UX intelligence engine for an investment assistant app.\n"
+        "Analyze these repeated friction events — these are actions where users repeatedly hit gates, "
+        "clarification requests, or review steps.\n\n"
+        f"Friction events:\n{formatted}\n\n"
+        "Identify patterns where the UX is causing unnecessary friction and suggest improvements.\n"
+        "Think about: Why does this keep happening? What would eliminate the friction?\n\n"
+        "Return strict JSON only:\n"
+        '{"suggestions": [{"title": "High Friction: ...", '
+        '"summary": "What causes friction and the recommended fix", '
+        '"suggested_fix": "snake_case_fix_name", "confidence": 0.0, "affected_queries": 0}]}\n\n'
+        "Rules:\n"
+        "- Focus on patterns where users repeatedly hit the same wall\n"
+        "- Suggest concrete fixes: dedicated widget, shortcut, auto-complete, better defaults, etc.\n"
+        "- confidence: 0.0-1.0 based on pattern clarity\n"
+        "- affected_queries: total friction events for this pattern\n"
+        "- Group similar friction patterns together\n"
+        "- Maximum 8 suggestions, ordered by severity"
+    )
+    try:
+        raw = str(ask_ai(prompt, "AI UX intelligence. JSON only.", mode="fast", json_mode=True, temperature=0.0) or "").strip()
+        if not raw:
+            return []
+        parsed = json.loads(raw)
+        suggestions = parsed.get("suggestions") or []
+        out: list[dict[str, Any]] = []
+        for s in suggestions[:8]:
+            title = str(s.get("title") or "").strip()
+            summary = str(s.get("summary") or "").strip()
+            fix = str(s.get("suggested_fix") or "").strip()
+            conf = float(s.get("confidence") or 0.0)
+            aq = int(s.get("affected_queries") or 0)
+            if not title or not summary or conf < 0.5:
+                continue
+            out.append({
+                "category": "behavioral_friction",
+                "title": title[:200],
+                "summary": summary[:500],
+                "priority": min(98.0, 55.0 + (conf * 35.0)),
+                "detail": {"suggested_fix": fix, "affected_queries": aq, "confidence": conf},
+                "source": "llm_friction_tracker",
+            })
+        return out
+    except Exception:
+        return []
 
 
 def _build_portfolio_blindspot_suggestions() -> list[dict[str, Any]]:
+    """LLM-driven: reason over holdings + filing data to detect any portfolio blindspot."""
     holds = get_holdings(limit=1200)
+    if not holds:
+        return []
+
+    # Build portfolio summary for the LLM
     inds: Counter[str] = Counter()
+    tickers_by_ind: dict[str, list[str]] = defaultdict(list)
     total = 0.0
     for h in holds:
         ind = str(h.get("industry") or "Unknown").strip() or "Unknown"
+        tk = str(h.get("ticker") or "").strip()
         sh = float(h.get("shares") or 0.0)
         if sh <= 0:
             continue
         inds[ind] += sh
         total += sh
+        if tk:
+            tickers_by_ind[ind].append(tk)
     if total <= 0:
         return []
-    top_ind, top_sh = inds.most_common(1)[0]
-    conc_pct = (float(top_sh) / total) * 100.0
 
+    portfolio_lines = []
+    for ind, sh in inds.most_common(15):
+        pct = (sh / total) * 100.0
+        tks = ", ".join(tickers_by_ind.get(ind, [])[:8])
+        portfolio_lines.append(f"- {ind}: {pct:.1f}% ({tks})")
+    portfolio_summary = "\n".join(portfolio_lines)
+
+    # Get recent filing signals
     try:
-        rows = query_report_facts(query="", tickers=None, limit=100, official_only=True)
+        fact_rows = query_report_facts(query="", tickers=None, limit=100, official_only=True)
     except Exception:
-        rows = []
-    txt = " ".join(str((r or {}).get("fact_text") or "") for r in rows).lower()
-    supply_hits = sum(1 for k in ["supply chain", "supplier", "logistics", "shortage"] if k in txt)
-    reg_hits = sum(1 for k in ["regulatory", "antitrust", "compliance", "litigation"] if k in txt)
+        fact_rows = []
+    filing_excerpts = "\n".join(
+        f"- [{str((r or {}).get('ticker') or '?')}] {str((r or {}).get('fact_text') or '')[:200]}"
+        for r in fact_rows[:30]
+    ) or "(no recent filing data)"
 
-    out: list[dict[str, Any]] = []
-    if conc_pct >= 50.0 and supply_hits >= 2:
-        out.append(
-            {
+    if ask_ai is None:
+        return []
+
+    prompt = (
+        "You are an AI portfolio risk intelligence engine.\n"
+        "Analyze this portfolio composition and recent SEC filing signals to identify blindspots, "
+        "hidden risks, concentration dangers, cause-and-effect chains, and secondary effects the investor may be missing.\n\n"
+        f"Portfolio composition:\n{portfolio_summary}\n\n"
+        f"Recent SEC filing signals:\n{filing_excerpts}\n\n"
+        "Think deeply:\n"
+        "- Concentration risk: is there over-exposure to any sector/theme?\n"
+        "- Correlated risk: do positions move together in a downturn?\n"
+        "- Supply chain: are holdings exposed to the same supply chain?\n"
+        "- Regulatory: pending regulation that affects multiple holdings?\n"
+        "- Macro: interest rate, currency, or geopolitical exposure?\n"
+        "- Missing hedges: what risks are completely unhedged?\n"
+        "- Secondary effects: if X happens, what cascades through the portfolio?\n\n"
+        "Return strict JSON only:\n"
+        '{"suggestions": [{"title": "Blindspot: ...", '
+        '"summary": "Clear explanation of the risk with cause-effect reasoning", '
+        '"risk_type": "concentration|correlation|supply_chain|regulatory|macro|missing_hedge|secondary_effect", '
+        '"affected_tickers": ["TK1", "TK2"], "confidence": 0.0, "severity": "low|medium|high|critical"}]}\n\n'
+        "Rules:\n"
+        "- Be specific — name the actual stocks and industries affected\n"
+        "- Explain the cause-effect chain (if X then Y then Z)\n"
+        "- confidence: 0.0-1.0\n"
+        "- Maximum 8 suggestions, ordered by severity"
+    )
+    try:
+        raw = str(ask_ai(prompt, "Portfolio risk intelligence. JSON only.", mode="smart", json_mode=True, temperature=0.1) or "").strip()
+        if not raw:
+            return []
+        parsed = json.loads(raw)
+        suggestions = parsed.get("suggestions") or []
+        severity_map = {"critical": 95.0, "high": 80.0, "medium": 65.0, "low": 50.0}
+        out: list[dict[str, Any]] = []
+        for s in suggestions[:8]:
+            title = str(s.get("title") or "").strip()
+            summary = str(s.get("summary") or "").strip()
+            conf = float(s.get("confidence") or 0.0)
+            sev = str(s.get("severity") or "medium").strip().lower()
+            risk_type = str(s.get("risk_type") or "").strip()
+            tickers = s.get("affected_tickers") or []
+            if not title or not summary or conf < 0.4:
+                continue
+            base_pri = severity_map.get(sev, 65.0)
+            out.append({
                 "category": "portfolio_blindspot",
-                "title": "Blindspot: Concentration vs Supply Chain Risk",
-                "summary": f"Portfolio concentration is high in `{top_ind}` ({conc_pct:.1f}%). Recent filings show rising supply-chain signals. Add ontology node `SUPPLY_CHAIN_EXPOSURE`.",
-                "priority": min(99.0, 70.0 + ((conc_pct - 50.0) * 0.8)),
-                "detail": {"top_industry": top_ind, "concentration_pct": round(conc_pct, 2), "supply_chain_signal_hits": supply_hits},
-                "source": "portfolio_gap_analysis",
-            }
-        )
-    if conc_pct >= 55.0 and reg_hits >= 2:
-        out.append(
-            {
-                "category": "portfolio_blindspot",
-                "title": "Blindspot: Concentration vs Regulatory Risk",
-                "summary": f"High portfolio concentration in `{top_ind}` ({conc_pct:.1f}%) while regulatory pressure signals are increasing.",
-                "priority": min(98.0, 66.0 + ((conc_pct - 50.0) * 0.7)),
-                "detail": {"top_industry": top_ind, "concentration_pct": round(conc_pct, 2), "regulatory_signal_hits": reg_hits},
-                "source": "portfolio_gap_analysis",
-            }
-        )
-    return out[:8]
+                "title": title[:200],
+                "summary": summary[:600],
+                "priority": min(99.0, base_pri + (conf * 10.0)),
+                "detail": {
+                    "risk_type": risk_type,
+                    "affected_tickers": tickers[:10] if isinstance(tickers, list) else [],
+                    "confidence": conf,
+                    "severity": sev,
+                },
+                "source": "llm_portfolio_gap_analysis",
+            })
+        return out
+    except Exception:
+        return []
 
 
 def run_ai_meta_suggestions(days: int = 30) -> dict[str, Any]:

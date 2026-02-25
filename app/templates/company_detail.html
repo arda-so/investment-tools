@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ detail.ticker }} | Company File{% endblock %}
+{% block global_omnibox %}{% endblock %}
 {% block head_extra %}
 {% from "components/omnibox_macros.html" import omnibox_styles %}
 <style>
@@ -27,6 +28,21 @@
     padding:14px;
     margin-bottom:12px;
   }
+  .company-header {
+    display:grid;
+    grid-template-columns:auto 1fr;
+    gap:12px;
+    align-items:center;
+    margin-bottom:8px;
+  }
+  .canvas-sec {
+    border:none;
+    background:transparent;
+    box-shadow:none;
+    border-radius:0;
+    padding:0;
+    margin-bottom:32px;
+  }
   .hero { display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:center; }
   .logo-box {
     width:58px; height:58px; border-radius:14px;
@@ -38,7 +54,7 @@
   .co-name { margin:0; font-size:34px; line-height:1.05; font-family:Georgia,"Times New Roman",serif; color:#0f172a; }
   .co-meta { margin-top:5px; color:#64748b; font-size:13px; }
   .deal-grid { display:grid; grid-template-columns:1fr; gap:16px; align-items:start; }
-  @media (min-width:1100px){ .deal-grid { grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); } }
+  @media (min-width:900px){ .deal-grid { grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); gap:24px; } }
   .sec-head { margin:0 0 10px 0; font-size:15px; letter-spacing:.02em; text-transform:uppercase; color:#0f172a; }
 
   .moat-cloud { display:flex; gap:8px; flex-wrap:wrap; }
@@ -93,11 +109,13 @@
 
   .conv-grid { display:grid; grid-template-columns:1fr; gap:10px; }
   @media (min-width:900px){ .conv-grid { grid-template-columns:1fr 1fr; } }
-  .conv-box { border:1px solid #e2e8f0; border-radius:12px; background:#fff; padding:10px; }
-  .conv-box.bull { border-top:4px solid #10b981; }
-  .conv-box.bear { border-top:4px solid #ef4444; }
+  .conv-box { border:1px solid #eef2f7; border-radius:12px; background:#f8fafc; padding:10px; }
+  .conv-box.bull { border-top:none; }
+  .conv-box.bear { border-top:none; }
   .conv-box h4 { margin:0 0 8px 0; font-size:13px; }
-  .conv-box textarea { min-height:120px; background:#fbfdff; }
+  .conv-box textarea { min-height:120px; border:1px solid #e8eef5; }
+  .conv-box.bull textarea { background:#f0fdf4; }
+  .conv-box.bear textarea { background:#fef2f2; }
 
   .val-grid { display:grid; grid-template-columns:1fr; gap:8px; margin-bottom:8px; }
   .val-grid .buy input { border-color:#86efac; background:#f0fdf4; }
@@ -113,12 +131,29 @@
   .g-status.exp { color:#dc2626; }
   .g-status.neu { color:#0f172a; }
   .q-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
-  .q-box { border:1px solid #e2e8f0; border-radius:10px; background:#f8fafc; padding:8px; }
+  .q-box { border:1px solid #eef2f7; border-radius:10px; background:#f8fafc; padding:8px; }
   .q-k { color:#64748b; font-size:10px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }
   .q-v input { font-size:15px; font-weight:800; background:#fff; }
+  .mini-table { border-collapse:collapse; width:100%; }
+  .mini-table th, .mini-table td { border-bottom:1px solid #e2e8f0; padding:6px 5px; text-align:left; white-space:nowrap; }
+  .mini-table th { color:#64748b; font-size:10px; text-transform:uppercase; letter-spacing:.04em; }
+  .spark-col { width:88px; text-align:right; }
+  .sparkline { width:82px; height:20px; display:inline-block; }
+  .sparkline path { fill:none; stroke:#2563eb; stroke-width:1.8; vector-effect:non-scaling-stroke; }
+  .sparkline.negative path { stroke:#dc2626; }
+  .sparkline.neutral path { stroke:#64748b; }
 
   {{ omnibox_styles() }}
-  .timeline-wrap { margin-top:0; border:1px solid #dbe4ee; border-radius:10px; background:#fff; padding:10px; }
+  .timeline-col {
+    background:#f9fafb;
+    border:none;
+    border-radius:0;
+    border-left:1px solid #e5eaf1;
+    padding:18px 18px 22px 18px;
+    min-height:calc(100vh - 120px);
+  }
+  .timeline-surface { padding:0; margin:0; border:none; background:transparent; box-shadow:none; }
+  .timeline-wrap { margin-top:0; border:none; border-radius:0; background:transparent; padding:0; }
   .timeline-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
   .timeline-list { display:grid; gap:8px; }
   .timeline-item {
@@ -126,7 +161,7 @@
     display:grid; grid-template-columns:auto 1fr; gap:8px; align-items:start;
   }
   .timeline-icon { font-size:14px; line-height:1; margin-top:2px; }
-  .timeline-title { font-size:12px; font-weight:800; color:#0f172a; }
+  .timeline-title { font-size:12px; font-weight:600; color:#0f172a; }
   .timeline-meta { font-size:11px; color:#64748b; margin-top:2px; }
   .timeline-text { font-size:12px; color:#334155; margin-top:4px; }
   .timeline-summary {
@@ -134,18 +169,18 @@
     max-width:100%;
   }
   .timeline-item.ai { background:#f8fafc; border-color:#dbe4ee; }
+
+  @media (min-width: 1100px) {
+    .timeline-col {
+      margin-right:-24px;
+      padding-right:24px;
+      margin-bottom:-24px;
+      padding-bottom:28px;
+    }
+  }
 </style>
 {% endblock %}
 {% block body %}
-<div class="deal-nav card">
-  <div class="topbar">
-    <a class="btn" href="/dashboard">Home</a>
-    <a class="btn" href="/company_file">Back to Company Files</a>
-    <a class="btn" href="/my_universe">Portfolio</a>
-    <a class="btn" href="/organizer">Organizer</a>
-  </div>
-</div>
-
 <section class="workspace-shell">
   <main id="companyCenterPane" class="center-pane">
     {% include "components/company_detail_body.html" %}

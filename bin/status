@@ -1,0 +1,82 @@
+#!/bin/bash
+set -euo pipefail
+ROOT="/Users/solmaz/Investment_Tools"
+DASHBOARD="$ROOT/DASHBOARD.md"
+cd "$ROOT"
+
+render() {
+  printf "Investment Tools Dashboard\n"
+  printf "Generated: %s\n" "$(date)"
+  printf "========================\n\n"
+
+  # DB status
+  if [ -f data/research.db ]; then
+    db_size=$(du -h data/research.db | awk '{print $1}')
+    echo "DB: data/research.db ($db_size)"
+  else
+    echo "DB: missing (data/research.db)"
+  fi
+
+  # Filings counts
+  if [ -d filings ]; then
+    filings_count=$(find filings -type f 2>/dev/null | wc -l | tr -d ' ')
+    echo "Historical filings: $filings_count"
+  else
+    echo "Historical filings: missing (filings/)"
+  fi
+
+  if [ -d filing_docs ]; then
+    weekly_count=$(find filing_docs -type f 2>/dev/null | wc -l | tr -d ' ')
+    echo "Recent filings: $weekly_count"
+  else
+    echo "Recent filings: missing (filing_docs/)"
+  fi
+
+  echo ""
+
+  # Source policy mode
+  if [ -f research_agent.py ]; then
+    mode_line=$(python3 research_agent.py mode 2>/dev/null | head -n 1 || true)
+    if [ -n "$mode_line" ]; then
+      echo "$mode_line"
+    fi
+  fi
+
+  # Latest reports
+  if [ -d reports ]; then
+    echo "Latest reports:"
+    {
+      ls -t reports/terminal_daily_brief_*.md 2>/dev/null || true
+      ls -t reports/terminal_appendix_*.md 2>/dev/null || true
+      ls -t reports/terminal_weekly_outlook_*.md 2>/dev/null || true
+      ls -t reports/terminal_monthly_ic_memo_*.md 2>/dev/null || true
+      ls -t reports/quarterly_report_*.md 2>/dev/null || true
+    } | head -n 8 | sed 's#^#  - #' | sed 's#reports/##'
+  else
+    echo "Reports: missing (reports/)"
+  fi
+
+  echo ""
+
+  # Recent logs
+  if [ -d logs ]; then
+    echo "Recent logs:"
+    ls -t logs 2>/dev/null | head -n 5 | sed 's/^/  - /'
+  else
+    echo "Logs: missing (logs/)"
+  fi
+
+  echo ""
+
+  # LaunchAgents status (best-effort)
+  if command -v launchctl >/dev/null 2>&1; then
+    echo "LaunchAgents:"
+    launchctl list | grep -E "com\.solmaz\.(research|earnings|signal|morning)" | awk '{print "  - " $3}' || true
+  fi
+}
+
+# Print to terminal
+render
+
+# Write dashboard file
+render > "$DASHBOARD"

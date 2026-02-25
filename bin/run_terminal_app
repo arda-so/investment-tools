@@ -1,0 +1,70 @@
+#!/bin/bash
+set -euo pipefail
+ROOT="/Users/solmaz/Investment_Tools"
+cd "$ROOT"
+
+# Load project env vars (e.g., OPENAI_API_KEY, AI_PROVIDER) if present.
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ROOT/.env"
+  set +a
+fi
+
+# Battery-friendly runtime defaults (overridden by .env if set).
+: "${ONYX_FAST_MODE:=1}"
+: "${ONYX_PREWARM_ON_START:=0}"
+: "${ONYX_PREWARM_TICKERS:=4}"
+: "${ONYX_FAST_FEED_ON:=1}"
+: "${ONYX_FAST_FEED_INTERVAL:=1800}"
+: "${ONYX_FAST_FEED_AI_TICKERS:=1}"
+: "${ONYX_INTEL_FEED_INTERVAL:=43200}"
+: "${ONYX_INTEL24_INTERVAL:=7200}"
+: "${ONYX_INTEL24_ON:=0}"
+: "${ONYX_SEC_RISK_ON:=0}"
+: "${ONYX_UNIFIED_SCHED_ON:=1}"
+: "${OLLAMA_NUM_PARALLEL:=1}"
+: "${OLLAMA_MAX_LOADED_MODELS:=1}"
+: "${OLLAMA_KEEP_ALIVE:=5m}"
+export ONYX_FAST_MODE ONYX_PREWARM_ON_START ONYX_PREWARM_TICKERS
+export ONYX_FAST_FEED_ON ONYX_FAST_FEED_INTERVAL ONYX_FAST_FEED_AI_TICKERS ONYX_INTEL_FEED_INTERVAL ONYX_INTEL24_INTERVAL ONYX_INTEL24_ON ONYX_SEC_RISK_ON ONYX_UNIFIED_SCHED_ON
+export OLLAMA_NUM_PARALLEL OLLAMA_MAX_LOADED_MODELS OLLAMA_KEEP_ALIVE
+
+HOST="${1:-127.0.0.1}"
+PORT="${2:-8765}"
+URL="http://${HOST}:${PORT}"
+
+if lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "Investor Terminal App is already running on ${URL}"
+  if command -v open >/dev/null 2>&1; then
+    open "$URL" >/dev/null 2>&1 || true
+  fi
+  exit 0
+fi
+
+echo "Starting Investor Terminal App on ${URL}"
+python3 tools/terminal_app.py --host "$HOST" --port "$PORT" &
+APP_PID=$!
+sleep 1
+
+if ! kill -0 "$APP_PID" 2>/dev/null; then
+  echo "Terminal app failed to start. See error output above."
+  wait "$APP_PID"
+  exit $?
+fi
+
+if command -v open >/dev/null 2>&1; then
+  if open "$URL" >/dev/null 2>&1; then
+    echo "Opened in browser: ${URL}"
+  else
+    echo "Could not auto-open browser. Open this URL manually: ${URL}"
+  fi
+else
+  echo "Open this URL in your browser: ${URL}"
+fi
+
+echo "Terminal Web App is running. Keep this terminal open."
+echo "Press Ctrl+C to stop and return."
+
+trap 'kill "$APP_PID" >/dev/null 2>&1 || true; wait "$APP_PID" 2>/dev/null || true; exit 0' INT TERM
+wait "$APP_PID"

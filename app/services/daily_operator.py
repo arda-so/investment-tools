@@ -5,11 +5,12 @@ import hashlib
 import json
 import re
 import sqlite3
-from pathlib import Path
 from typing import Any
 
-from app.core.config import CORE_DB_PATH, ROOT
-from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
+from app.core.config import ROOT
+from app.core.db import core_conn as _conn, sqlite_retry
+from app.core.date import parse_datetime_flexible
+from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.postgres_core_service import (
     list_investor_style_memory_pg,
     list_watchlist_thesis_pg,
@@ -18,6 +19,7 @@ from app.services.postgres_core_service import (
     upsert_investor_style_memory_pg,
     upsert_watchlist_thesis_pg,
 )
+from app.services.watchlist_service import read_watchlist_tickers
 from tools.llm_engine import ask_ai
 
 
@@ -57,17 +59,6 @@ GOOD: 'I see you just added Progressive (PGR) to the watchlist, but we don't own
 BAD: 'You have added a Financials sector asset to your watchlist. Please input your thesis for this sector.'
 
 If their profile is perfectly airtight with no blind spots or missing context, return the exact word 'NONE'."""
-
-
-def _conn() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
-def _safe_ticker(raw: str) -> str:
-    s = re.sub(r"[^A-Z0-9.\-]", "", str(raw or "").strip().upper())
-    if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,11}", s):
-        return s
-    return ""
 
 
 def ensure_daily_operator_schema() -> None:
@@ -150,24 +141,6 @@ def _read_portfolio_csv() -> list[dict[str, Any]]:
     return out
 
 
-def _read_watchlist_file() -> list[str]:
-    p = ROOT / "data" / "my_watchlist.txt"
-    out: list[str] = []
-    if not p.exists():
-        return out
-    try:
-        for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = str(ln or "").strip()
-            if not s or s.startswith("#"):
-                continue
-            tk = _safe_ticker(s.split(",")[0].strip())
-            if tk and tk not in out:
-                out.append(tk)
-    except Exception:
-        return []
-    return out
-
-
 def _six_month_perf_vs_benchmark(portfolio_rows: list[dict[str, Any]], benchmark: str = "SPY") -> str:
     try:
         import yfinance as yf  # type: ignore
@@ -218,7 +191,7 @@ def _six_month_perf_vs_benchmark(portfolio_rows: list[dict[str, Any]], benchmark
 def _build_context_payload() -> dict[str, Any]:
     ensure_daily_operator_schema()
     portfolio_rows = _read_portfolio_csv()
-    watchlist_file = _read_watchlist_file()
+    watchlist_file = read_watchlist_tickers()
     if pg_enabled():
         try:
             wt_rows = list_watchlist_thesis_pg(limit=300)
@@ -253,10 +226,10 @@ def _build_context_payload() -> dict[str, Any]:
                     )
             days_since_trade = "unknown"
             if tx_max:
-                try:
-                    t0 = dt.datetime.fromisoformat(str(tx_max).replace("Z", ""))
+                t0 = parse_datetime_flexible(str(tx_max))
+                if t0 is not None:
                     days_since_trade = int(max(0.0, (dt.datetime.now() - t0).total_seconds() / 86400.0))
-                except Exception:
+                else:
                     days_since_trade = "unknown"
             watchlist_rows = []
             for r in wt_rows:
@@ -359,10 +332,10 @@ def _build_context_payload() -> dict[str, Any]:
         ).fetchall()
         days_since_trade = None
         if tx and str(tx["created_at"] or "").strip():
-            try:
-                t0 = dt.datetime.fromisoformat(str(tx["created_at"]).replace("Z", ""))
+            t0 = parse_datetime_flexible(str(tx["created_at"]))
+            if t0 is not None:
                 days_since_trade = int(max(0.0, (dt.datetime.now() - t0).total_seconds() / 86400.0))
-            except Exception:
+            else:
                 days_since_trade = None
         tx_recent = [
             {

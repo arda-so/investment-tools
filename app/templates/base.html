@@ -23,16 +23,187 @@
       --glass-shadow:0 20px 56px rgba(15,23,42,.24);
       --glass-opacity:.94;
     }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:"Avenir Next","Helvetica Neue",sans-serif; }
-    .wrap {
+    body.theme-dark{
+      --bg:#0f172a;
+      --panel:#111827;
+      --panel2:#0b1220;
+      --border:#1f2937;
+      --border2:#334155;
+      --text:#e2e8f0;
+      --muted:#94a3b8;
+    }
+    html, body {
+      margin:0;
+      padding:0;
+      height:100%;
+    }
+    body { background:var(--bg); color:var(--text); font-family:"Avenir Next","Helvetica Neue",sans-serif; }
+    .global-shell{
+      display:grid;
+      grid-template-columns:1fr;
+      grid-template-rows:auto minmax(0,1fr);
+      height:100vh;
+      min-height:100vh;
+      margin:0;
+      padding:0;
+    }
+    .global-shell.nav-collapsed{ grid-template-columns:1fr; }
+    .global-nav{
+      background:#1e293b;
+      color:#dbe7f5;
+      border-bottom:1px solid #2b3a52;
+      padding:8px 12px;
+      box-sizing:border-box;
+      position:sticky;
+      top:0;
+      z-index:2000;
+      height:auto;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    .global-brand{
+      margin:0 10px 0 0;
+      font-size:13px;
+      font-weight:800;
+      letter-spacing:.02em;
+      color:#f1f5f9;
+    }
+    .global-link{
+      display:block;
+      text-decoration:none;
+      color:#dbe7f5;
+      padding:6px 10px;
+      margin:0;
+      border-left:none;
+      border-bottom:2px solid transparent;
+      border-radius:8px;
+      font-size:12px;
+      font-weight:700;
+    }
+    .global-link:hover{ background:rgba(255,255,255,.08); border-bottom-color:#8fa3bd; }
+    .global-link.active{ background:rgba(255,255,255,.14); border-bottom-color:#ffffff; color:#fff; }
+    .global-link-label{ display:inline; }
+    .global-search-wrap{
+      margin-left:auto;
+      position:relative;
+      min-width:280px;
+      max-width:520px;
+      flex:1 1 320px;
+    }
+    .global-search-input{
       width:100%;
-      max-width:1920px;
-      margin:0 auto;
-      padding:24px;
+      height:36px;
+      border:1px solid #41556f;
+      border-radius:10px;
+      background:#0f1b2d;
+      color:#e5eefb;
+      padding:0 12px;
+      font-size:13px;
       box-sizing:border-box;
     }
+    .global-search-input::placeholder{ color:#a9bbd0; }
+    .global-search-input:focus{
+      outline:none;
+      border-color:#7da1c9;
+      box-shadow:0 0 0 2px rgba(125,161,201,.22);
+    }
+    .global-search-results{
+      display:none;
+      position:absolute;
+      left:0;
+      right:0;
+      top:40px;
+      z-index:2600;
+      background:#fff;
+      border:1px solid #d7e1ec;
+      border-radius:12px;
+      box-shadow:0 14px 30px rgba(15,23,42,.16);
+      max-height:360px;
+      overflow:auto;
+    }
+    .global-search-row{
+      display:block;
+      padding:10px 12px;
+      border-bottom:1px solid #eef3f8;
+      text-decoration:none;
+      color:#1f2f46;
+    }
+    .global-search-row:last-child{ border-bottom:none; }
+    .global-search-row:hover{ background:#f8fbff; }
+    .global-search-title{ font-size:13px; font-weight:700; }
+    .global-search-sub{ font-size:11px; color:#5d7288; margin-top:2px; }
+    .global-search-kind{
+      display:inline-block;
+      margin-top:4px;
+      font-size:10px;
+      font-weight:700;
+      color:#47627f;
+      background:#eef5ff;
+      border:1px solid #d4e3f4;
+      border-radius:999px;
+      padding:1px 7px;
+    }
+    .global-shell.nav-collapsed .global-link-label{ display:inline; }
+    .global-shell.nav-collapsed .global-link{ border-bottom-color:transparent; }
+    .global-shell.nav-collapsed .global-brand{ margin-right:10px; }
+    .global-main{
+      min-width:0;
+      width:100%;
+      background:#fff;
+      height:100%;
+      overflow:auto;
+      margin:0;
+      padding:0;
+    }
+    .global-omnibox-wrap{
+      margin:0 0 4px 0;
+      border:1px solid #dbe4ee;
+      border-radius:12px;
+      background:#fff;
+      padding:6px 8px;
+      box-shadow:0 2px 8px rgba(20,42,66,.04);
+    }
+    .global-omnibox{
+      width:100%;
+      height:44px;
+      border:1px solid #cfdceb;
+      border-radius:999px;
+      padding:0 14px;
+      font-size:14px;
+      font-weight:600;
+      color:#1f2f46;
+      background:#f8fbff;
+      box-sizing:border-box;
+    }
+    .global-omnibox:focus{
+      outline:none;
+      border-color:#86a6ca;
+      box-shadow:0 0 0 3px rgba(134,166,202,.16);
+      background:#fff;
+    }
+    .wrap {
+      width:100%;
+      max-width:none;
+      margin:0;
+      padding:0 20px 12px;
+      box-sizing:border-box;
+      padding-top:0 !important;
+      margin-top:0 !important;
+    }
     @media (max-width:900px) {
-      .wrap { padding:14px; }
+      .global-shell{ grid-template-columns:1fr; grid-template-rows:auto minmax(0,1fr); }
+      .global-shell.nav-collapsed{ grid-template-columns:1fr; }
+      .global-nav{
+        position:sticky;
+        top:0;
+        height:auto;
+        border-right:none;
+        border-bottom:1px solid #2b3a52;
+        padding:8px 10px;
+      }
+      .wrap { padding:0 10px 10px; }
     }
     .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px; }
     .topbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
@@ -401,8 +572,36 @@
   {% block head_extra %}{% endblock %}
 </head>
 <body>
-  <div class="wrap">
-    {% block body %}{% endblock %}
+  <div class="global-shell">
+    <aside class="global-nav">
+      <h3 class="global-brand">Investor OS v2</h3>
+      <a class="global-link" href="/dashboard" data-nav="dashboard"><span class="global-link-label">Dashboard</span></a>
+      <a class="global-link" href="/my_universe" data-nav="universe"><span class="global-link-label">Portfolio / Universe</span></a>
+      <a class="global-link" href="/company_file" data-nav="company"><span class="global-link-label">Company Search</span></a>
+      <a class="global-link" href="/organizer" data-nav="organizer"><span class="global-link-label">Organizer</span></a>
+      <a class="global-link" href="/observability" data-nav="settings"><span class="global-link-label">Settings</span></a>
+      <div class="global-search-wrap">
+        <input id="globalSearchInput" class="global-search-input" type="text" autocomplete="off" placeholder="Search app, companies, tasks, notes, reports...">
+        <div id="globalSearchResults" class="global-search-results"></div>
+      </div>
+    </aside>
+    <main class="global-main">
+      <div class="wrap">
+        {% block global_omnibox %}
+          <form method="post" action="/organizer/omnibox-add" class="global-omnibox-wrap">
+            <input
+              id="globalOmniboxInput"
+              class="global-omnibox"
+              type="text"
+              name="entry"
+              autocomplete="off"
+              placeholder="Type a thought, or add a task... (e.g., 'Review $AAPL margins')"
+            >
+          </form>
+        {% endblock %}
+        {% block body %}{% endblock %}
+      </div>
+    </main>
   </div>
   <button id="aiOpenBtn" class="ai-open" type="button">AI</button>
   <div id="aiWorkerBadge" class="ai-worker-badge" title="AI worker health">
@@ -537,6 +736,98 @@
       var phase2ReducerId='';
       var phase2PollTimer=null;
       var phase2RenderedReducerId='';
+      var shell=document.querySelector('.global-shell');
+      var globalSearchInput=document.getElementById('globalSearchInput');
+      var globalSearchResults=document.getElementById('globalSearchResults');
+      var globalSearchTimer=null;
+      var globalSearchItems=[];
+      var globalSearchIndex=-1;
+      var sidebarCollapsedKey='globalSidebarCollapsedV2';
+      function isEditable(el){
+        if(!el){ return false; }
+        var tag = String(el.tagName || '').toLowerCase();
+        if(tag === 'input' || tag === 'textarea' || tag === 'select'){ return true; }
+        return !!el.isContentEditable;
+      }
+      function setSidebarCollapsed(on){
+        if(!shell){ return; }
+        shell.classList.toggle('nav-collapsed', !!on);
+        try{ localStorage.setItem(sidebarCollapsedKey, on ? '1' : '0'); }catch(_e){}
+      }
+      function toggleSidebarCollapsed(force){
+        if(!shell){ return; }
+        var on = (typeof force === 'boolean') ? force : !shell.classList.contains('nav-collapsed');
+        setSidebarCollapsed(on);
+      }
+      function applySidebarPref(){
+        if(!shell){ return; }
+        try{
+          var raw = localStorage.getItem(sidebarCollapsedKey) || '0';
+          setSidebarCollapsed(raw === '1');
+        }catch(_e){}
+      }
+      function toggleTheme(forceDark){
+        var dark = (typeof forceDark === 'boolean') ? forceDark : !document.body.classList.contains('theme-dark');
+        document.body.classList.toggle('theme-dark', !!dark);
+        try{ localStorage.setItem('themeDarkV1', dark ? '1' : '0'); }catch(_e){}
+      }
+      function applyThemePref(){
+        try{
+          var raw = localStorage.getItem('themeDarkV1') || '0';
+          document.body.classList.toggle('theme-dark', raw === '1');
+        }catch(_e){}
+      }
+      function tryCommandPalette(q){
+        var s = String(q || '').trim();
+        if(!s){ return false; }
+        var low = s.toLowerCase();
+        function nav(url, label){
+          showToast('Opening ' + label + '...');
+          setTimeout(function(){ window.location.assign(url); }, 80);
+          return true;
+        }
+        if(low === 'dashboard' || low === 'home'){ return nav('/dashboard', 'Dashboard'); }
+        if(low === 'portfolio' || low === 'universe' || low === 'portfolio / universe'){ return nav('/my_universe', 'Portfolio / Universe'); }
+        if(low === 'organizer'){ return nav('/organizer', 'Organizer'); }
+        if(low === 'settings' || low === 'observability'){ return nav('/observability', 'Settings'); }
+        if(low === 'company search' || low === 'company files' || low === 'companies'){ return nav('/company_file', 'Company Search'); }
+        if(low === 'reports'){ return nav('/reports', 'Reports'); }
+        if(low === 'dark mode' || low === 'theme dark'){
+          toggleTheme(true);
+          showToast('Dark mode enabled.');
+          return true;
+        }
+        if(low === 'light mode' || low === 'theme light'){
+          toggleTheme(false);
+          showToast('Light mode enabled.');
+          return true;
+        }
+        if(low === 'sidebar hide' || low === 'collapse sidebar'){
+          setSidebarCollapsed(true);
+          showToast('Sidebar collapsed.');
+          return true;
+        }
+        if(low === 'sidebar show' || low === 'expand sidebar'){
+          setSidebarCollapsed(false);
+          showToast('Sidebar expanded.');
+          return true;
+        }
+        if(low === 'logout' || low === 'sign out'){
+          showToast('Logout route is not configured yet.');
+          return true;
+        }
+        var m = low.match(/^(?:open\s+company|company|ticker)\s+([a-z]{1,5})$/i);
+        if(m){
+          var tk = String(m[1] || '').toUpperCase();
+          return nav('/company_file?t=' + encodeURIComponent(tk), tk);
+        }
+        var mDollar = String(s || '').trim().match(/^\$([A-Za-z]{1,5})$/);
+        if(mDollar){
+          var tk2 = String(mDollar[1] || '').toUpperCase();
+          return nav('/company_file?t=' + encodeURIComponent(tk2), tk2);
+        }
+        return false;
+      }
       function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
       function defaultGeom(){
         var w = Math.min(800, window.innerWidth - 28);
@@ -774,6 +1065,55 @@
         }
         toastWrap.appendChild(t);
         setTimeout(function(){ if(t.parentNode){ t.parentNode.removeChild(t); } }, Number((opts && opts.ms) || 2600));
+      }
+      function clearGlobalSearch(){
+        globalSearchItems = [];
+        globalSearchIndex = -1;
+        if(globalSearchResults){
+          globalSearchResults.innerHTML = '';
+          globalSearchResults.style.display = 'none';
+        }
+      }
+      function renderGlobalSearch(items){
+        globalSearchItems = Array.isArray(items) ? items : [];
+        globalSearchIndex = -1;
+        if(!globalSearchResults){ return; }
+        if(!globalSearchItems.length){
+          clearGlobalSearch();
+          return;
+        }
+        globalSearchResults.innerHTML = globalSearchItems.map(function(it, idx){
+          var title = esc(String(it.title || '-'));
+          var sub = esc(String(it.subtitle || ''));
+          var kind = esc(String(it.kind || 'result'));
+          var url = esc(String(it.url || '#'));
+          return '<a href="' + url + '" class="global-search-row" data-gs-index="' + idx + '">' +
+            '<div class="global-search-title">' + title + '</div>' +
+            (sub ? '<div class="global-search-sub">' + sub + '</div>' : '') +
+            '<span class="global-search-kind">' + kind + '</span>' +
+          '</a>';
+        }).join('');
+        globalSearchResults.style.display = 'block';
+      }
+      function highlightGlobalSearch(){
+        if(!globalSearchResults){ return; }
+        globalSearchResults.querySelectorAll('.global-search-row').forEach(function(el, idx){
+          el.style.background = (idx === globalSearchIndex) ? '#eef6ff' : '';
+        });
+      }
+      async function runGlobalSearch(q){
+        var query = String(q || '').trim();
+        if(query.length < 2){
+          clearGlobalSearch();
+          return;
+        }
+        try{
+          var res = await fetch('/api/global-search?q=' + encodeURIComponent(query) + '&limit=12', {method:'GET'});
+          var data = await res.json();
+          renderGlobalSearch((data && data.results) || []);
+        }catch(_e){
+          clearGlobalSearch();
+        }
       }
       function classifyKind(m){
         var it = String((m && m.intent) || '').toLowerCase();
@@ -1498,14 +1838,34 @@
         }
       }
       document.addEventListener('keydown', function(e){
-        if((e.metaKey||e.ctrlKey) && String(e.key||'').toLowerCase()==='k'){ e.preventDefault(); openCmdk(); }
+        var key = String(e.key || '');
+        var lowKey = key.toLowerCase();
+        if((e.metaKey||e.ctrlKey) && lowKey==='k'){ e.preventDefault(); openCmdk(); return; }
+        if(!e.metaKey && !e.ctrlKey && !e.altKey && lowKey==='c' && !isEditable(document.activeElement)){
+          var omni = document.getElementById('globalOmniboxInput');
+          if(omni){ e.preventDefault(); omni.focus(); }
+          return;
+        }
+        if(!e.metaKey && !e.ctrlKey && !e.altKey && key==='[' && !isEditable(document.activeElement)){
+          e.preventDefault();
+          toggleSidebarCollapsed(true);
+          return;
+        }
+        if(!e.metaKey && !e.ctrlKey && !e.altKey && key===']' && !isEditable(document.activeElement)){
+          e.preventDefault();
+          toggleSidebarCollapsed(false);
+          return;
+        }
         if(ov && ov.style.display==='block' && e.key==='Enter'){
           if(document.activeElement !== input){
             e.preventDefault();
             form && form.requestSubmit();
           }
         }
-        if(e.key==='Escape'){ closeCmdk(); }
+        if(e.key==='Escape'){
+          if(ov && ov.style.display==='block'){ closeCmdk(); }
+          else { window.location.assign('/dashboard'); }
+        }
       });
       if(openBtn){ openBtn.addEventListener('click', openCmdk); }
       if(navBtn){ navBtn.addEventListener('click', openCmdk); }
@@ -1630,6 +1990,11 @@
         form.addEventListener('submit', async function(e){
           e.preventDefault();
           var q = (input && input.value ? input.value : '').trim();
+          if(tryCommandPalette(q)){
+            if(input){ input.value = ''; }
+            closeCmdk();
+            return;
+          }
           var hasImage = !!pendingImageDataUrl;
           if(!q && !hasImage){ if(input){ input.focus(); } return; }
           stopSpeaking();
@@ -1652,7 +2017,7 @@
                 var rn = String(sp.get('name') || '').trim();
                 if (rn) { ctx.current_report_name = rn; }
               }
-              if (p.indexOf('/organizer/file/notes') === 0) {
+              if (p.indexOf('/organizer') === 0) {
                 try {
                   var noteRows = document.querySelectorAll('table tr');
                   var visible = [];
@@ -1868,6 +2233,53 @@
       if(phase2RunBtn){
         phase2RunBtn.addEventListener('click', function(){ runPhase2MapReduce(); });
       }
+      if(globalSearchInput){
+        globalSearchInput.addEventListener('input', function(){
+          if(globalSearchTimer){ clearTimeout(globalSearchTimer); globalSearchTimer = null; }
+          var q = String(globalSearchInput.value || '');
+          globalSearchTimer = setTimeout(function(){ runGlobalSearch(q); }, 120);
+        });
+        globalSearchInput.addEventListener('keydown', function(e){
+          if(!globalSearchItems.length){
+            if(e.key === 'Escape'){ clearGlobalSearch(); globalSearchInput.blur(); }
+            return;
+          }
+          if(e.key === 'ArrowDown'){
+            e.preventDefault();
+            globalSearchIndex = Math.min(globalSearchItems.length - 1, globalSearchIndex + 1);
+            highlightGlobalSearch();
+            return;
+          }
+          if(e.key === 'ArrowUp'){
+            e.preventDefault();
+            globalSearchIndex = Math.max(0, globalSearchIndex - 1);
+            highlightGlobalSearch();
+            return;
+          }
+          if(e.key === 'Enter'){
+            if(globalSearchIndex >= 0 && globalSearchIndex < globalSearchItems.length){
+              e.preventDefault();
+              var url = String((globalSearchItems[globalSearchIndex] || {}).url || '');
+              if(url){ window.location.assign(url); }
+              return;
+            }
+          }
+          if(e.key === 'Escape'){
+            clearGlobalSearch();
+            globalSearchInput.blur();
+          }
+        });
+        document.addEventListener('click', function(ev){
+          var target = ev.target;
+          if(!target){ return; }
+          if(globalSearchInput.contains(target) || (globalSearchResults && globalSearchResults.contains(target))){
+            return;
+          }
+          clearGlobalSearch();
+        });
+      }
+      applyThemePref();
+      applySidebarPref();
       loadState();
       loadVoicePrefs();
       initSpeechRecognition();
@@ -1889,6 +2301,17 @@
         if(phase2ReducerId){ phase2PollLoop(700); }
       });
       if(ghost){ ghost.className='ai-ghost show idle'; }
+      try{
+        var p = String(window.location.pathname || '');
+        var key = 'dashboard';
+        if(p.indexOf('/my_universe') === 0){ key = 'universe'; }
+        else if(p.indexOf('/company_file') === 0){ key = 'company'; }
+        else if(p.indexOf('/organizer') === 0){ key = 'organizer'; }
+        else if(p.indexOf('/observability') === 0){ key = 'settings'; }
+        document.querySelectorAll('.global-link').forEach(function(el){
+          el.classList.toggle('active', String(el.getAttribute('data-nav') || '') === key);
+        });
+      }catch(_e){}
     })();
   </script>
 </body>

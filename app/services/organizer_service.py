@@ -4,19 +4,25 @@ import datetime as dt
 import re
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 import csv
 
-from app.core.config import CORE_DB_PATH
 from app.core.config import ROOT
-from app.core.sqlite_hardening import connect_sqlite
+from app.core.db import core_conn as _conn
+from app.core.normalize import normalize_text as _norm
+from app.services.company_lookup_service import company_name_map
 from app.services.postgres_core_service import (
     add_investor_note_pg,
     add_todo_pg,
+    close_day_pg,
     core_backend,
-    delete_todo_pg,
+    enqueue_action_pg,
+    get_daily_note_pg,
+    list_action_queue_pg,
     list_recent_notes_pg,
     list_todos_pg,
+    resolve_action_queue_pg,
+    save_daily_note_pg,
+    snooze_todo_pg,
     toggle_todo_pg,
     update_todo_status_pg,
 )
@@ -39,18 +45,31 @@ INVALID_TICKER_WORDS = {
 }
 
 
-def _conn() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
 def _has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
     rows = con.execute(f"PRAGMA table_info({table})").fetchall()
     return any(str(r["name"] or "") == column for r in rows)
 
 
 def ensure_schema() -> None:
+    if core_backend() == "postgres":
+        return
     con = _conn()
     try:
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL,
+                priority TEXT NOT NULL DEFAULT 'P2',
+                due_date TEXT NOT NULL DEFAULT '',
+                ticker TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'general',
+                snooze_until TEXT NOT NULL DEFAULT ''
+            )"""
+        )
+        con.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, id DESC)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_todos_ticker ON todos(ticker, id DESC)")
         con.execute(
             """CREATE TABLE IF NOT EXISTS daily_note_tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,68 +150,41 @@ def _extract_tickers(text: str, limit: int = 50) -> list[str]:
     return out
 
 
-def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())).strip()
-
-
 def _is_known_ticker(ticker: str) -> bool:
     tk = str(ticker or "").strip().upper()
     if not tk:
         return False
     if tk in set(ENTITY_ALIASES.values()):
         return True
+    if core_backend() == "postgres":
+        try:
+            return bool(company_name_map([tk]).get(tk))
+        except Exception:
+            return False
+    con = None
     try:
         con = _conn()
-        try:
-            row = con.execute("SELECT 1 FROM companies WHERE UPPER(ticker)=? LIMIT 1", (tk,)).fetchone()
-            return bool(row)
-        finally:
-            con.close()
-    except Exception:
+        row = con.execute("SELECT 1 FROM companies WHERE UPPER(ticker)=? LIMIT 1", (tk,)).fetchone()
+        return bool(row)
+    except Exception as exc:
+        print(f"[organizer.add_task] sqlite insert failed: {type(exc).__name__}: {exc}")
         return False
+    finally:
+        if con is not None:
+            con.close()
 
 
 def _resolve_ticker_from_text(text: str, current_ticker: str = "") -> str:
-    cur = str(current_ticker or "").strip().upper()
-    if cur and cur not in INVALID_TICKER_WORDS and _is_known_ticker(cur):
-        return cur
     s = str(text or "")
     if not s:
         return ""
-    m = re.search(r"\b(?:company|ticker)\s+\$?([A-Za-z]{1,5})\b", s, flags=re.I)
-    if m:
-        tk = str(m.group(1) or "").strip().upper()
-        if tk and tk not in INVALID_TICKER_WORDS:
-            return tk
+    # Strict policy for organizer capture: only explicit $TICKER binds scope.
+    # This prevents accidental links from natural language words.
     m = re.search(r"\$([A-Za-z]{1,5})\b", s)
     if m:
         tk = str(m.group(1) or "").strip().upper()
-        if tk and tk not in INVALID_TICKER_WORDS:
+        if tk and tk not in INVALID_TICKER_WORDS and _is_known_ticker(tk):
             return tk
-    low = _norm(s)
-    for alias, tk in ENTITY_ALIASES.items():
-        if re.search(rf"\b{re.escape(alias)}\b", low):
-            return tk
-    try:
-        con = _conn()
-        try:
-            rows = con.execute(
-                "SELECT ticker, name FROM companies WHERE name IS NOT NULL AND name <> '' LIMIT 1500"
-            ).fetchall()
-        finally:
-            con.close()
-        for r in rows:
-            nm = _norm(str(r["name"] or ""))
-            tk = str(r["ticker"] or "").strip().upper()
-            if nm and tk and len(nm) >= 4 and nm in low and tk not in INVALID_TICKER_WORDS:
-                return tk
-    except Exception:
-        pass
-    for tok in re.findall(r"\b([A-Za-z]{2,5})\b", s):
-        up = tok.upper()
-        if up in INVALID_TICKER_WORDS:
-            continue
-        return up
     return ""
 
 
@@ -207,10 +199,20 @@ class DailyNoteView:
 
 
 def get_daily_note(day: str) -> DailyNoteView:
-    ensure_schema()
     d = str(day or "").strip()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
         d = dt.date.today().isoformat()
+    if core_backend() == "postgres":
+        obj = get_daily_note_pg(d)
+        return DailyNoteView(
+            day=str(obj.get("day") or d),
+            content=str(obj.get("content") or ""),
+            updated_at=str(obj.get("updated_at") or ""),
+            locked=bool(obj.get("locked") or False),
+            archived_at=str(obj.get("archived_at") or ""),
+            tags=[str(x or "").strip().upper() for x in list(obj.get("tags") or []) if str(x or "").strip()],
+        )
+    ensure_schema()
     con = _conn()
     try:
         row = con.execute(
@@ -238,11 +240,26 @@ def get_daily_note(day: str) -> DailyNoteView:
 
 
 def save_daily_note(day: str, content: str) -> bool:
-    ensure_schema()
     d = str(day or "").strip()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
         d = dt.date.today().isoformat()
     txt = str(content or "").strip()
+    if core_backend() == "postgres":
+        ok = save_daily_note_pg(d, txt, tags=_extract_tickers(txt, limit=60))
+        if ok:
+            try:
+                from app.services.agent_service import memorize_user_note
+
+                memorize_user_note(
+                    txt[:120000],
+                    ticker="",
+                    source_type="daily_note",
+                    source_id=f"daily_notes:{d}",
+                )
+            except Exception:
+                pass
+        return ok
+    ensure_schema()
     now = dt.datetime.now().isoformat()
     con = _conn()
     try:
@@ -280,10 +297,12 @@ def save_daily_note(day: str, content: str) -> bool:
 
 
 def close_day(day: str) -> bool:
-    ensure_schema()
     d = str(day or "").strip()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
         return False
+    if core_backend() == "postgres":
+        return close_day_pg(d)
+    ensure_schema()
     now = dt.datetime.now().isoformat()
     con = _conn()
     try:
@@ -334,13 +353,12 @@ def toggle_task(todo_id: int) -> bool:
         return toggle_todo_pg(todo_id)
     con = _conn()
     try:
-        row = con.execute("SELECT status, category FROM todos WHERE id = ?", (todo_id,)).fetchone()
+        row = con.execute("SELECT status FROM todos WHERE id = ?", (todo_id,)).fetchone()
         if not row:
             return False
         status = str(row["status"] or "open").strip().lower()
-        cat = str(row["category"] or "general").strip().lower()
         if status == "open":
-            new_status = "archived" if cat == "quick" else "done"
+            new_status = "done"
         else:
             new_status = "open"
         con.execute("UPDATE todos SET status = ? WHERE id = ?", (new_status, todo_id))
@@ -359,18 +377,16 @@ def complete_task(todo_id: int) -> bool:
         row = next((r for r in rows if int(r.get("id") or 0) == rid), None)
         if row is None:
             return False
-        cat = str(row.get("category") or "general").strip().lower()
-        return update_todo_status_pg(rid, "archived" if cat == "quick" else "done")
+        return update_todo_status_pg(rid, "done")
     con = _conn()
     try:
-        row = con.execute("SELECT status, category FROM todos WHERE id = ?", (rid,)).fetchone()
+        row = con.execute("SELECT status FROM todos WHERE id = ?", (rid,)).fetchone()
         if not row:
             return False
         status = str(row["status"] or "open").strip().lower()
         if status in {"done", "archived"}:
             return True
-        cat = str(row["category"] or "general").strip().lower()
-        new_status = "archived" if cat == "quick" else "done"
+        new_status = "done"
         con.execute("UPDATE todos SET status = ? WHERE id = ?", (new_status, rid))
         con.commit()
         return True
@@ -400,14 +416,13 @@ def complete_task_by_text(task_text: str) -> dict[str, object]:
         rid = int(row.get("id") or 0)
         status = str(row.get("status") or "open").strip().lower()
         if status not in {"done", "archived"}:
-            cat = str(row.get("category") or "general").strip().lower()
-            status = "archived" if cat == "quick" else "done"
+            status = "done"
             _ = update_todo_status_pg(rid, status)
         return {"ok": True, "id": rid, "task": str(row.get("task") or ""), "status": status}
     con = _conn()
     try:
         row = con.execute(
-            """SELECT id, task, status, category
+            """SELECT id, task, status
                FROM todos
                WHERE LOWER(TRIM(task)) = LOWER(TRIM(?))
                ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, id DESC
@@ -416,7 +431,7 @@ def complete_task_by_text(task_text: str) -> dict[str, object]:
         ).fetchone()
         if not row:
             row = con.execute(
-                """SELECT id, task, status, category
+                """SELECT id, task, status
                    FROM todos
                    WHERE status = 'open' AND LOWER(task) LIKE LOWER(?)
                    ORDER BY id DESC
@@ -430,8 +445,7 @@ def complete_task_by_text(task_text: str) -> dict[str, object]:
             return {"ok": False, "error": "not_found"}
         status = str(row["status"] or "open").strip().lower()
         if status not in {"done", "archived"}:
-            cat = str(row["category"] or "general").strip().lower()
-            new_status = "archived" if cat == "quick" else "done"
+            new_status = "done"
             con.execute("UPDATE todos SET status = ? WHERE id = ?", (new_status, rid))
             con.commit()
             status = new_status
@@ -515,10 +529,13 @@ def add_general_note(
     if cb not in {"human", "ai"}:
         cb = "human"
     now = dt.datetime.now().isoformat()
+    inferred_ticker = str(ticker or "").strip().upper()[:16]
+    if not inferred_ticker:
+        inferred_ticker = _resolve_ticker_from_text(txt)
     if core_backend() == "postgres":
         return add_investor_note_pg(
             scope=str(scope or "organizer")[:40],
-            ticker=str(ticker or "").strip().upper()[:16],
+            ticker=inferred_ticker,
             sentiment="neutral",
             note=txt[:4000],
             tags=str(tags or "log")[:200],
@@ -537,7 +554,7 @@ def add_general_note(
             """,
             (
                 str(scope or "organizer")[:40],
-                str(ticker or "").strip().upper()[:16],
+                inferred_ticker,
                 txt[:4000],
                 str(tags or "log")[:200],
                 now,
@@ -659,6 +676,8 @@ def enqueue_action(
     nm = str(tool_name or "").strip()
     if not nm:
         return False
+    if core_backend() == "postgres":
+        return enqueue_action_pg(nm, params_json, reasoning, confidence, trace_id)
     con = _conn()
     try:
         con.execute(
@@ -680,6 +699,8 @@ def enqueue_action(
 
 
 def list_action_queue(limit: int = 120) -> list[dict[str, str]]:
+    if core_backend() == "postgres":
+        return list_action_queue_pg(limit=limit)
     con = _conn()
     lim = max(1, min(1000, int(limit or 120)))
     out: list[dict[str, str]] = []
@@ -746,6 +767,8 @@ def resolve_action_queue(action_id: int, decision: str) -> bool:
     dec = str(decision or "").strip().lower()
     if rid <= 0 or dec not in {"approved", "rejected"}:
         return False
+    if core_backend() == "postgres":
+        return resolve_action_queue_pg(rid, dec)
     con = _conn()
     try:
         cur = con.execute(
@@ -766,13 +789,22 @@ def add_task(
     priority: str = "P2",
     due_date: str = "",
 ) -> bool:
+    ensure_schema()
     txt = str(task or "").strip()
     if not txt:
         return False
     tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        m = re.search(r"\$([A-Za-z]{1,5})\b", txt)
+        if not m:
+            m = re.search(r"\b(?:company|ticker)\s+\$?([A-Za-z]{1,5})\b", txt, flags=re.I)
+        cand = str(m.group(1) if m else "").strip().upper()
+        tk = cand if (cand and _is_known_ticker(cand)) else ""
     cat = str(category or "general").strip().lower()
-    if cat not in {"company", "quick", "general"}:
+    if cat not in {"company", "general"}:
         cat = "general"
+    if tk and cat == "general":
+        cat = "company"
     pr = str(priority or "P2").strip().upper()
     if pr not in {"P1", "P2", "P3"}:
         pr = "P2"
@@ -795,6 +827,28 @@ def add_task(
         return True
     except Exception:
         return False
+    finally:
+        con.close()
+
+
+def snooze_task(todo_id: int, until_date: str) -> bool:
+    rid = int(todo_id or 0)
+    if rid <= 0:
+        return False
+    su = str(until_date or "").strip()
+    if not su:
+        return False
+    if core_backend() == "postgres":
+        return snooze_todo_pg(rid, su)
+    try:
+        dt.date.fromisoformat(su)
+    except Exception:
+        return False
+    con = _conn()
+    try:
+        cur = con.execute("UPDATE todos SET status='snoozed' WHERE id = ?", (rid,))
+        con.commit()
+        return bool(cur.rowcount)
     finally:
         con.close()
 

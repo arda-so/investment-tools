@@ -9,26 +9,23 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from app.core.config import CORE_DB_PATH, ROOT
-from app.core.sqlite_hardening import connect_sqlite, sqlite_retry
+from app.core.config import ROOT
+from app.core.db import core_conn as _conn_core, onyx_conn as _conn_onyx, sqlite_retry
+from app.core.filing_text import resolve_filing_path, read_filing_text
+from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.organizer_service import add_general_note
 from app.services.postgres_core_service import core_backend, pg_connect, strict_postgres_mode
-from app.services.proactive_ai_service import ensure_proactive_schema, run_event_driven_monitor
+from app.services.proactive_ai_service import detect_thesis_breaches, ensure_proactive_schema, run_event_driven_monitor
+from app.services.company_intel_service import get_company_intel, maybe_refresh_company_intel_on_filing
+from app.services.mini_statements_service import get_mini_statements
 
-ONYX_BRAIN_DB_PATH = ROOT / "onyx_brain.db"
 try:
     from tools.llm_engine import ask_ai
 except Exception:  # pragma: no cover
     ask_ai = None  # type: ignore[assignment]
 
 
-def _conn_core() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
-def _conn_onyx() -> sqlite3.Connection:
-    return connect_sqlite(str(ONYX_BRAIN_DB_PATH), row_factory=True)
-
+STRUCTURED_DATA_UNAVAILABLE_MSG = "Data not available in structured filings."
 
 def _insert_report_fact_core_pg(
     *,
@@ -183,12 +180,6 @@ def ensure_sec_ingest_schema() -> None:
             con.close()
     sqlite_retry(_write)
     ensure_proactive_schema()
-
-
-def _safe_ticker(raw: str) -> str:
-    s = re.sub(r"[^A-Z0-9.\-]", "", str(raw or "").strip().upper())
-    return s if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,11}", s) else ""
-
 
 def _chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> list[str]:
     src = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -619,6 +610,7 @@ def _reflect_relationship_candidates(
             "Critique and correct extracted relationship candidates for SEC filing knowledge graph.\n"
             "Allowed relationship_type: EXPOSED_TO, COMPETES_WITH, SUPPLIER_TO, CUSTOMER_OF, SIGNALS_MACRO.\n"
             "Do not invent new targets. Only keep or downgrade candidates based on evidence.\n"
+            "If asked for quantitative SEC metrics without structured_financial_data_json, return exactly: Data not available in structured filings.\n"
             "Return strict JSON: {\"relationships\":[{\"source\":\"...\",\"target\":\"...\",\"relationship_type\":\"...\",\"confidence\":0.0,\"evidence\":\"...\"}]}\n"
             f"Ticker: {ticker}\n"
             f"Candidates: {json.dumps(normed, ensure_ascii=False)}\n"
@@ -732,11 +724,11 @@ def _extract_primary_doc_from_submission(raw: str, form: str = "") -> str:
 
 
 def _read_filing_text(path_s: str, form: str = "") -> str:
-    p = Path(str(path_s or "").strip())
-    if not p.exists():
+    p = resolve_filing_path(path_s)
+    if p is None:
         return ""
     try:
-        raw = p.read_text(encoding="utf-8", errors="ignore")
+        raw = read_filing_text(p, strip_html=False)
         return _extract_primary_doc_from_submission(raw, form=form)
     except Exception:
         return ""
@@ -935,48 +927,116 @@ def _recent_competitor_mda(ticker: str, limit: int = 6) -> list[dict[str, str]]:
     return []
 
 
-def _buffett_analyze(ticker: str, form: str, sections: dict[str, str], competitor_mda: list[dict[str, str]]) -> dict[str, Any]:
-    questions = (
-        "1. Capital Allocation: Is management buying back stock, paying down debt, or wasting money on bad acquisitions?\n"
-        "2. Margin Trends: Are operating margins expanding or contracting compared to last year?\n"
-        "3. Revenue Concentration: Based on Segment Reporting notes, what is the exact revenue breakdown by product and geography? Any dangerous concentration?\n"
-        "4. Red Flags: Any accounting method changes or hidden liabilities in notes?\n"
-    )
+def _structured_financial_context(ticker: str) -> dict[str, Any]:
+    tk = _safe_ticker(ticker)
+    if not tk:
+        return {"ok": False, "message": STRUCTURED_DATA_UNAVAILABLE_MSG}
+    intel = get_company_intel(tk, refresh=False)
+    mini = get_mini_statements(tk)
+    seg = dict((intel or {}).get("revenue_segments") or {})
+    buy = dict((intel or {}).get("buyback") or {})
+    mini_years = list((mini or {}).get("years") or [])
+    has_seg = bool(seg.get("product") or seg.get("geography"))
+    has_buy = bool(buy.get("ttm_value") is not None or buy.get("quarters"))
+    has_mini = bool(mini_years)
+    if not (has_seg or has_buy or has_mini):
+        return {"ok": False, "message": STRUCTURED_DATA_UNAVAILABLE_MSG}
+    return {
+        "ok": True,
+        "message": "",
+        "financials": {
+            "ticker": tk,
+            "mini_statements": mini,
+            "revenue_segments": seg,
+            "buyback": buy,
+        },
+    }
+
+
+def _validate_analysis_json(obj: Any) -> dict[str, Any]:
+    d = obj if isinstance(obj, dict) else {}
+    out = {
+        "capital_allocation": str(d.get("capital_allocation") or "").strip(),
+        "margin_trends": str(d.get("margin_trends") or "").strip(),
+        "revenue_concentration": str(d.get("revenue_concentration") or "").strip(),
+        "red_flags": str(d.get("red_flags") or "").strip(),
+        "confidence_score": 0,
+        "missing_variables": [],
+        "citations": [],
+    }
+    try:
+        out["confidence_score"] = max(0, min(100, int(float(d.get("confidence_score") or 0))))
+    except Exception:
+        out["confidence_score"] = 0
+    mv = d.get("missing_variables")
+    if isinstance(mv, list):
+        out["missing_variables"] = [str(x).strip() for x in mv if str(x).strip()][:12]
+    ct = d.get("citations")
+    if isinstance(ct, list):
+        out["citations"] = [str(x).strip() for x in ct if str(x).strip()][:12]
+    for k in ("capital_allocation", "margin_trends", "revenue_concentration", "red_flags"):
+        if not str(out.get(k) or "").strip():
+            out[k] = STRUCTURED_DATA_UNAVAILABLE_MSG
+    return out
+
+
+def _buffett_analyze(
+    ticker: str,
+    form: str,
+    sections: dict[str, str],
+    competitor_mda: list[dict[str, str]],
+    structured_ctx: dict[str, Any],
+) -> dict[str, Any]:
     payload = {
         "business": str(sections.get("business") or "")[:8000],
         "risk_factors": str(sections.get("risk_factors") or "")[:9000],
         "mda": str(sections.get("mda") or "")[:12000],
-        "notes": str(sections.get("notes") or "")[:10000],
-        "segment_info": str(sections.get("segment_info") or "")[:7000],
+        "notes": str(sections.get("notes") or "")[:8000],
+        "segment_info": str(sections.get("segment_info") or "")[:4000],
         "executive_compensation": str(sections.get("executive_compensation") or "")[:7000],
         "related_party_transactions": str(sections.get("related_party_transactions") or "")[:7000],
         "competitor_mda": competitor_mda[:8],
     }
+    if not bool((structured_ctx or {}).get("ok")):
+        msg = str((structured_ctx or {}).get("message") or STRUCTURED_DATA_UNAVAILABLE_MSG)
+        return {
+            "capital_allocation": msg,
+            "margin_trends": msg,
+            "revenue_concentration": msg,
+            "red_flags": msg,
+            "confidence_score": 0,
+            "missing_variables": [msg],
+            "citations": [f"/company_file/sec?t={ticker}&form={form}"],
+        }
     if ask_ai is None:
         return {
-            "capital_allocation": "insufficient_data",
-            "margin_trends": "insufficient_data",
-            "revenue_concentration": "insufficient_data",
-            "red_flags": "insufficient_data",
+            "capital_allocation": STRUCTURED_DATA_UNAVAILABLE_MSG,
+            "margin_trends": STRUCTURED_DATA_UNAVAILABLE_MSG,
+            "revenue_concentration": STRUCTURED_DATA_UNAVAILABLE_MSG,
+            "red_flags": STRUCTURED_DATA_UNAVAILABLE_MSG,
             "confidence_score": 35,
             "missing_variables": ["LLM unavailable for Buffett analysis"],
             "citations": [f"/company_file/sec?t={ticker}&form={form}"],
         }
     prompt = (
-        "You are a fundamental value analyst. Review extracted filing sections. "
-        "Do NOT summarize text. Answer the 4 required questions.\n"
+        "You are an expert financial analyst.\n"
+        "You will be provided with 100% accurate quantitative data in JSON format.\n"
+        "Do NOT calculate, infer, or extract new numbers from raw filing text.\n"
+        "If quantitative data is unavailable, output exactly: Data not available in structured filings.\n"
+        "Your task is qualitative synthesis only from MD&A and Risk Factors: explain WHY the structured numbers changed, "
+        "management tone, and new risk factors.\n"
         "Return strict JSON with keys:\n"
         '{"capital_allocation":"...","margin_trends":"...","revenue_concentration":"...","red_flags":"...",'
         '"confidence_score":0,"missing_variables":["..."],"citations":["/company_file/sec?t=TICKER&form=FORM"]}\n\n'
-        f"Required questions:\n{questions}\n"
         f"Ticker: {ticker}\nForm: {form}\n"
-        f"Extracted sections JSON: {json.dumps(payload, ensure_ascii=False)}"
+        f"STRUCTURED_FINANCIAL_DATA_JSON: {json.dumps((structured_ctx or {}).get('financials') or {}, ensure_ascii=False)}\n"
+        f"QUALITATIVE_SECTIONS_JSON: {json.dumps(payload, ensure_ascii=False)}"
     )
     try:
         raw = str(
             ask_ai(
                 prompt,
-                "Buffett-style filing analyst. JSON only. Base conclusions strictly on provided sections and competitor evidence.",
+                "Financial synthesizer. Use provided structured JSON for numbers; qualitative sections for narrative only.",
                 mode="smart",
                 json_mode=True,
                 temperature=0.1,
@@ -984,13 +1044,13 @@ def _buffett_analyze(ticker: str, form: str, sections: dict[str, str], competito
             or ""
         ).strip()
         obj = json.loads(raw) if raw else {}
-        return obj if isinstance(obj, dict) else {}
+        return _validate_analysis_json(obj)
     except Exception:
         return {
-            "capital_allocation": "insufficient_data",
-            "margin_trends": "insufficient_data",
-            "revenue_concentration": "insufficient_data",
-            "red_flags": "insufficient_data",
+            "capital_allocation": STRUCTURED_DATA_UNAVAILABLE_MSG,
+            "margin_trends": STRUCTURED_DATA_UNAVAILABLE_MSG,
+            "revenue_concentration": STRUCTURED_DATA_UNAVAILABLE_MSG,
+            "red_flags": STRUCTURED_DATA_UNAVAILABLE_MSG,
             "confidence_score": 40,
             "missing_variables": ["LLM parsing failure"],
             "citations": [f"/company_file/sec?t={ticker}&form={form}"],
@@ -1006,6 +1066,7 @@ def _process_one_filing(
     filing_id = int(row["id"] or 0)
     ticker = _safe_ticker(str(row["ticker"] or ""))
     form = str(row["form"] or "").strip().upper()
+    filing_date = str(row["date"] or "").strip()
     fpath = str(row["path"] or "").strip()
     txt = _read_filing_text(fpath, form=form)
     if filing_id <= 0 or not ticker or not txt:
@@ -1134,7 +1195,18 @@ def _process_one_filing(
             rel_rows += 1
 
     competitor_mda = _recent_competitor_mda(ticker=ticker, limit=6)
-    analysis = _buffett_analyze(ticker=ticker, form=form, sections=sections, competitor_mda=competitor_mda)
+    try:
+        maybe_refresh_company_intel_on_filing(ticker=ticker, form=form, filing_date=filing_date, max_stale_days=14)
+    except Exception:
+        pass
+    structured_ctx = _structured_financial_context(ticker)
+    analysis = _buffett_analyze(
+        ticker=ticker,
+        form=form,
+        sections=sections,
+        competitor_mda=competitor_mda,
+        structured_ctx=structured_ctx,
+    )
     cap = str(analysis.get("capital_allocation") or "").strip()
     mar = str(analysis.get("margin_trends") or "").strip()
     rev = str(analysis.get("revenue_concentration") or "").strip()
@@ -1226,6 +1298,7 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
     chunks = 0
     entities = 0
     rels = 0
+    processed_tickers: set[str] = set()
     try:
         rows_iter: list[dict[str, Any]] = []
         if core_backend() == "postgres":
@@ -1235,14 +1308,20 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
                     marks_pg = ",".join("%s" for _ in ids)
                     cur = con_pg.cursor()
                     cur.execute(
-                        f"""SELECT id, ticker, form, path
+                        f"""SELECT id, ticker, form, path, date
                             FROM filings_core
                             WHERE id IN ({marks_pg})
                             ORDER BY id ASC""",
                         tuple(ids),
                     )
                     rows_iter = [
-                        {"id": int(r[0] or 0), "ticker": str(r[1] or ""), "form": str(r[2] or ""), "path": str(r[3] or "")}
+                        {
+                            "id": int(r[0] or 0),
+                            "ticker": str(r[1] or ""),
+                            "form": str(r[2] or ""),
+                            "path": str(r[3] or ""),
+                            "date": str(r[4] or ""),
+                        }
                         for r in (cur.fetchall() or [])
                     ]
                 except Exception:
@@ -1262,6 +1341,8 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
             chunks += int(st.get("chunks") or 0)
             entities += int(st.get("entities") or 0)
             rels += int(st.get("relationships") or 0)
+            if tk:
+                processed_tickers.add(tk)
         if con_core is not None:
             con_core.commit()
         if con_onyx is not None:
@@ -1272,6 +1353,13 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
         if con_onyx is not None:
             con_onyx.close()
 
+    # Phase 3.3: auto-run thesis breach detection for each ticker that had new filings
+    for tk in processed_tickers:
+        try:
+            detect_thesis_breaches(ticker=tk)
+        except Exception:
+            pass
+
     monitor = run_event_driven_monitor(force=True)
     return {
         "ok": True,
@@ -1281,3 +1369,46 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
         "relationships": rels,
         "monitor": monitor,
     }
+
+
+def ingest_sec_facts_for_ticker(
+    ticker: str,
+    *,
+    max_filings: int = 24,
+    forms: tuple[str, ...] = ("8-K", "6-K", "10-Q", "10-K", "20-F", "40-F"),
+) -> dict[str, Any]:
+    tk = _safe_ticker(ticker)
+    if not tk:
+        return {"ok": False, "error": "ticker_required", "selected": 0}
+    if core_backend() != "postgres":
+        return {"ok": False, "error": "postgres_required", "selected": 0}
+    con_pg = pg_connect()
+    if con_pg is None:
+        return {"ok": False, "error": "postgres_unavailable", "selected": 0}
+    ids: list[int] = []
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """
+            SELECT id
+            FROM filings_core
+            WHERE ticker=%s AND form = ANY(%s)
+            ORDER BY date DESC, id DESC
+            LIMIT %s
+            """,
+            (tk, list(forms), max(1, min(400, int(max_filings or 24)))),
+        )
+        ids = [int(r[0] or 0) for r in (cur.fetchall() or []) if int(r[0] or 0) > 0]
+    except Exception as exc:
+        return {"ok": False, "error": f"filings_query_failed:{exc}", "selected": 0}
+    finally:
+        try:
+            con_pg.close()
+        except Exception:
+            pass
+    if not ids:
+        return {"ok": True, "selected": 0, "processed": 0, "chunks": 0, "entities": 0, "relationships": 0}
+    out = process_new_filings_pipeline(ids)
+    out["selected"] = len(ids)
+    out["ticker"] = tk
+    return out

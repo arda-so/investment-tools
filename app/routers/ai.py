@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures as cf
 import datetime as dt
 import json
 import re
@@ -10,6 +11,10 @@ from fastapi import APIRouter, Body, Query
 from fastapi.responses import StreamingResponse
 
 from app.core.config import app_env
+from app.core.analysis_context import build_analysis_context, build_chat_hydration_payload
+from app.core.date import parse_datetime_flexible
+from app.core.normalize import normalize_text as _norm
+from app.core.num import to_float as _to_float
 from app.services.chat_memory_service import append_chat_message, list_recent_chat_messages
 from app.services.ai_job_queue_service import enqueue_job, ensure_ai_job_queue_schema, get_cached_result, get_job, worker_health
 from app.services.ai_orchestrator import ensure_ai_schema, get_adaptive_turn_policy_snapshot, get_ai_quality_report, run_ai_command
@@ -35,7 +40,6 @@ from app.services.portfolio_memory_service import (
     learn_from_chat_turn,
     learn_compact_memory_from_text,
     learn_investor_style_from_answer,
-    get_morning_brief,
     get_proactive_gap_prompt,
     import_portfolio_history_csv,
     inject_runtime_context,
@@ -51,18 +55,21 @@ from app.services.portfolio_memory_service import (
     summarize_active_rules_for_prompt,
     save_morning_brief_snapshot,
     list_recent_portfolio_transactions,
+    summarize_trade_decision_reasons,
     summarize_compact_memory_for_prompt,
     summarize_investor_style_memory,
 )
 from app.services.daily_operator import get_dynamic_gap_audit, resolve_dynamic_gap_answer
 from app.services.organizer_service import complete_task, complete_task_by_text, list_recent_notes, list_tasks
+from app.services.mini_statements_service import fetch_historical_financials
 from app.services.user_preferences_service import (
     ensure_user_preferences_schema,
     learn_preferences_from_text,
     learn_preferences_from_trajectory,
     summarize_user_preferences,
+    upsert_user_preference,
 )
-from tools.llm_engine import ask_ai_vision
+from tools.llm_engine import ask_ai_vision, get_ai_runtime_metrics
 from app.services.memory_engine import OnyxMemory
 
 
@@ -71,6 +78,18 @@ DEFAULT_USER_PROFILE = (
     "Building Python/FastAPI app. Hates messy data. Wants Apple-level UI. Risk tolerance: Low."
 )
 _MEMORY_ENGINE: OnyxMemory | None = None
+_OPERATOR_GUARDRAILS: list[tuple[str, str]] = [
+    ("engineering.no_hardcoding", "Never hardcode outputs or company-specific behavior. Use data/services and model reasoning."),
+    ("engineering.dry_first", "Before adding code, check for existing utilities/services and avoid duplicate logic."),
+    ("engineering.postgres_first", "Use Postgres-backed runtime paths as source of truth; avoid SQLite fallback in active runtime."),
+    ("engineering.validate_after_change", "Run compile and health checks after changes before declaring done."),
+    ("engineering.async_preferred", "Prefer async queue/SSE for deep AI analysis to keep UI responsive."),
+]
+
+
+@router.get("/ai/runtime/metrics")
+def ai_runtime_metrics():
+    return {"ok": True, "metrics": get_ai_runtime_metrics(), "asof": dt.datetime.now().isoformat()}
 
 
 def _get_memory_engine() -> OnyxMemory | None:
@@ -81,10 +100,6 @@ def _get_memory_engine() -> OnyxMemory | None:
         except Exception:
             _MEMORY_ENGINE = None
     return _MEMORY_ENGINE
-
-
-def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())).strip()
 
 
 def _requires_recent_data(query: str) -> bool:
@@ -200,8 +215,63 @@ def _fast_trade_history_reply(query: str) -> dict | None:
     }
 
 
-def _fast_db_reply(query: str) -> dict | None:
+def _fast_db_reply(query: str, context: dict | None = None) -> dict | None:
     low = _norm(query)
+    ctx = context or {}
+    if any(k in low for k in {"5 year", "5y", "historical", "trend", "revenue", "debt", "fcf", "cash flow", "balance sheet"}):
+        cpath = str(ctx.get("current_path") or "").strip()
+        cquery = str(ctx.get("current_query") or "").strip()
+        tk = ""
+        if cpath.startswith("/company_file"):
+            try:
+                import urllib.parse as _up
+
+                qmap = _up.parse_qs(cquery.lstrip("?"), keep_blank_values=False)
+                for key in ("t", "ticker"):
+                    vals = qmap.get(key) or []
+                    if vals:
+                        tk = str(vals[0] or "").strip().upper()
+                        break
+            except Exception:
+                tk = ""
+        if tk:
+            fin = fetch_historical_financials(ticker=tk, metric="all", years=5, refresh=False)
+            if bool(fin.get("ok")):
+                years = list(fin.get("years") or [])
+                rev = list(fin.get("revenue") or [])
+                debt = list(fin.get("total_debt") or [])
+                fcf = list(fin.get("free_cash_flow") or [])
+                def _fmt(v):
+                    if v is None:
+                        return "-"
+                    try:
+                        return f"{float(v):,.0f}"
+                    except Exception:
+                        return str(v)
+                rows = []
+                for i, y in enumerate(years):
+                    rows.append(
+                        f"- {y}: revenue={_fmt(rev[i] if i < len(rev) else None)}, "
+                        f"debt={_fmt(debt[i] if i < len(debt) else None)}, "
+                        f"fcf={_fmt(fcf[i] if i < len(fcf) else None)}"
+                    )
+                msg = (
+                    f"{tk} 5-year trends ({str(fin.get('source') or '-')}, asof {str(fin.get('asof') or '-')})\n"
+                    + "\n".join(rows[:8])
+                )
+                return {
+                    "status": "ok",
+                    "intent": "financial_trends_company",
+                    "message": msg,
+                    "confidence": 0.96,
+                    "redirect_url": f"/company_file?t={tk}",
+                    "citations": [],
+                    "matched_by": "router_fast_path",
+                    "version": "v1.2.0",
+                    "traces": [{"step": "route", "detail": "router_fast_financial_trends"}],
+                    "action": {"type": "NONE", "payload": {}},
+                    "ui": {},
+                }
     if any(k in low for k in {"holdings", "current positions", "what do we own", "list holdings", "show holdings"}):
         rows = get_holdings(limit=40)
         if not rows:
@@ -262,7 +332,7 @@ def _fast_db_reply(query: str) -> dict | None:
             "intent": "list_notes",
             "message": msg,
             "confidence": 0.97,
-            "redirect_url": "/organizer/file/notes",
+            "redirect_url": "/organizer",
             "citations": [],
             "matched_by": "router_fast_path",
             "version": "v1.2.0",
@@ -296,14 +366,39 @@ def _fast_db_reply(query: str) -> dict | None:
             "action": {"type": "NONE", "payload": {}},
             "ui": {},
         }
+    if any(k in low for k in {"sell reason", "sell reasons", "buy reason", "buy reasons", "why did i sell", "why did i buy"}):
+        action = "sell" if "sell" in low else ("buy" if "buy" in low else "")
+        summ = summarize_trade_decision_reasons(limit=500, action=action)
+        by_reason = list(summ.get("by_reason") or [])
+        if not by_reason:
+            msg = "No structured trade reasons recorded yet."
+        else:
+            title = "Trade decision reasons:"
+            if action == "sell":
+                title = "Sell decision reasons:"
+            elif action == "buy":
+                title = "Buy decision reasons:"
+            lines = [title]
+            for r in by_reason[:8]:
+                lines.append(
+                    f"- {str(r.get('label') or r.get('reason') or '-')}: "
+                    f"{int(r.get('count') or 0)} ({float(r.get('pct') or 0.0):.1f}%)"
+                )
+            msg = "\n".join(lines)
+        return {
+            "status": "ok",
+            "intent": "trade_reason_summary",
+            "message": msg,
+            "confidence": 0.97,
+            "redirect_url": "/my_universe?tab=all",
+            "citations": [],
+            "matched_by": "router_fast_path",
+            "version": "v1.2.0",
+            "traces": [{"step": "route", "detail": "router_fast_trade_reasons"}],
+            "action": {"type": "NONE", "payload": {}},
+            "ui": {},
+        }
     return None
-
-
-def _to_float(v: object, default: float = 0.0) -> float:
-    try:
-        return float(v)
-    except Exception:
-        return float(default)
 
 
 def _is_fresh_portfolio_live(summary: dict) -> tuple[bool, str]:
@@ -312,15 +407,12 @@ def _is_fresh_portfolio_live(summary: dict) -> tuple[bool, str]:
     asof = str(summary.get("asof") or "").strip()
     if not asof:
         return False, "missing_asof"
-    try:
-        import datetime as _dt
-
-        ts = _dt.datetime.fromisoformat(asof.replace("Z", ""))
-        age_sec = (_dt.datetime.now() - ts).total_seconds()
-        if age_sec > 180:
-            return False, "stale_asof"
-    except Exception:
+    ts = parse_datetime_flexible(asof)
+    if ts is None:
         return False, "bad_asof"
+    age_sec = (dt.datetime.now() - ts).total_seconds()
+    if age_sec > 180:
+        return False, "stale_asof"
     src = str(summary.get("quote_source") or "").strip().lower()
     if src in {"", "none", "unavailable"}:
         return False, "quote_source_unavailable"
@@ -334,8 +426,6 @@ def _is_fresh_portfolio_live(summary: dict) -> tuple[bool, str]:
 
 
 def _portfolio_live_message(summary: dict) -> str:
-    import datetime as _dt
-
     day_pct = _to_float(summary.get("day_change_pct"), 0.0)
     day_usd = _to_float(summary.get("day_change_usd"), 0.0)
     prev_val = _to_float(summary.get("tracked_prev_close_value"), 0.0)
@@ -343,10 +433,9 @@ def _portfolio_live_message(summary: dict) -> str:
     worst = summary.get("worst") if isinstance(summary.get("worst"), dict) else {}
     asof = str(summary.get("asof") or "")
     asof_txt = asof
-    try:
-        asof_txt = _dt.datetime.fromisoformat(asof.replace("Z", "")).strftime("%H:%M:%S")
-    except Exception:
-        pass
+    asof_dt = parse_datetime_flexible(asof)
+    if asof_dt is not None:
+        asof_txt = asof_dt.strftime("%H:%M:%S")
     return (
         f"Portfolio today (as of {asof_txt}): {day_pct:+.2f}% "
         f"(~${day_usd:,.0f} on ${prev_val:,.0f} tracked previous-close value).\n"
@@ -436,7 +525,7 @@ def _ai_command_sync(payload: dict) -> dict:
         fast = _fast_trade_history_reply(q)
         if isinstance(fast, dict):
             return fast
-        fast_db = _fast_db_reply(q)
+        fast_db = _fast_db_reply(q, context=ctx)
         if isinstance(fast_db, dict):
             return fast_db
     session_id = str(ctx.get("session_id") or "default").strip()[:120]
@@ -654,7 +743,65 @@ def _ai_command_sync(payload: dict) -> dict:
 
 @router.post("/ai/command")
 def ai_command(payload: dict = Body(default={})):  # simple JSON endpoint for command bar
-    return _ai_command_sync(payload if isinstance(payload, dict) else {})
+    p = payload if isinstance(payload, dict) else {}
+    q = str((p or {}).get("query") or "").strip()
+    if q:
+        fast = _fast_trade_history_reply(q)
+        if isinstance(fast, dict):
+            return fast
+        fast_db = _fast_db_reply(q, context=(p.get("context") if isinstance(p.get("context"), dict) else {}))
+        if isinstance(fast_db, dict):
+            return fast_db
+    cached = get_cached_result(p, ttl_sec=max(15, min(180, int(float(app_env("AI_PROMPT_CACHE_TTL_SEC", "75"))))))
+    if isinstance(cached, dict) and cached:
+        return cached
+    budget_ms = max(300, int(float(app_env("AI_COMMAND_SYNC_BUDGET_MS", "2500"))))
+    ex = cf.ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = ex.submit(_ai_command_sync, p)
+        try:
+            return fut.result(timeout=float(budget_ms) / 1000.0)
+        except cf.TimeoutError:
+            ensure_ai_job_queue_schema()
+            jid = enqueue_job(p)
+            return {
+                "status": "queued",
+                "intent": "analysis_queued",
+                "message": "Analysis queued. Streaming result shortly.",
+                "confidence": 0.6,
+                "redirect_url": "",
+                "citations": [],
+                "matched_by": "sync_timeout_fallback",
+                "version": "v1.2.0",
+                "traces": [{"step": "route", "detail": "sync_timeout_to_queue"}],
+                "action": {"type": "NONE", "payload": {}},
+                "execution": {"type": "none"},
+                "ui": {"job_id": jid, "type": "queued"},
+                "job_id": jid,
+                "interview_progress": get_interview_progress(),
+            }
+        except Exception:
+            ensure_ai_job_queue_schema()
+            jid = enqueue_job(p)
+            return {
+                "status": "queued",
+                "intent": "analysis_queued",
+                "message": "Analysis queued due to transient sync issue.",
+                "confidence": 0.5,
+                "redirect_url": "",
+                "citations": [],
+                "matched_by": "sync_exception_fallback",
+                "version": "v1.2.0",
+                "traces": [{"step": "route", "detail": "sync_exception_to_queue"}],
+                "action": {"type": "NONE", "payload": {}},
+                "execution": {"type": "none"},
+                "ui": {"job_id": jid, "type": "queued"},
+                "job_id": jid,
+                "interview_progress": get_interview_progress(),
+            }
+    finally:
+        # Do not wait for long-running sync branch to finish.
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 @router.post("/ai/command/async")
@@ -667,7 +814,7 @@ def ai_command_async(payload: dict = Body(default={})):
         fast = _fast_trade_history_reply(q)
         if isinstance(fast, dict):
             return {"ok": True, "status": "done", "result": fast, "job_id": ""}
-        fast_db = _fast_db_reply(q)
+        fast_db = _fast_db_reply(q, context=(p.get("context") if isinstance(p.get("context"), dict) else {}))
         if isinstance(fast_db, dict):
             return {"ok": True, "status": "done", "result": fast_db, "job_id": ""}
     cached = get_cached_result(p, ttl_sec=max(15, min(180, int(float(app_env("AI_PROMPT_CACHE_TTL_SEC", "75"))))))
@@ -715,6 +862,33 @@ def ai_memory_remember(payload: dict = Body(default={})):
     bucket = str((payload or {}).get("bucket") or "process_rule").strip().lower()
     reliability = float((payload or {}).get("reliability") or 0.9)
     return remember_compact_memory(text=text, bucket=bucket, source="manual", reliability=reliability)
+
+
+@router.post("/ai/memory/bootstrap-guardrails")
+def ai_memory_bootstrap_guardrails():
+    ensure_user_preferences_schema()
+    pref_ok = 0
+    mem_ok = 0
+    rows: list[dict[str, str]] = []
+    for k, v in _OPERATOR_GUARDRAILS:
+        if upsert_user_preference(pref_key=k, pref_value=v, source="operator_bootstrap"):
+            pref_ok += 1
+        mem = remember_compact_memory(
+            text=f"{k}: {v}",
+            bucket="process_rule",
+            source="operator_bootstrap",
+            reliability=0.98,
+        )
+        if bool(mem.get("ok")):
+            mem_ok += 1
+        rows.append({"key": k, "value": v})
+    return {
+        "ok": True,
+        "inserted_preferences": pref_ok,
+        "inserted_memories": mem_ok,
+        "guardrails": rows,
+        "asof": dt.datetime.now().isoformat(),
+    }
 
 
 @router.post("/ai/memory/forget")
@@ -859,12 +1033,28 @@ def ai_phase2_map_reduce_sector(payload: dict = Body(default={})):
 
 @router.get("/ai/phase2/map-reduce/{reducer_job_id}")
 def ai_phase2_map_reduce_status(reducer_job_id: str):
-    return collect_map_reduce_snapshot(reducer_job_id)
+    snap = collect_map_reduce_snapshot(reducer_job_id)
+    ctx = build_analysis_context(analysis_id=str(reducer_job_id or "").strip(), source="phase2_map_reduce")
+    if isinstance(snap, dict):
+        snap["analysis_context"] = ctx.to_dict()
+    return snap
 
 
 @router.get("/ai/phase2/map-reduce/report/{reducer_job_id}")
 def ai_phase2_map_reduce_report(reducer_job_id: str):
     rep = get_map_reduce_report(reducer_job_id)
+    ctx = build_analysis_context(analysis_id=str(reducer_job_id or "").strip(), source="phase2_map_reduce")
     if not isinstance(rep, dict):
-        return {"ok": False, "error": "report_not_found", "reducer_job_id": str(reducer_job_id or "")}
-    return {"ok": True, "report": rep}
+        return {"ok": False, "error": "report_not_found", "reducer_job_id": str(reducer_job_id or ""), "analysis_context": ctx.to_dict()}
+    return {
+        "ok": True,
+        "report": rep,
+        "analysis_context": ctx.to_dict(),
+        "chat_hydration": build_chat_hydration_payload(
+            ctx,
+            payload={
+                "analysis_type": "phase2_map_reduce",
+                "reducer_job_id": str(reducer_job_id or "").strip(),
+            },
+        ),
+    }

@@ -1,0 +1,945 @@
+{% extends "base.html" %}
+{% block title %}Portfolio | Investor OS v2{% endblock %}
+{% block head_extra %}
+<style>
+  #uRoot {
+    --bg: #f8fafc;
+    --panel: #ffffff;
+    --line: #dbe4ee;
+    --ink: #1f2f46;
+    --muted: #64748b;
+    --navy: #1e293b;
+    --up: #10b981;
+    --down: #ef4444;
+    --accent: #f47f5d;
+    width: 100%;
+    min-height: 100%;
+    overflow: visible;
+    background: var(--bg);
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .u-shell { display:block; width:100%; height:auto; overflow:visible; }
+  .u-side { display:none; }
+  .u-brand { margin:0 0 12px 0; font-size:15px; font-weight:800; letter-spacing:.02em; }
+  .u-link {
+    display:block;
+    text-decoration:none;
+    color:#d9e5f4;
+    padding:8px 10px;
+    margin:3px 0;
+    border-left:2px solid transparent;
+    font-size:12px;
+    font-weight:700;
+  }
+  .u-link:hover { background: rgba(255,255,255,.06); border-left-color:#90a4c0; }
+  .u-link.active { background: rgba(255,255,255,.10); border-left-color:#fff; }
+  .u-meta { margin-top:12px; font-size:11px; color:#9fb0c5; line-height:1.4; }
+
+  .u-main { width:100%; height:auto; overflow:visible; background: var(--bg); }
+  .u-content { padding: 0; box-sizing:border-box; }
+
+  .u-top {
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:8px;
+    flex-wrap:wrap;
+    margin-bottom: 4px;
+  }
+  .u-head-actions{
+    display:flex;
+    gap:6px;
+    align-items:center;
+    flex-wrap:wrap;
+  }
+  .u-head-actions input,
+  .u-head-actions select{
+    width:100%;
+    box-sizing:border-box;
+    border:1px solid var(--line);
+    border-radius:10px;
+    height:34px;
+    padding:0 10px;
+    font-size:11px;
+    background:#fff;
+    color:var(--ink);
+  }
+  .u-head-actions input{ min-width:88px; }
+  .u-head-actions .ticker { min-width:92px; max-width:120px; }
+  .u-head-actions .qty { min-width:70px; max-width:90px; }
+  .u-head-actions .px { min-width:80px; max-width:100px; }
+  .u-head-actions .rs { min-width:110px; max-width:160px; }
+  .edit-only{ display:none; }
+  #uRoot.edit-mode .edit-only{ display:flex; }
+  #uRoot.edit-mode th.edit-only,
+  #uRoot.edit-mode td.edit-only{ display:table-cell; }
+  #uRoot.edit-mode .edit-only.block{ display:block; }
+  .u-hidden{ display:none !important; }
+
+  .u-modal-backdrop{
+    position:fixed; inset:0; background:rgba(15,23,42,.35);
+    z-index:80; display:none; align-items:center; justify-content:center; padding:14px;
+  }
+  .u-modal{
+    width:min(480px, 96vw); background:#fff; border:1px solid var(--line); border-radius:12px; padding:12px;
+    box-shadow:0 10px 30px rgba(15,23,42,.22);
+  }
+  .u-modal h4{ margin:0 0 8px 0; font-size:16px; }
+  .u-modal-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .u-modal input,.u-modal select{
+    width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:10px; height:36px; padding:0 10px; font-size:12px;
+  }
+  .u-modal-actions{ display:flex; justify-content:flex-end; gap:8px; margin-top:10px; }
+  .u-title { margin:0; font-size:24px; font-weight:800; letter-spacing:.01em; }
+  .u-sub { margin:2px 0 0 0; font-size:12px; color:var(--muted); }
+  .u-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .u-btn {
+    border:1px solid var(--line);
+    background:#fff;
+    color:var(--ink);
+    border-radius:10px;
+    padding:7px 11px;
+    font-size:11px;
+    font-weight:700;
+    text-decoration:none;
+    cursor:pointer;
+  }
+  .u-btn.primary { border-color:var(--accent); background:var(--accent); color:#fff; }
+
+  .u-score {
+    background: var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    box-shadow: 0 4px 14px rgba(20,42,66,.04);
+    display:grid;
+    grid-template-columns:1.5fr 1fr 1fr 1fr;
+    gap:0;
+    overflow:hidden;
+    margin-bottom:12px;
+  }
+  .u-score .cell {
+    padding:7px 10px 6px;
+    border-right:1px solid #e7edf4;
+    position:relative;
+    overflow:hidden;
+  }
+  .u-score .cell:last-child { border-right:none; }
+  .u-k { font-size:11px; color:var(--muted); }
+  .u-v { font-size:18px; font-weight:800; line-height:1.2; }
+  .u-aum { font-size:30px; font-weight:900; line-height:1.05; letter-spacing:.01em; }
+  .u-pnl { margin-top:1px; font-size:11px; font-weight:800; }
+  .u-kpi-sub { margin-top:1px; font-size:10px; color:var(--muted); }
+  .u-pnl.up { color: var(--up); }
+  .u-pnl.down { color: var(--down); }
+  .u-sparkline {
+    position:absolute;
+    right:7px;
+    bottom:2px;
+    width:96px;
+    height:24px;
+    opacity:.25;
+    pointer-events:none;
+  }
+  .u-sparkline path {
+    fill:none;
+    stroke:#5b7fa3;
+    stroke-width:2;
+    stroke-linecap:round;
+    stroke-linejoin:round;
+  }
+  .u-sparkline.up path { stroke:#10b981; }
+  .u-sparkline.down path { stroke:#ef4444; }
+
+  .u-grid {
+    display:grid;
+    grid-template-columns: 1fr;
+    gap:12px;
+    align-items:start;
+  }
+  .u-grid-bottom {
+    display:grid;
+    grid-template-columns: 1fr;
+    gap:12px;
+  }
+  @media (min-width:1100px){
+    .u-grid-bottom { grid-template-columns: 1fr 1fr; }
+  }
+
+  .u-card {
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:12px;
+    box-shadow:0 2px 8px rgba(20,42,66,.03);
+  }
+  .u-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+  .u-head h3 { margin:0; font-size:17px; font-weight:800; }
+  .u-note { font-size:12px; color:var(--muted); }
+
+  table { width:100%; border-collapse:collapse; }
+  th, td { border-bottom:1px solid #e7edf4; text-align:left; vertical-align:top; }
+  th { font-size:10px; letter-spacing:.05em; text-transform:uppercase; color:#6b8197; padding:6px 6px; }
+  td { font-size:12px; color:#2d4258; padding:6px 6px; }
+  .u-ticker { font-weight:800; letter-spacing:.01em; }
+  .u-ticker-pill {
+    display:inline-block;
+    border:1px solid #cfdbeb;
+    background:#eef5ff;
+    border-radius:999px;
+    padding:2px 8px;
+    font-size:10px;
+    font-weight:800;
+    color:#335273;
+    text-decoration:none;
+  }
+  .u-day-pill {
+    display:inline-block;
+    border-radius:999px;
+    padding:2px 8px;
+    font-size:10px;
+    font-weight:800;
+    color:#fff;
+  }
+  .u-day-pill.up { background: var(--up); }
+  .u-day-pill.down { background: var(--down); }
+  .u-weight {
+    min-width:120px;
+  }
+  .u-weight-val { font-size:11px; color:#4f6277; margin-bottom:3px; }
+  .u-weight-bar {
+    width:100%;
+    height:6px;
+    border-radius:999px;
+    background:#e8eef6;
+    overflow:hidden;
+  }
+  .u-weight-fill {
+    height:100%;
+    background:linear-gradient(90deg, #5c84b8, #2f5f98);
+  }
+
+  .u-radar-name {
+    font-size:11px;
+    color:var(--muted);
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+
+  .u-insights {
+    margin-top:12px;
+    display:grid;
+    grid-template-columns:1fr;
+    gap:10px;
+  }
+  @media (min-width:1100px){ .u-insights { grid-template-columns:1fr 1fr; } }
+  .u-insight {
+    border:1px solid #dbe4ee;
+    border-radius:12px;
+    padding:10px 12px;
+    background:#fff8e8;
+    font-size:12px;
+    color:#4f6277;
+  }
+  .u-insight.blue { background:#eef6ff; }
+
+  .u-drawer { margin-top:8px; display:none; gap:8px; }
+  .u-drawer.open { display:grid; }
+  .u-drawer.positions { grid-template-columns:140px 120px 120px 1fr auto; }
+  .u-drawer.cash { grid-template-columns:120px 1fr auto; }
+  .u-drawer input {
+    border:1px solid var(--line);
+    border-radius:10px;
+    height:40px;
+    padding:0 10px;
+    font-size:12px;
+    box-sizing:border-box;
+    width:100%;
+  }
+  .u-drawer select {
+    border:1px solid var(--line);
+    border-radius:10px;
+    height:40px;
+    padding:0 10px;
+    font-size:12px;
+    box-sizing:border-box;
+    width:100%;
+    background:#fff;
+    color:var(--ink);
+  }
+
+  .u-mini-actions{display:flex; gap:6px; flex-wrap:wrap;}
+  .u-mini-action{
+    border:1px solid #d7e2ef;
+    background:#fff;
+    border-radius:8px;
+    padding:3px 8px;
+    font-size:10px;
+    font-weight:700;
+    cursor:pointer;
+    color:#2d4258;
+  }
+  .u-mini-action.danger{border-color:#fecaca;color:#b91c1c;background:#fff5f5;}
+  .u-mini-action.primary{border-color:#f9b39f;background:#fff3ef;color:#b5472f;}
+  .u-dnd-row{ cursor:grab; }
+  .u-dropzone{
+    border:1px dashed #cbd5e1;
+    background:#f8fafc;
+    color:#475569;
+    border-radius:8px;
+    padding:6px 8px;
+    font-size:10px;
+    font-weight:700;
+  }
+  .u-dropzone.drag-over{
+    border-color:#f47f5d;
+    background:#fff3ef;
+    color:#b5472f;
+  }
+  .u-card.drop-over{
+    box-shadow: 0 0 0 2px #f47f5d inset;
+    background:#fffaf7;
+  }
+
+  .u-tabs { display:flex; gap:8px; flex-wrap:wrap; }
+  .u-tab.active { border-color:#f47f5d; background:#fff1ec; color:#b5472f; }
+  .u-privacy-mask{letter-spacing:.08em;}
+
+  @media (max-width:900px){
+    .u-shell { display:block; height:auto; }
+    .u-side { display:none; }
+    .u-content { padding:0; }
+    .u-score { grid-template-columns:1fr 1fr; }
+    .u-score .cell:nth-child(2) { border-right:none; }
+    .u-head-actions{ width:100%; }
+    .u-drawer.positions, .u-drawer.cash { grid-template-columns:1fr; }
+  }
+</style>
+{% endblock %}
+{% block body %}
+{% set tv = (tab|default('all')|lower) %}
+{% if tv not in ['all', 'portfolio', 'watchlist', 'bluechips'] %}{% set tv = 'all' %}{% endif %}
+
+{% set aum_day_pnl = (metrics.aum_day_pnl_usd or 0) %}
+{% set aum_day_pct = (metrics.aum_day_pct or 0) %}
+{% set stock_day_pnl = (metrics.stock_day_pnl_usd or 0) %}
+{% set stock_day_pct = (metrics.stock_day_pct or 0) %}
+{% set cash_pct_of_aum = (((metrics.cash_value_usd or 0) / (metrics.aum_usd or 1) * 100) if (metrics.aum_usd or 0) > 0 else 0.0) %}
+
+<div id="uRoot">
+  <div class="u-shell">
+    <aside class="u-side">
+      <h3 class="u-brand">Investor OS v2</h3>
+      <a class="u-link" href="/dashboard">Home</a>
+      <a class="u-link {% if tv in ['all','portfolio'] %}active{% endif %}" href="/my_universe?tab=portfolio">Portfolio</a>
+      <a class="u-link {% if tv == 'watchlist' %}active{% endif %}" href="/my_universe?tab=watchlist">Watchlist</a>
+      <a class="u-link {% if tv == 'bluechips' %}active{% endif %}" href="/my_universe?tab=bluechips">Blue Chips</a>
+      <a class="u-link" href="/company_file">Files</a>
+      <a class="u-link" href="/memory">Memory</a>
+      <div class="u-meta">Generated: {{ generated_at or '-' }}</div>
+    </aside>
+
+    <main class="u-main">
+      <div class="u-content">
+        <div class="u-top">
+          <div>
+            <h2 class="u-title">Portfolio</h2>
+            <div class="u-sub">Overview</div>
+          </div>
+          <div class="u-actions">
+            <form method="post" action="/company_file/sec-sync-my?return_to=my_universe" style="margin:0;">
+              <button type="submit" class="u-btn">Sync SEC</button>
+            </form>
+            <button type="button" class="u-btn" id="toggleEdit">Edit</button>
+            <button type="button" class="u-btn" id="togglePrivacy">Show Values</button>
+          </div>
+        </div>
+
+        <div class="u-score">
+          <div class="cell">
+            <div class="u-k">Net Liquidity (AUM)</div>
+            <div class="u-aum"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.aum_usd or 0))|e }}">{{ (metrics.aum_usd or 0)|abbr_money }}</span></div>
+            <div class="u-pnl {% if aum_day_pnl >= 0 %}up{% else %}down{% endif %}">
+              Today: <span class="sv" data-raw="{{ ('{:+,.2f}'.format(aum_day_pnl or 0))|e }}">{{ "{:+,.2f}".format(aum_day_pnl or 0) }}</span> (<span class="sv" data-raw="{{ ('{:+.2f}%'.format(aum_day_pct or 0))|e }}">{{ "{:+.2f}%".format(aum_day_pct or 0) }}</span>)
+            </div>
+            <svg class="u-sparkline {% if aum_day_pct >= 0 %}up{% else %}down{% endif %}" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M2 20 L12 18 L22 19 L32 15 L42 14 L52 12 L62 11 L72 9 L82 10 L92 7"></path>
+            </svg>
+          </div>
+          <div class="cell">
+            <div class="u-k">Stock Value</div>
+            <div class="u-v"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.stock_value_usd or 0))|e }}">{{ (metrics.stock_value_usd or 0)|abbr_money }}</span></div>
+            <div class="u-kpi-sub {% if stock_day_pnl >= 0 %}u-pnl up{% else %}u-pnl down{% endif %}">Today: <span class="sv" data-raw="{{ ('{:+,.2f}'.format(stock_day_pnl or 0))|e }}">{{ "{:+,.2f}".format(stock_day_pnl or 0) }}</span> (<span class="sv" data-raw="{{ ('{:+.2f}%'.format(stock_day_pct or 0))|e }}">{{ "{:+.2f}%".format(stock_day_pct or 0) }}</span>)</div>
+            <svg class="u-sparkline {% if stock_day_pct >= 0 %}up{% else %}down{% endif %}" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M2 19 L12 18 L22 17 L32 16 L42 15 L52 13 L62 12 L72 10 L82 9 L92 8"></path>
+            </svg>
+          </div>
+          <div class="cell">
+            <div class="u-k">Cash</div>
+            <div class="u-v"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.cash_value_usd or 0))|e }}">{{ (metrics.cash_value_usd or 0)|abbr_money }}</span></div>
+            <div class="u-kpi-sub">AUM share: <span class="sv" data-raw="{{ ('{:.2f}%'.format(cash_pct_of_aum or 0))|e }}">{{ "{:.2f}%".format(cash_pct_of_aum or 0) }}</span></div>
+            <form id="cashQuickForm" class="u-head-actions edit-only" style="margin-top:4px;">
+              <select id="cqAction" class="qty">
+                <option value="add">+ Cash</option>
+                <option value="remove">- Cash</option>
+              </select>
+              <input id="cqAmount" class="qty" placeholder="Amount">
+              <button type="submit" class="u-btn">Apply</button>
+            </form>
+            <svg class="u-sparkline" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M2 16 L12 16 L22 15 L32 16 L42 15 L52 15 L62 14 L72 14 L82 13 L92 13"></path>
+            </svg>
+          </div>
+          <div class="cell">
+            <div class="u-k">Cash Drag</div>
+            <div class="u-v"><span class="sv" data-raw="{{ ('{:.2f}%'.format(metrics.cash_drag_pct or 0))|e }}">{{ "{:.2f}%".format(metrics.cash_drag_pct or 0) }}</span></div>
+            <div class="u-kpi-sub">Based on current stock vs cash mix</div>
+            <svg class="u-sparkline" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M2 10 L12 10 L22 11 L32 11 L42 12 L52 13 L62 13 L72 14 L82 15 L92 16"></path>
+            </svg>
+          </div>
+        </div>
+
+        <div class="u-grid">
+          <section class="u-card">
+            <div class="u-head">
+              <h3>Portfolio</h3>
+              <form id="portfolioQuickForm" class="u-head-actions edit-only">
+                <select id="pqAction" class="qty">
+                  <option value="buy">Buy</option>
+                  <option value="sell">Sell</option>
+                  <option value="exit">Exit</option>
+                </select>
+                <input id="pqTicker" class="ticker js-ticker-input" list="tickerHints" placeholder="Ticker">
+                <input id="pqShares" class="qty" placeholder="Shares">
+                <input id="pqPrice" class="px" placeholder="Price">
+                <input id="pqReason" class="rs" placeholder="Reason">
+                <button type="submit" class="u-btn">Apply</button>
+              </form>
+            </div>
+            <table>
+                <thead><tr><th>Ticker</th><th>Shares</th><th>Avg Cost</th><th>Price</th><th>Day %</th><th>Market Value</th><th>Weight</th><th class="edit-only">Edit</th></tr></thead>
+                <tbody>
+                {% for r in metrics.portfolio_rows %}
+                <tr class="u-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="portfolio">
+                  <td>
+                    <a class="u-ticker" href="/company_file?t={{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
+                    <div class="u-note">{{ r.name or '-' }}</div>
+                  </td>
+                  <td>{{ r.shares or '-' }}</td>
+                  <td>{% if (r.cost_num or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.cost_num or 0))|e }}">{{ "USD {:,.2f}".format(r.cost_num or 0) }}</span>{% else %}-{% endif %}</td>
+                  <td>{% if (r.price_live or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.price_live or 0))|e }}">{{ "USD {:,.2f}".format(r.price_live or 0) }}</span>{% else %}-{% endif %}</td>
+                  <td>
+                    {% if r.day_pct is not none %}
+                    <span class="u-day-pill {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>
+                    {% else %}-{% endif %}
+                  </td>
+                  <td>{% if (r.value_usd or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.value_usd or 0))|e }}">{{ "USD {:,.2f}".format(r.value_usd or 0) }}</span>{% else %}-{% endif %}</td>
+                  <td class="u-weight">
+                    <div class="u-weight-val">{{ "{:.2f}%".format(r.weight_pct or 0) }}</div>
+                    <div class="u-weight-bar"><div class="u-weight-fill" style="width: {{ [r.weight_pct or 0, 100]|min }}%;"></div></div>
+                  </td>
+                  <td class="edit-only">
+                    <div class="u-mini-actions">
+                      <button type="button" class="u-mini-action primary js-open-trade" data-side="buy" data-ticker="{{ (r.ticker or '')|e }}">Buy</button>
+                      <button type="button" class="u-mini-action js-open-trade" data-side="sell" data-ticker="{{ (r.ticker or '')|e }}">Sell</button>
+                      <button type="button" class="u-mini-action danger js-exit-pos" data-ticker="{{ (r.ticker or '')|e }}">Remove</button>
+                    </div>
+                  </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="8" class="u-note">No portfolio holdings yet.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </section>
+
+          <div class="u-grid-bottom">
+            <section class="u-card" data-drop-target="watchlist">
+              <div class="u-head">
+                <h3>Watchlist</h3>
+                <form id="watchlistQuickForm" class="u-head-actions edit-only">
+                  <input id="wqTicker" class="ticker js-ticker-input" list="tickerHints" placeholder="Ticker">
+                  <button type="button" id="wqAdd" class="u-btn">Add</button>
+                  <button type="button" id="wqRemove" class="u-btn">Remove</button>
+                </form>
+                <div class="u-dropzone edit-only block" data-drop-target="watchlist">Drop ticker here to move</div>
+              </div>
+              {% set radar = watchlist_full|sort(attribute='day_abs_pct', reverse=true) %}
+              <table>
+                <thead><tr><th>Ticker</th><th>Price</th><th>Day %</th><th>Since Added</th><th>Mkt Cap</th><th class="edit-only">Edit</th></tr></thead>
+                <tbody>
+                  {% for r in radar %}
+                  <tr class="u-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="watchlist">
+                    <td>
+                      <a class="u-ticker" href="/company_file?t={{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
+                      <div class="u-radar-name">{{ r.name or '-' }}</div>
+                    </td>
+                    <td>{% if (r.price_now or 0) > 0 %}{{ "USD {:,.2f}".format(r.price_now or 0) }}{% else %}-{% endif %}</td>
+                    <td>{% if r.day_pct is not none %}<span class="u-day-pill {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>{% else %}-{% endif %}</td>
+                    <td>
+                      {% if r.since_added_pct is not none %}
+                      <span class="u-day-pill {% if (r.since_added_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.since_added_pct or 0) }}</span>
+                      {% else %}-{% endif %}
+                    </td>
+                    <td>{% if (r.market_cap or 0) > 0 %}{{ (r.market_cap or 0)|abbr_money }}{% else %}-{% endif %}</td>
+                    <td class="edit-only"><button type="button" class="u-mini-action danger js-wl-remove-row" data-ticker="{{ (r.ticker or '')|e }}">Remove</button></td>
+                  </tr>
+                  {% else %}
+                  <tr><td colspan="6" class="u-note">No watchlist names yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </section>
+
+            <section class="u-card" data-drop-target="bluechips">
+              <div class="u-head">
+                <h3>Blue Chips</h3>
+                <form id="bluechipsQuickForm" class="u-head-actions edit-only">
+                  <input id="bqTicker" class="ticker js-ticker-input" list="tickerHints" placeholder="Ticker">
+                  <button type="button" id="bqAdd" class="u-btn">Add</button>
+                  <button type="button" id="bqRemove" class="u-btn">Remove</button>
+                </form>
+                <div class="u-dropzone edit-only block" data-drop-target="bluechips">Drop ticker here to move</div>
+              </div>
+              {% set bradar = bluechips_full|sort(attribute='day_abs_pct', reverse=true) %}
+              <table>
+                <thead><tr><th>Ticker</th><th>Price</th><th>Day %</th><th>Since Added</th><th>Mkt Cap</th><th class="edit-only">Edit</th></tr></thead>
+                <tbody>
+                  {% for r in bradar %}
+                  <tr class="u-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="bluechips">
+                    <td>
+                      <a class="u-ticker" href="/company_file?t={{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
+                      <div class="u-radar-name">{{ r.name or '-' }}</div>
+                    </td>
+                    <td>{% if (r.price_now or 0) > 0 %}{{ "USD {:,.2f}".format(r.price_now or 0) }}{% else %}-{% endif %}</td>
+                    <td>{% if r.day_pct is not none %}<span class="u-day-pill {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>{% else %}-{% endif %}</td>
+                    <td>
+                      {% if r.since_added_pct is not none %}
+                      <span class="u-day-pill {% if (r.since_added_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.since_added_pct or 0) }}</span>
+                      {% else %}-{% endif %}
+                    </td>
+                    <td>{% if (r.market_cap or 0) > 0 %}{{ (r.market_cap or 0)|abbr_money }}{% else %}-{% endif %}</td>
+                    <td class="edit-only"><button type="button" class="u-mini-action danger js-bc-remove-row" data-ticker="{{ (r.ticker or '')|e }}">Remove</button></td>
+                  </tr>
+                  {% else %}
+                  <tr><td colspan="6" class="u-note">No blue chip names yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </section>
+          </div>
+        </div>
+
+        <div class="u-insights">
+          <div class="u-insight">
+            <strong>⚠ Portfolio Intelligence</strong>
+            <ul style="margin:8px 0 0 16px; padding:0;">
+              {% for ln in universe_portfolio_report %}<li>{{ ln }}</li>{% else %}<li class="u-note">No portfolio insights yet.</li>{% endfor %}
+            </ul>
+          </div>
+          <div class="u-insight blue">
+            <strong>💡 Watchlist Intelligence</strong>
+            <ul style="margin:8px 0 0 16px; padding:0;">
+              {% for ln in universe_watchlist_report %}<li>{{ ln }}</li>{% else %}<li class="u-note">No watchlist insights yet.</li>{% endfor %}
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+<datalist id="tickerHints"></datalist>
+<div id="tradeModalBackdrop" class="u-modal-backdrop">
+  <div class="u-modal">
+    <h4 id="tradeModalTitle">Trade</h4>
+    <form id="tradeModalForm">
+      <div class="u-modal-grid">
+        <select id="tmSide">
+          <option value="buy">Buy</option>
+          <option value="sell">Sell</option>
+        </select>
+        <input id="tmTicker" class="js-ticker-input" list="tickerHints" placeholder="Ticker">
+        <input id="tmShares" placeholder="Shares">
+        <input id="tmPrice" placeholder="Price">
+        <input id="tmReason" style="grid-column:1/-1;" placeholder="Reason (optional)">
+      </div>
+      <div class="u-modal-actions">
+        <button type="button" class="u-btn" id="tmCancel">Cancel</button>
+        <button type="submit" class="u-btn primary">Apply</button>
+      </div>
+    </form>
+  </div>
+</div>
+<div id="moveConfirmBackdrop" class="u-modal-backdrop">
+  <div class="u-modal">
+    <h4>Move to Watchlist</h4>
+    <div class="u-note" id="moveConfirmText">Move ticker?</div>
+    <div class="u-modal-actions">
+      <button type="button" class="u-btn" id="mcCancel">Cancel</button>
+      <button type="button" class="u-btn primary" id="mcConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  (function(){
+    function postKV(url, obj, cb){
+      var fd = new URLSearchParams();
+      Object.keys(obj || {}).forEach(function(k){ fd.set(k, String(obj[k] == null ? '' : obj[k])); });
+      fetch(url, {
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
+        body:fd.toString()
+      }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok, data:d||{}}; }); })
+        .then(function(res){ if(cb) cb(res); }).catch(function(){ if(cb) cb({ok:false, data:{}}); });
+    }
+
+    var root = document.getElementById('uRoot');
+    var privacyBtn = document.getElementById('togglePrivacy');
+    var editBtn = document.getElementById('toggleEdit');
+
+    var privacyKey = 'portfolioPrivacyMaskV1';
+    function maskText(raw){
+      var s = String(raw || '').trim();
+      if(!s){ return '••••••'; }
+      if(s.indexOf('USD ') === 0){ return 'USD ••••••'; }
+      if(s.indexOf('%') >= 0){ return '•••%'; }
+      return '••••••';
+    }
+    function applyPrivacy(masked){
+      document.querySelectorAll('.sv').forEach(function(el){
+        var raw = String(el.getAttribute('data-raw') || el.textContent || '').trim();
+        if(!el.getAttribute('data-raw')){ el.setAttribute('data-raw', raw); }
+        el.textContent = masked ? maskText(raw) : raw;
+        if(masked){ el.classList.add('u-privacy-mask'); } else { el.classList.remove('u-privacy-mask'); }
+      });
+      if(privacyBtn){ privacyBtn.textContent = masked ? 'Show Values' : 'Hide Values'; }
+      try{ localStorage.setItem(privacyKey, masked ? '1' : '0'); }catch(_e){}
+    }
+    var maskedOnLoad = true;
+    try{
+      var saved = localStorage.getItem(privacyKey);
+      if(saved === '0'){ maskedOnLoad = false; }
+    }catch(_e){}
+    applyPrivacy(maskedOnLoad);
+    if(privacyBtn){
+      privacyBtn.addEventListener('click', function(){
+        var nowMasked = privacyBtn.textContent === 'Show Values';
+        applyPrivacy(!nowMasked);
+      });
+    }
+    var editKey = 'myUniverseEditModeV1';
+    function applyEditMode(on){
+      if(!root) return;
+      if(on){ root.classList.add('edit-mode'); } else { root.classList.remove('edit-mode'); }
+      if(editBtn){ editBtn.textContent = on ? 'Done' : 'Edit'; }
+      try{ localStorage.setItem(editKey, on ? '1' : '0'); }catch(_e){}
+    }
+    var editOn = false;
+    try{ editOn = localStorage.getItem(editKey) === '1'; }catch(_e){}
+    applyEditMode(editOn);
+    if(editBtn){
+      editBtn.addEventListener('click', function(){ applyEditMode(!root.classList.contains('edit-mode')); });
+    }
+
+    var tickerHints = document.getElementById('tickerHints');
+    var tickerInputs = Array.prototype.slice.call(document.querySelectorAll('.js-ticker-input'));
+    var hintTimer = null;
+    function refreshTickerHints(q){
+      if(!tickerHints) return;
+      var needle = String(q || '').trim();
+      if(!needle || needle.length < 1) return;
+      fetch('/api/global-search?q=' + encodeURIComponent(needle) + '&limit=12')
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          var rs = (d && d.results) ? d.results : [];
+          var seen = {};
+          tickerHints.innerHTML = '';
+          rs.forEach(function(it){
+            var ttl = String((it && it.title) || '');
+            var m = ttl.match(/^([A-Z][A-Z0-9.\-]{0,10})\b/);
+            if(!m) return;
+            var tk = m[1];
+            if(seen[tk]) return;
+            seen[tk] = true;
+            var opt = document.createElement('option');
+            opt.value = tk;
+            tickerHints.appendChild(opt);
+          });
+        }).catch(function(){});
+    }
+    tickerInputs.forEach(function(inp){
+      inp.addEventListener('input', function(){
+        var v = String(inp.value || '');
+        if(hintTimer) clearTimeout(hintTimer);
+        hintTimer = setTimeout(function(){ refreshTickerHints(v); }, 140);
+      });
+      inp.addEventListener('focus', function(){
+        var v = String(inp.value || '');
+        refreshTickerHints(v);
+      });
+    });
+
+    var pqForm = document.getElementById('portfolioQuickForm');
+    var pqAction = document.getElementById('pqAction');
+    var pqTicker = document.getElementById('pqTicker');
+    var pqShares = document.getElementById('pqShares');
+    var pqPrice = document.getElementById('pqPrice');
+    var pqReason = document.getElementById('pqReason');
+    function submitPortfolio(side, ticker, shares, price, reason){
+      return postKV('/my_universe/portfolio/upsert', {ticker:ticker, side:side, shares:shares, cost:(price||'0'), trade_reason:reason, note:''}, function(){ window.location.reload(); });
+    }
+    if(pqForm){
+      pqForm.addEventListener('submit', function(e){
+        e.preventDefault();
+        var a = String((pqAction && pqAction.value) || '');
+        var t = String((pqTicker && pqTicker.value) || '').trim().toUpperCase();
+        var sh = String((pqShares && pqShares.value) || '').trim();
+        var px = String((pqPrice && pqPrice.value) || '').trim();
+        var rs = String((pqReason && pqReason.value) || '').trim();
+        if(a === 'exit'){
+          return submitPortfolio('sell', t, '0', '0', rs);
+        }
+        return submitPortfolio(a, t, sh, px, rs);
+      });
+    }
+
+    var wqTicker = document.getElementById('wqTicker');
+    var wqAdd = document.getElementById('wqAdd');
+    var wqRemove = document.getElementById('wqRemove');
+    function bindTickerAction(btn, input, url, extra){
+      if(!btn) return;
+      btn.addEventListener('click', function(){
+        var t = String((input && input.value) || '').trim().toUpperCase();
+        if(!t) return;
+        var payload = {ticker:t};
+        if(extra && typeof extra === 'object'){
+          Object.keys(extra).forEach(function(k){ payload[k] = extra[k]; });
+        }
+        postKV(url, payload, function(){ window.location.reload(); });
+      });
+    }
+    bindTickerAction(wqAdd, wqTicker, '/my_universe/watchlist/add', {reason:''});
+    bindTickerAction(wqRemove, wqTicker, '/my_universe/watchlist/remove', {});
+
+    var bqTicker = document.getElementById('bqTicker');
+    var bqAdd = document.getElementById('bqAdd');
+    var bqRemove = document.getElementById('bqRemove');
+    bindTickerAction(bqAdd, bqTicker, '/my_universe/bluechips/add', {reason:''});
+    bindTickerAction(bqRemove, bqTicker, '/my_universe/bluechips/remove', {});
+
+    var cqForm = document.getElementById('cashQuickForm');
+    var cqAction = document.getElementById('cqAction');
+    var cqAmount = document.getElementById('cqAmount');
+    if(cqForm){
+      cqForm.addEventListener('submit', function(e){
+        e.preventDefault();
+        var amt = Number((cqAmount && cqAmount.value) || '0');
+        if(!amt) return;
+        var sign = (String((cqAction && cqAction.value) || 'add') === 'remove') ? -1 : 1;
+        postKV('/my_universe/cash/upsert', {currency:'USD', amount:String(sign * Math.abs(amt))}, function(){ window.location.reload(); });
+      });
+    }
+
+    function moveTickerBetweenLists(ticker, from, to){
+      ticker = String(ticker || '').trim().toUpperCase();
+      if(!ticker || !to){ return; }
+      from = String(from || '');
+      if(from && from === to){ return; }
+      function moveRowDom(ticker, to){
+        ticker = String(ticker || '').toUpperCase();
+        var srcRow = document.querySelector('tr[data-dnd-ticker="' + ticker + '"]');
+        if(!srcRow) return false;
+        var targetTable = null;
+        if(to === 'watchlist'){
+          targetTable = document.querySelector('section[data-drop-target="watchlist"] table tbody');
+        } else if(to === 'bluechips'){
+          targetTable = document.querySelector('section[data-drop-target="bluechips"] table tbody');
+        }
+        if(!targetTable) return false;
+        var cloned = srcRow.cloneNode(true);
+        cloned.setAttribute('data-dnd-source', to);
+        // remove edit-only buttons that do not fit target list semantics
+        var editCell = cloned.querySelector('td.edit-only');
+        if(editCell){
+          if(to === 'watchlist'){
+            editCell.innerHTML = '<button type="button" class="u-mini-action danger js-wl-remove-row" data-ticker="' + ticker + '">Remove</button>';
+          } else if(to === 'bluechips'){
+            editCell.innerHTML = '<button type="button" class="u-mini-action danger js-bc-remove-row" data-ticker="' + ticker + '">Remove</button>';
+          }
+        }
+        // Keep first 3 columns for list tables (ticker/price/day + optional since/mcap/edit)
+        while(cloned.children.length > 6){
+          cloned.removeChild(cloned.lastElementChild);
+        }
+        targetTable.insertBefore(cloned, targetTable.firstChild);
+        srcRow.remove();
+        return true;
+      }
+      function doneToTab(tab, ticker){
+        if(moveRowDom(ticker, tab)){
+          return;
+        }
+        var q = new URLSearchParams(window.location.search || '');
+        q.set('tab', tab);
+        window.location.search = q.toString();
+      }
+      function showErr(res, fallback){
+        var msg = (res && res.data && (res.data.message || res.data.error)) ? String(res.data.message || res.data.error) : String(fallback || 'Could not move ticker.');
+        alert(msg);
+      }
+      if(from === 'portfolio' && to === 'watchlist'){
+        requestPortfolioToWatchlistMove(ticker);
+        return;
+      }
+      if(to === 'watchlist'){
+        postKV('/my_universe/watchlist/add', {ticker:ticker, reason:''}, function(res){
+          if(!(res && res.ok)){ return showErr(res, 'Could not add to Watchlist.'); }
+          doneToTab('watchlist', ticker);
+        });
+        return;
+      }
+      if(to === 'bluechips'){
+        postKV('/my_universe/bluechips/add', {ticker:ticker, reason:''}, function(res){
+          if(!(res && res.ok)){ return showErr(res, 'Could not add to Blue Chips.'); }
+          doneToTab('bluechips', ticker);
+        });
+      }
+    }
+
+    var draggedTicker = '';
+    var draggedSource = '';
+    Array.prototype.slice.call(document.querySelectorAll('tr[data-dnd-ticker]')).forEach(function(row){
+      row.setAttribute('draggable', 'true');
+      row.addEventListener('dragstart', function(e){
+        draggedTicker = String(row.getAttribute('data-dnd-ticker') || '').toUpperCase();
+        draggedSource = String(row.getAttribute('data-dnd-source') || '');
+        try{ e.dataTransfer.setData('text/plain', JSON.stringify({ticker:draggedTicker, source:draggedSource})); }catch(_e){}
+      });
+      row.addEventListener('dragend', function(){
+        draggedTicker = '';
+        draggedSource = '';
+      });
+    });
+    Array.prototype.slice.call(document.querySelectorAll('[data-drop-target]')).forEach(function(zone){
+      zone.addEventListener('dragover', function(e){
+        e.preventDefault();
+        zone.classList.add('drag-over');
+        zone.classList.add('drop-over');
+      });
+      zone.addEventListener('dragleave', function(){
+        zone.classList.remove('drag-over');
+        zone.classList.remove('drop-over');
+      });
+      zone.addEventListener('drop', function(e){
+        e.preventDefault();
+        zone.classList.remove('drag-over');
+        zone.classList.remove('drop-over');
+        var payload = null;
+        try{
+          payload = JSON.parse(e.dataTransfer.getData('text/plain') || '{}');
+        }catch(_e){
+          payload = null;
+        }
+        var ticker = String((payload && payload.ticker) || draggedTicker || '').toUpperCase();
+        var from = String((payload && payload.source) || draggedSource || '');
+        var to = String(zone.getAttribute('data-drop-target') || '');
+        moveTickerBetweenLists(ticker, from, to);
+      });
+    });
+
+    var mcBackdrop = document.getElementById('moveConfirmBackdrop');
+    var mcText = document.getElementById('moveConfirmText');
+    var mcCancel = document.getElementById('mcCancel');
+    var mcConfirm = document.getElementById('mcConfirm');
+    var pendingMoveTicker = '';
+    function requestPortfolioToWatchlistMove(ticker){
+      pendingMoveTicker = String(ticker || '').toUpperCase();
+      if(!pendingMoveTicker || !mcBackdrop){ return; }
+      if(mcText){ mcText.textContent = 'Add ' + pendingMoveTicker + ' to Watchlist and remove it from Portfolio?'; }
+      mcBackdrop.style.display = 'flex';
+    }
+    function closeMoveConfirm(){
+      if(mcBackdrop) mcBackdrop.style.display = 'none';
+      pendingMoveTicker = '';
+    }
+    if(mcCancel){ mcCancel.addEventListener('click', closeMoveConfirm); }
+    if(mcBackdrop){
+      mcBackdrop.addEventListener('click', function(e){ if(e.target === mcBackdrop) closeMoveConfirm(); });
+    }
+    if(mcConfirm){
+      mcConfirm.addEventListener('click', function(){
+        var t = String(pendingMoveTicker || '').toUpperCase();
+        if(!t){ return closeMoveConfirm(); }
+        postKV('/my_universe/watchlist/add', {ticker:t, reason:'moved_from_portfolio'}, function(res){
+          if(!(res && res.ok)){ return closeMoveConfirm(); }
+          postKV('/my_universe/portfolio/upsert', {ticker:t, side:'sell', shares:'0', cost:'0', trade_reason:'other', note:'moved_to_watchlist'}, function(){ window.location.reload(); });
+        });
+      });
+    }
+
+    var tmBackdrop = document.getElementById('tradeModalBackdrop');
+    var tmForm = document.getElementById('tradeModalForm');
+    var tmSide = document.getElementById('tmSide');
+    var tmTicker = document.getElementById('tmTicker');
+    var tmShares = document.getElementById('tmShares');
+    var tmPrice = document.getElementById('tmPrice');
+    var tmReason = document.getElementById('tmReason');
+    var tmCancel = document.getElementById('tmCancel');
+    var tmTitle = document.getElementById('tradeModalTitle');
+    function openTradeModal(side, ticker){
+      if(!tmBackdrop) return;
+      if(tmSide) tmSide.value = side || 'buy';
+      if(tmTicker) tmTicker.value = String(ticker || '').toUpperCase();
+      if(tmShares) tmShares.value = '';
+      if(tmPrice) tmPrice.value = '';
+      if(tmReason) tmReason.value = '';
+      if(tmTitle) tmTitle.textContent = (side === 'sell' ? 'Sell Stock' : 'Buy Stock');
+      tmBackdrop.style.display = 'flex';
+      if(tmShares) tmShares.focus();
+    }
+    function closeTradeModal(){
+      if(tmBackdrop) tmBackdrop.style.display = 'none';
+    }
+    if(tmCancel){ tmCancel.addEventListener('click', closeTradeModal); }
+    if(tmBackdrop){
+      tmBackdrop.addEventListener('click', function(e){ if(e.target === tmBackdrop) closeTradeModal(); });
+    }
+    if(tmForm){
+      tmForm.addEventListener('submit', function(e){
+        e.preventDefault();
+        var side = String((tmSide && tmSide.value) || 'buy');
+        var ticker = String((tmTicker && tmTicker.value) || '').trim().toUpperCase();
+        var shares = String((tmShares && tmShares.value) || '').trim();
+        var price = String((tmPrice && tmPrice.value) || '').trim();
+        var reason = String((tmReason && tmReason.value) || '').trim();
+        submitPortfolio(side, ticker, shares, price, reason);
+      });
+    }
+    document.addEventListener('click', function(e){
+      var el = e.target;
+      if(!(el && el.getAttribute)) return;
+      if(el.classList.contains('js-open-trade')){
+        return openTradeModal(String(el.getAttribute('data-side') || 'buy'), String(el.getAttribute('data-ticker') || ''));
+      }
+      if(el.classList.contains('js-exit-pos')){
+        var tk = String(el.getAttribute('data-ticker') || '').toUpperCase();
+        return submitPortfolio('sell', tk, '0', '0', 'other');
+      }
+      if(el.classList.contains('js-wl-remove-row')){
+        var tw = String(el.getAttribute('data-ticker') || '').toUpperCase();
+        return postKV('/my_universe/watchlist/remove', {ticker:tw}, function(){ window.location.reload(); });
+      }
+      if(el.classList.contains('js-bc-remove-row')){
+        var tb = String(el.getAttribute('data-ticker') || '').toUpperCase();
+        return postKV('/my_universe/bluechips/remove', {ticker:tb}, function(){ window.location.reload(); });
+      }
+    });
+
+  })();
+</script>
+{% endblock %}

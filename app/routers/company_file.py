@@ -1,0 +1,961 @@
+from __future__ import annotations
+
+import datetime as dt
+import html
+import mimetypes
+import os
+import re
+import subprocess
+import threading
+import time
+import urllib.parse
+from pathlib import Path
+
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, JSONResponse
+
+from app.core.http import is_hx_request
+from app.services.company_file_service import (
+    add_company_note,
+    add_company_reminder,
+    add_company_task,
+    add_competitor,
+    company_detail,
+    index_filters,
+    list_companies,
+    list_filters,
+    moat_filters,
+    remove_competitor,
+    save_company_moats,
+    safe_resolve_filing_path,
+    toggle_company_reminder,
+    toggle_company_task,
+    update_competitor,
+    update_company_note,
+    update_company_reminder,
+    update_company_task,
+    delete_company_note,
+    delete_company_reminder,
+    delete_company_task,
+)
+from app.services.sec_sync_state import load_sec_sync_state, set_ticker_sync_state
+from app.services.google_workspace_service import send_email
+from app.services.organizer_service import add_general_note, suggest_ir_emails
+from app.services.portfolio_memory_service import get_holdings
+from app.services.price_metrics_service import refresh_price_metrics
+from app.services.mini_statements_service import refresh_mini_statements, fetch_historical_financials, compute_financial_deltas
+from app.services.company_intel_service import refresh_company_intel
+from app.services.earnings_transcript_service import refresh_earnings_transcripts_from_sec
+from app.services.sec_ingest_pipeline_service import ingest_sec_facts_for_ticker
+
+
+router = APIRouter()
+_SYNC_LOCK = threading.Lock()
+_SEC_SYNC_STATE: dict[str, dict[str, str]] = {}
+
+
+def _parse_show_ai_flag(raw: object) -> bool | None:
+    if raw is None:
+        return None
+    val = str(raw).strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _resolve_show_ai(request: Request, fallback: bool = False) -> bool:
+    direct = _parse_show_ai_flag(request.query_params.get("show_ai"))
+    if direct is not None:
+        return direct
+
+    hx_current = request.headers.get("HX-Current-URL", "")
+    if hx_current:
+        try:
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(hx_current).query)
+            parsed = _parse_show_ai_flag((q.get("show_ai") or [None])[0])
+            if parsed is not None:
+                return parsed
+        except Exception:
+            pass
+
+    referer = request.headers.get("Referer", "")
+    if referer:
+        try:
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(referer).query)
+            parsed = _parse_show_ai_flag((q.get("show_ai") or [None])[0])
+            if parsed is not None:
+                return parsed
+        except Exception:
+            pass
+    return bool(fallback)
+
+
+def _portfolio_context_for_ticker(ticker: str) -> dict[str, object]:
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        return {"is_held": False, "shares": 0.0, "avg_cost": 0.0, "position_cost": 0.0}
+    shares = 0.0
+    avg_cost = 0.0
+    try:
+        for r in get_holdings(limit=3000):
+            if str(r.get("ticker") or "").strip().upper() != tk:
+                continue
+            shares = float(r.get("shares") or 0.0)
+            avg_cost = float(r.get("cost") or 0.0)
+            break
+    except Exception:
+        shares = 0.0
+        avg_cost = 0.0
+    pos_cost = shares * avg_cost
+    return {
+        "is_held": bool(shares > 0),
+        "shares": float(shares),
+        "avg_cost": float(avg_cost),
+        "position_cost": float(pos_cost),
+    }
+
+
+def _render_company_detail(request: Request, ticker: str, message: str = "", show_ai: bool | None = None):
+    templates = request.app.state.templates
+    show_ai_flag = _resolve_show_ai(request, fallback=bool(show_ai))
+    detail = company_detail(ticker)
+    if detail:
+        ev = list(detail.get("timeline_events") or [])
+        detail["timeline_events_visible"] = ev if show_ai_flag else [x for x in ev if not bool(x.get("is_ai"))]
+        detail["show_ai"] = "1" if show_ai_flag else "0"
+    portfolio_context = _portfolio_context_for_ticker(ticker)
+    ir_suggestions = suggest_ir_emails(ticker=str(ticker or "").strip().upper(), company=str((detail or {}).get("name") or ""), limit=8) if detail else []
+    if not detail:
+        if is_hx_request(request):
+            return templates.TemplateResponse(
+                "components/company_detail_body.html",
+                {"request": request, "message": "Company not found.", "detail": {"ticker": ticker, "name": ticker, "country": "-", "industry": "Unknown", "market_cap": "-", "moat_options": [], "moat_keys": [], "moats": [], "competitors": [], "notes": [], "tasks": [], "reminders": [], "filings": [], "timeline_events": [], "timeline_events_visible": [], "show_ai": "0"}, "ir_suggestions": [], "portfolio_context": portfolio_context},
+            )
+        return RedirectResponse(url="/company_file?msg=" + urllib.parse.quote("Company not found."), status_code=303)
+    if is_hx_request(request):
+        return templates.TemplateResponse(
+            "components/company_detail_body.html",
+            {"request": request, "message": message, "detail": detail, "ir_suggestions": ir_suggestions, "portfolio_context": portfolio_context},
+        )
+    return templates.TemplateResponse(
+        "company_detail.html",
+        {"request": request, "message": message, "detail": detail, "ir_suggestions": ir_suggestions, "portfolio_context": portfolio_context},
+    )
+
+
+def _back_to_ticker(ticker: str, msg: str = "") -> RedirectResponse:
+    t = str(ticker or "").strip().upper()
+    url = f"/company_file?t={urllib.parse.quote(t)}"
+    if msg:
+        url += "&msg=" + urllib.parse.quote(msg)
+    return RedirectResponse(url=url, status_code=303)
+
+
+def _sync_python_bin() -> str:
+    root = Path(__file__).resolve().parents[2]
+    venv_py = root / ".venv-memory" / "bin" / "python"
+    if venv_py.exists() and os.access(str(venv_py), os.X_OK):
+        return str(venv_py)
+    sys_py = Path("/Library/Frameworks/Python.framework/Versions/3.14/bin/python3")
+    if sys_py.exists() and os.access(str(sys_py), os.X_OK):
+        return str(sys_py)
+    return "python3"
+
+
+def _sync_ticker_worker(ticker: str) -> None:
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return
+    root = Path(__file__).resolve().parents[2]
+    py = _sync_python_bin()
+    steps = [
+        [py, "research_agent.py", "init"],
+        [py, "research_agent.py", "watch", t],
+        [py, "research_agent.py", "update", "--ticker", t, "--full"],
+    ]
+    ok = True
+    msg = "SEC filing sync complete."
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"v2_company_sec_sync_{t}.log"
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n=== {dt.datetime.now().isoformat()} sync {t} ===\n")
+        for step in steps:
+            success, err = _run_step_with_retries(step, root=root, fh=fh, timeout=1800, retries=3)
+            if not success:
+                ok = False
+                msg = f"Sync failed at step: {' '.join(step[1:3])} | {err[:160]}"
+                break
+    with _SYNC_LOCK:
+        _SEC_SYNC_STATE[t] = {
+            "running": "0",
+            "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "ok" if ok else "failed",
+            "message": msg,
+        }
+        set_ticker_sync_state(t, _SEC_SYNC_STATE[t])
+
+
+def _sync_my_companies_worker() -> None:
+    key = "MY_COMPANIES_BATCH"
+    root = Path(__file__).resolve().parents[2]
+    py = _sync_python_bin()
+    step = [py, "tools/sec_sync_my_companies.py", "--days", "7", "--full-empty-limit", "6"]
+    ok = True
+    msg = "My companies SEC sync complete."
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "v2_sec_sync_my_companies.log"
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n=== {dt.datetime.now().isoformat()} sync my companies ===\n")
+        success, err = _run_step_with_retries(step, root=root, fh=fh, timeout=7200, retries=2)
+        if not success:
+            ok = False
+            msg = f"My companies SEC sync failed: {err[:180]}"
+    with _SYNC_LOCK:
+        _SEC_SYNC_STATE[key] = {
+            "running": "0",
+            "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "ok" if ok else "failed",
+            "message": msg,
+        }
+
+
+def _is_transient_sync_error(err: str) -> bool:
+    s = str(err or "").lower()
+    signals = (
+        "failed to resolve",
+        "name resolution",
+        "temporary failure",
+        "no route to host",
+        "connection reset",
+        "connection aborted",
+        "read timed out",
+        "timed out",
+        "502",
+        "503",
+        "504",
+        "too many requests",
+        "rate limit",
+    )
+    return any(k in s for k in signals)
+
+
+def _run_step_with_retries(
+    step: list[str],
+    *,
+    root: Path,
+    fh,
+    timeout: int,
+    retries: int,
+    base_delay: float = 2.0,
+) -> tuple[bool, str]:
+    max_attempts = max(1, int(retries) + 1)
+    last_err = ""
+    for attempt in range(1, max_attempts + 1):
+        fh.write("$ " + " ".join(step) + f"  [attempt {attempt}/{max_attempts}]\n")
+        try:
+            p = subprocess.run(step, cwd=str(root), capture_output=True, text=True, timeout=timeout)
+            if p.stdout:
+                fh.write(p.stdout + "\n")
+            if p.stderr:
+                fh.write(p.stderr + "\n")
+            err = (p.stderr.strip() or p.stdout.strip() or f"exit={p.returncode}")[:600]
+            if p.returncode == 0:
+                return True, ""
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            fh.write(f"ERROR: {err}\n")
+        last_err = err
+        if attempt >= max_attempts:
+            break
+        if not _is_transient_sync_error(err):
+            break
+        delay = max(1.0, float(base_delay) * (2 ** (attempt - 1)))
+        fh.write(f"Retrying in {delay:.1f}s due to transient error.\n")
+        time.sleep(delay)
+    return False, last_err
+
+
+@router.get("/company_file/sec")
+def company_sec_page(request: Request, t: str = "", msg: str = "", form: str = ""):
+    templates = request.app.state.templates
+    ticker = str(t or "").strip().upper()
+    if not ticker:
+        return RedirectResponse(url="/company_file?msg=" + urllib.parse.quote("Ticker is required."), status_code=303)
+    detail = company_detail(ticker)
+    if not detail:
+        return RedirectResponse(url="/company_file?msg=" + urllib.parse.quote("Company not found."), status_code=303)
+    selected_form = str(form or "").strip().upper()
+    if selected_form:
+        groups = []
+        total = 0
+        for g in list(detail.get("filing_groups") or []):
+            rows = [r for r in list(g.get("rows") or []) if str(r.get("form") or "").strip().upper() == selected_form]
+            if not rows:
+                continue
+            groups.append(
+                {
+                    "key": g.get("key"),
+                    "label": g.get("label"),
+                    "count": len(rows),
+                    "rows": rows,
+                }
+            )
+            total += len(rows)
+        detail["filing_groups"] = groups
+        detail["filings"] = [r for g in groups for r in g.get("rows", [])]
+    with _SYNC_LOCK:
+        state_file = load_sec_sync_state()
+        current = _SEC_SYNC_STATE.get(ticker) or state_file.get(ticker) or {}
+        sync_state = {
+            "running": str(current.get("running") or "0"),
+            "last": str(current.get("last") or ""),
+            "result": str(current.get("result") or ""),
+            "message": str(current.get("message") or ""),
+        }
+    return templates.TemplateResponse(
+        "company_sec.html",
+        {
+            "request": request,
+            "message": msg,
+            "detail": detail,
+            "sync_state": sync_state,
+            "selected_form": selected_form,
+        },
+    )
+
+
+@router.post("/company_file/sec-sync")
+def company_sec_sync(ticker: str = Form("")):
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return RedirectResponse(url="/company_file?msg=" + urllib.parse.quote("Ticker is required."), status_code=303)
+    start = False
+    with _SYNC_LOCK:
+        state_file = load_sec_sync_state()
+        st = _SEC_SYNC_STATE.get(t) or state_file.get(t) or {"running": "0", "last": "", "result": "", "message": ""}
+        if st.get("running") != "1":
+            _SEC_SYNC_STATE[t] = {
+                "running": "1",
+                "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "running",
+                "message": "Sync started...",
+            }
+            set_ticker_sync_state(t, _SEC_SYNC_STATE[t])
+            start = True
+    if start:
+        th = threading.Thread(target=_sync_ticker_worker, args=(t,), daemon=True)
+        th.start()
+        msg = "SEC sync started. Refresh this page in ~20-90 seconds."
+    else:
+        msg = "Sync already running."
+    return RedirectResponse(
+        url="/company_file/sec?t=" + urllib.parse.quote(t) + "&msg=" + urllib.parse.quote(msg),
+        status_code=303,
+    )
+
+
+@router.post("/company_file/sec-sync-my")
+def company_sec_sync_my(return_to: str = ""):
+    key = "MY_COMPANIES_BATCH"
+    start = False
+    with _SYNC_LOCK:
+        st = _SEC_SYNC_STATE.get(key, {"running": "0"})
+        if st.get("running") != "1":
+            _SEC_SYNC_STATE[key] = {
+                "running": "1",
+                "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "running",
+                "message": "Batch sync started...",
+            }
+            start = True
+    if start:
+        th = threading.Thread(target=_sync_my_companies_worker, daemon=True)
+        th.start()
+        msg = "Portfolio + watchlist SEC sync started. Refresh in ~1-5 minutes."
+    else:
+        msg = "A batch sync is already running."
+    rt = str(return_to or "").strip().lower()
+    base = "/my_universe?tab=all"
+    if rt in {"my_universe", "/my_universe"}:
+        base = "/my_universe?tab=all"
+    sep = "&" if "?" in base else "?"
+    return RedirectResponse(url=base + sep + "msg=" + urllib.parse.quote(msg), status_code=303)
+
+
+@router.post("/company_file/price-metrics-refresh")
+def company_price_metrics_refresh(
+    request: Request,
+    ticker: str = Form(""),
+):
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        msg = "Ticker is required."
+        if is_hx_request(request):
+            return _render_company_detail(request, ticker=tk, message=msg)
+        return _back_to_ticker(tk, msg)
+    row = refresh_price_metrics(tk)
+    msg = "Price metrics refreshed." if row else "Could not refresh price metrics."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=tk, message=msg)
+    return _back_to_ticker(tk, msg)
+
+
+@router.post("/company_file/mini-statements-refresh")
+def company_mini_statements_refresh(
+    request: Request,
+    ticker: str = Form(""),
+):
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        msg = "Ticker is required."
+        if is_hx_request(request):
+            return _render_company_detail(request, ticker=tk, message=msg)
+        return _back_to_ticker(tk, msg)
+    row = refresh_mini_statements(tk)
+    if row:
+        msg = "Mini statements refreshed."
+    else:
+        probe = fetch_historical_financials(ticker=tk, metric="all", years=5, refresh=True)
+        err = str((probe or {}).get("error") or "").strip().lower()
+        if err == "financials_unavailable":
+            msg = "No provider statement data available for this ticker right now."
+        elif err == "ticker_required":
+            msg = "Ticker is required."
+        elif err == "unsupported_metric":
+            msg = "Requested metric is not supported."
+        else:
+            msg = "Could not refresh mini statements right now."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=tk, message=msg)
+    return _back_to_ticker(tk, msg)
+
+
+@router.post("/company_file/intel-refresh")
+def company_intel_refresh(
+    request: Request,
+    ticker: str = Form(""),
+):
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        msg = "Ticker is required."
+        if is_hx_request(request):
+            return _render_company_detail(request, ticker=tk, message=msg)
+        return _back_to_ticker(tk, msg)
+    row = refresh_company_intel(tk)
+    status = dict(row.get("status") or {})
+    ok = (
+        bool((row.get("revenue_segments") or {}).get("product") or (row.get("revenue_segments") or {}).get("geography"))
+        or bool((row.get("buyback") or {}).get("quarters"))
+        or bool(row.get("insider_trades"))
+    )
+    if ok:
+        msg = "Company intel refreshed."
+    else:
+        details: list[str] = []
+        err = str(status.get("error") or "").strip()
+        seg_s = str(status.get("revenue_segments") or "").strip()
+        buy_s = str(status.get("buybacks") or "").strip()
+        ins_s = str(status.get("insider") or "").strip()
+        if err:
+            details.append(f"error={err}")
+        if seg_s:
+            details.append(f"revenue_segments={seg_s}")
+        if buy_s:
+            details.append(f"buybacks={buy_s}")
+        if ins_s:
+            details.append(f"insider={ins_s}")
+        msg = "Could not refresh company intel right now."
+        if details:
+            msg = f"Could not refresh company intel. {'; '.join(details)}"
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=tk, message=msg)
+    return _back_to_ticker(tk, msg)
+
+
+@router.post("/company_file/transcripts-refresh")
+def company_transcripts_refresh(
+    request: Request,
+    ticker: str = Form(""),
+):
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        msg = "Ticker is required."
+        if is_hx_request(request):
+            return _render_company_detail(request, ticker=tk, message=msg)
+        return _back_to_ticker(tk, msg)
+    out = refresh_earnings_transcripts_from_sec(tk, max_filings=500, lookback_years=10)
+    ok = bool(int(out.get("ok") or 0))
+    if ok:
+        fb = int(out.get("fallback_saved") or 0)
+        rm = int(out.get("removed_bad") or 0)
+        msg = (
+            f"Earnings calls refreshed. "
+            f"scanned={int(out.get('scanned') or 0)} "
+            f"saved={int(out.get('saved') or 0)} "
+            f"skipped={int(out.get('skipped') or 0)}"
+        )
+        if fb > 0:
+            msg += f" fallback_saved={fb}"
+        if rm > 0:
+            msg += f" removed_bad={rm}"
+    else:
+        msg = f"Could not refresh earnings calls: {str(out.get('error') or 'unknown_error')}"
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=tk, message=msg)
+    return _back_to_ticker(tk, msg)
+
+
+@router.post("/company_file/sec-facts-refresh")
+def company_sec_facts_refresh(
+    request: Request,
+    ticker: str = Form(""),
+):
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        msg = "Ticker is required."
+        if is_hx_request(request):
+            return _render_company_detail(request, ticker=tk, message=msg)
+        return _back_to_ticker(tk, msg)
+    out = ingest_sec_facts_for_ticker(tk, max_filings=24)
+    if bool(out.get("ok")):
+        msg = (
+            f"SEC facts refreshed. selected={int(out.get('selected') or 0)} "
+            f"processed={int(out.get('processed') or 0)} chunks={int(out.get('chunks') or 0)}"
+        )
+    else:
+        msg = f"Could not refresh SEC facts: {str(out.get('error') or 'unknown_error')}"
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=tk, message=msg)
+    return _back_to_ticker(tk, msg)
+
+
+@router.get("/api/company/financial-deltas")
+def api_company_financial_deltas(ticker: str = "", years: int = 5):
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        return JSONResponse({"ok": False, "error": "ticker_required"}, status_code=400)
+    out = compute_financial_deltas(ticker=tk, years=years)
+    return JSONResponse(out, status_code=(200 if bool(out.get("ok")) else 404))
+
+
+@router.get("/filing")
+def filing_view(path: str = "", doc: str = "", t: str = "", mode: str = "reader"):
+    p = safe_resolve_filing_path(path)
+    if p is None:
+        return HTMLResponse("<html><body>Filing path not available.</body></html>", status_code=404)
+
+    raw_q = urllib.parse.quote(str(path), safe="")
+    doc_s = str(doc or "").strip()
+    doc_q = urllib.parse.quote(doc_s, safe="")
+    doc_ok = doc_s.lower().startswith(("http://", "https://"))
+    back = f"/company_file?t={urllib.parse.quote(str(t or '').strip().upper())}" if str(t or "").strip() else "/company_file"
+    raw_href = f"/filing_raw?path={raw_q}"
+    original_href = f"/filing?path={raw_q}&doc={doc_q}&t={urllib.parse.quote(str(t or '').strip().upper())}&mode=original"
+    official_href = f"/filing?path={raw_q}&doc={doc_q}&t={urllib.parse.quote(str(t or '').strip().upper())}&mode=official"
+    toolbar = (
+        "<div class='bar'>"
+        f"<a class='btn' href='{back}'>Back</a>"
+        + (f"<a class='btn' href='{official_href}'>Official</a>" if doc_ok else "")
+        + f"<a class='btn' href='{original_href}'>Original</a>"
+        + f"<a class='btn' href='{raw_href}' target='_blank' rel='noopener noreferrer'>Raw File</a>"
+        + (f"<a class='btn' href='{html.escape(doc_s, quote=True)}' target='_blank' rel='noopener noreferrer'>Open SEC</a>" if doc_ok else "")
+        + "</div>"
+    )
+    base_style = (
+        "<style>body{margin:0;background:#eaf0f4;color:#2f4358;font-family:'Avenir Next','Helvetica Neue',sans-serif;}"
+        ".wrap{max-width:1280px;margin:0 auto;padding:12px;} .bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;}"
+        ".btn{border:1px solid #c8d3dd;background:#edf2f6;color:#2f4358;border-radius:8px;padding:6px 10px;text-decoration:none;font-size:12px;font-weight:700;}"
+        "iframe{width:100%;height:88vh;border:1px solid #c8d3dd;border-radius:10px;background:#fff;}"
+        ".paper{background:#f8fafc;border:1px solid #d3dce5;border-radius:10px;padding:18px;line-height:1.52;font-size:15px;}"
+        "pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.35;}</style>"
+    )
+
+    ext = p.suffix.lower()
+    if ext == ".pdf":
+        body = (
+            "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
+            + base_style
+            + "</head><body><div class='wrap'>"
+            + toolbar
+            + f"<iframe src='{raw_href}'></iframe>"
+            + "</div></body></html>"
+        )
+        return HTMLResponse(body)
+
+    txt = p.read_text(encoding="utf-8", errors="ignore")
+    mode_norm = str(mode or "original").strip().lower()
+    if mode_norm == "reader":
+        mode_norm = "original"
+    if mode_norm not in {"original", "official"}:
+        mode_norm = "original"
+    if mode_norm == "official" and doc_ok:
+        # SEC pages commonly deny cross-origin iframe embedding.
+        # Redirect to the official URL to guarantee proper render.
+        return RedirectResponse(url=doc_s, status_code=307)
+
+    looks_html = ("<html" in txt[:4000].lower()) or ("<!doctype html" in txt[:4000].lower()) or ("<body" in txt[:4000].lower())
+    if looks_html and mode_norm == "original":
+        cleaned = re.sub(r"(?is)<script[^>]*>.*?</script>", "", txt[:1200000])
+        body = (
+            "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
+            + base_style
+            + "</head><body><div class='wrap'>"
+            + toolbar
+            + f"<iframe srcdoc='{html.escape(cleaned, quote=True)}'></iframe>"
+            + "</div></body></html>"
+        )
+        return HTMLResponse(body)
+
+    reader = txt
+    if looks_html:
+        reader = re.sub(r"(?is)<script[^>]*>.*?</script>", "", reader)
+        reader = re.sub(r"(?is)<style[^>]*>.*?</style>", "", reader)
+        reader = re.sub(r"(?is)</?(meta|link|head|title)[^>]*>", "", reader)
+    payload = reader if looks_html else f"<pre>{html.escape(reader[:500000])}</pre>"
+    body = (
+        "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
+        + base_style
+        + "</head><body><div class='wrap'>"
+        + toolbar
+        + f"<div class='paper'>{payload}</div>"
+        + "</div></body></html>"
+    )
+    return HTMLResponse(body)
+
+
+@router.get("/filing_raw")
+def filing_raw(path: str = ""):
+    p = safe_resolve_filing_path(path)
+    if p is None:
+        return Response(status_code=404)
+    ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+    return FileResponse(str(p), media_type=ctype, filename=p.name)
+
+
+@router.post("/company_file/ir-email-send")
+def company_ir_email_send(
+    ticker: str = Form(""),
+    to_email: str = Form(""),
+    subject: str = Form(""),
+    body: str = Form(""),
+):
+    t = str(ticker or "").strip().upper()
+    ok, msg = send_email(to_email=to_email, subject=subject, body=body)
+    if ok and t:
+        add_general_note(
+            f"Email sent to {to_email.strip()}\nSubject: {subject.strip()}\n\n{body.strip()[:1200]}",
+            scope="email",
+            ticker=t,
+            tags="email,sent,company_ir",
+        )
+    return RedirectResponse(
+        url="/company_file?t=" + urllib.parse.quote(t) + "&msg=" + urllib.parse.quote(msg),
+        status_code=303,
+    )
+
+
+@router.get("/company_file")
+def company_file_page(
+    request: Request,
+    t: str = "",
+    q: str = "",
+    industry: str = "",
+    index: str = "",
+    list: str = "",
+    moat: str = "",
+    market: str = "",
+    size: str = "",
+    scope: str = "all",
+    sort: str = "mcap_desc",
+    page: int = 1,
+    page_size: int = 80,
+    msg: str = "",
+    show_ai: int = 0,
+):
+    templates = request.app.state.templates
+    ticker = str(t or "").strip().upper()
+    if ticker:
+        return _render_company_detail(request, ticker=ticker, message=msg, show_ai=(int(show_ai or 0) == 1))
+
+    data = list_companies(
+        query=q,
+        industry=industry,
+        index_key=index,
+        list_name=list,
+        moat_key=moat,
+        market=market,
+        size=size,
+        scope=scope,
+        sort=sort,
+        page=page,
+        page_size=page_size,
+    )
+    return templates.TemplateResponse(
+        "company_file.html",
+        {
+            "request": request,
+            "message": msg,
+            "query": q,
+            "industry": industry,
+            "index_key": index,
+            "list_name": list,
+            "moat_key": moat,
+            "market_key": market,
+            "size_key": size,
+            "scope": data["scope"],
+            "sort": data["sort"],
+            "rows": data["rows"],
+            "total": data["total"],
+            "page": data["page"],
+            "pages": data["pages"],
+            "page_size": data["page_size"],
+            "industries": data["industries"],
+            "index_filters": index_filters(),
+            "list_filters": list_filters(),
+            "moat_filters": moat_filters(),
+        },
+    )
+
+
+@router.post("/company_file/moat-save")
+def company_file_moat_save(
+    request: Request,
+    ticker: str = Form(""),
+    moat_keys: list[str] = Form(default=[]),
+):
+    ok = save_company_moats(ticker, moat_keys or [])
+    msg = "Moat updated." if ok else "Could not save moat tags."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/competitor-add")
+def company_file_competitor_add(
+    request: Request,
+    ticker: str = Form(""),
+    competitor_ticker: str = Form(""),
+    competitor_name: str = Form(""),
+    evidence: str = Form(""),
+):
+    ok = add_competitor(ticker, competitor_ticker, competitor_name, evidence)
+    msg = "Competitor added." if ok else "Could not add competitor."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/competitor-update")
+def company_file_competitor_update(
+    request: Request,
+    ticker: str = Form(""),
+    row_id: int = Form(0),
+    competitor_ticker: str = Form(""),
+    competitor_name: str = Form(""),
+    evidence: str = Form(""),
+):
+    ok = update_competitor(row_id, competitor_ticker, competitor_name, evidence)
+    msg = "Competitor updated." if ok else "Could not update competitor."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/competitor-remove")
+def company_file_competitor_remove(
+    request: Request,
+    ticker: str = Form(""),
+    row_id: int = Form(0),
+):
+    ok = remove_competitor(row_id)
+    msg = "Competitor removed." if ok else "Could not remove competitor."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/note-add")
+def company_file_note_add(
+    request: Request,
+    ticker: str = Form(""),
+    note: str = Form(""),
+):
+    ok = add_company_note(ticker=ticker, note=note, action="Note", emotion="Calm")
+    msg = "Note saved." if ok else "Could not save note."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/omnibox-add")
+def company_file_omnibox_add(
+    request: Request,
+    ticker: str = Form(""),
+    entry: str = Form(""),
+    show_ai: str = Form("0"),
+):
+    tk = str(ticker or "").strip().upper()
+    raw = str(entry or "").strip()
+    if not tk or not raw:
+        msg = "Empty input." if raw == "" else "Ticker is required."
+        if is_hx_request(request):
+            return _render_company_detail(request, ticker=tk, message=msg, show_ai=(str(show_ai or "0").strip() == "1"))
+        return _back_to_ticker(tk, msg)
+
+    force_note = bool(re.search(r"(^|\\s)#note\\b", raw, flags=re.I))
+    clean = re.sub(r"(^|\\s)#task\\b", " ", raw, flags=re.I)
+    clean = re.sub(r"(^|\\s)#note\\b", " ", clean, flags=re.I)
+    clean = re.sub(r"\\s+", " ", clean).strip()
+    content = clean or raw
+    if force_note:
+        ok = add_company_note(ticker=tk, note=content, action="Note", emotion="Calm")
+        msg = f"Note saved to {tk} workspace." if ok else "Could not save note."
+    else:
+        ok = add_company_task(ticker=tk, task=content, due_date="", priority="P2")
+        msg = f"Task added to {tk} workspace." if ok else "Could not add task."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=tk, message=msg, show_ai=(str(show_ai or "0").strip() == "1"))
+    return _back_to_ticker(tk, msg)
+
+
+@router.post("/company_file/note-update")
+def company_file_note_update(
+    request: Request,
+    ticker: str = Form(""),
+    note_id: int = Form(0),
+    note: str = Form(""),
+):
+    ok = update_company_note(note_id=note_id, note=note)
+    msg = "Note updated." if ok else "Could not update note."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/note-delete")
+def company_file_note_delete(
+    request: Request,
+    ticker: str = Form(""),
+    note_id: int = Form(0),
+):
+    ok = delete_company_note(note_id=note_id)
+    msg = "Note deleted." if ok else "Could not delete note."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/task-add")
+def company_file_task_add(
+    request: Request,
+    ticker: str = Form(""),
+    task: str = Form(""),
+    due_date: str = Form(""),
+    priority: str = Form("P2"),
+):
+    ok = add_company_task(ticker=ticker, task=task, due_date=due_date, priority=priority)
+    msg = "Task added." if ok else "Could not add task."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/task-toggle")
+def company_file_task_toggle(
+    request: Request,
+    ticker: str = Form(""),
+    todo_id: int = Form(0),
+):
+    ok = toggle_company_task(todo_id)
+    msg = "Task updated." if ok else "Could not update task."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/task-delete")
+def company_file_task_delete(
+    request: Request,
+    ticker: str = Form(""),
+    todo_id: int = Form(0),
+):
+    ok = delete_company_task(todo_id)
+    msg = "Task deleted." if ok else "Could not delete task."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/task-update")
+def company_file_task_update(
+    request: Request,
+    ticker: str = Form(""),
+    todo_id: int = Form(0),
+    task: str = Form(""),
+    due_date: str = Form(""),
+    priority: str = Form("P2"),
+):
+    ok = update_company_task(todo_id=todo_id, task=task, due_date=due_date, priority=priority)
+    msg = "Task updated." if ok else "Could not update task."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/reminder-add")
+def company_file_reminder_add(
+    request: Request,
+    ticker: str = Form(""),
+    remind_at: str = Form(""),
+    note: str = Form(""),
+):
+    ok = add_company_reminder(ticker=ticker, remind_at=remind_at, note=note)
+    msg = "Reminder saved." if ok else "Could not save reminder."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/reminder-toggle")
+def company_file_reminder_toggle(
+    request: Request,
+    ticker: str = Form(""),
+    reminder_id: int = Form(0),
+):
+    ok = toggle_company_reminder(reminder_id)
+    msg = "Reminder updated." if ok else "Could not update reminder."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/reminder-update")
+def company_file_reminder_update(
+    request: Request,
+    ticker: str = Form(""),
+    reminder_id: int = Form(0),
+    remind_at: str = Form(""),
+    note: str = Form(""),
+):
+    ok = update_company_reminder(reminder_id=reminder_id, remind_at=remind_at, note=note)
+    msg = "Reminder updated." if ok else "Could not update reminder."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/reminder-delete")
+def company_file_reminder_delete(
+    request: Request,
+    ticker: str = Form(""),
+    reminder_id: int = Form(0),
+):
+    ok = delete_company_reminder(reminder_id=reminder_id)
+    msg = "Reminder deleted." if ok else "Could not delete reminder."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)

@@ -5,7 +5,6 @@ from email.utils import parsedate_to_datetime
 import json
 import os
 import re
-import sqlite3
 import time
 import urllib.parse
 import urllib.request
@@ -15,11 +14,21 @@ from pathlib import Path
 import yfinance as yf
 
 from app.services.agent_service import ask_agent, memorize_user_note
-from app.core.config import CORE_DB_PATH, ROOT, app_env
-from app.core.sqlite_hardening import connect_sqlite
-from app.services.organizer_service import recall
+from app.core.config import ROOT
+from app.core.db import core_conn as _conn
+from app.core.market import finnhub_key
+from app.core.ticker import normalize_ticker, yfinance_symbol
+from app.services.company_lookup_service import company_name_map, market_cap_map
+from app.services.organizer_service import add_general_note, add_task, recall
 from app.services.memory_engine import OnyxMemory
-from app.services.postgres_core_service import company_news_from_report_facts_pg, core_backend, filing_stats_map_pg, strict_postgres_mode
+from app.services.postgres_core_service import (
+    company_news_from_report_facts_pg,
+    core_backend,
+    filing_stats_map_pg,
+    list_news_wire_snapshot_pg,
+    strict_postgres_mode,
+    upsert_news_wire_snapshot_pg,
+)
 
 try:
     from tools.llm_engine import ask_ai
@@ -34,29 +43,6 @@ _HTTP_HEADERS = {
     "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
-
-
-def _finnhub_key() -> str:
-    return (
-        os.getenv("FINNHUB_API_KEY", "")
-        or os.getenv("FINNHUB_TOKEN", "")
-        or app_env("FINNHUB_API_KEY", "")
-        or app_env("FINNHUB_TOKEN", "")
-    ).strip()
-
-
-def _conn() -> sqlite3.Connection:
-    return connect_sqlite(str(CORE_DB_PATH), row_factory=True)
-
-
-def _safe_count(con: sqlite3.Connection, table: str, where: str = "") -> int:
-    sql = f"SELECT COUNT(*) AS c FROM {table}"
-    if where:
-        sql += " WHERE " + where
-    try:
-        return int(con.execute(sql).fetchone()["c"] or 0)
-    except Exception:
-        return 0
 
 
 def _executive_signal_summary() -> dict[str, object]:
@@ -86,58 +72,11 @@ def _executive_signal_summary() -> dict[str, object]:
 
 
 def dashboard_snapshot() -> dict[str, object]:
-    con = _conn()
-    try:
-        counts = {
-            "companies": _safe_count(con, "company_profile_cache"),
-            "open_tasks": _safe_count(con, "todos", "status = 'open'"),
-            "daily_notes": _safe_count(con, "daily_notes"),
-            "notes": _safe_count(con, "investor_notes") + _safe_count(con, "workspace_journal"),
-            "reminders_open": _safe_count(con, "company_reminders", "status = 'open'"),
-        }
-        movers_up = [
-            {
-                "ticker": str(r["ticker"] or "").strip().upper(),
-                "day_pct": float(r["day_pct"] or 0.0),
-                "asof": str(r["asof"] or ""),
-            }
-            for r in con.execute(
-                "SELECT ticker, day_pct, asof FROM intel24_snapshot ORDER BY day_pct DESC LIMIT 8"
-            ).fetchall()
-        ]
-        movers_down = [
-            {
-                "ticker": str(r["ticker"] or "").strip().upper(),
-                "day_pct": float(r["day_pct"] or 0.0),
-                "asof": str(r["asof"] or ""),
-            }
-            for r in con.execute(
-                "SELECT ticker, day_pct, asof FROM intel24_snapshot ORDER BY day_pct ASC LIMIT 8"
-            ).fetchall()
-        ]
-        feed = [
-            {
-                "created_at": str(r["created_at"] or ""),
-                "ticker": str(r["ticker"] or "").strip().upper(),
-                "category": str(r["category"] or ""),
-                "title": str(r["title"] or ""),
-                "summary": str(r["summary"] or ""),
-                "severity": str(r["severity"] or ""),
-            }
-            for r in con.execute(
-                "SELECT created_at, ticker, category, title, summary, severity FROM intel_feed ORDER BY id DESC LIMIT 20"
-            ).fetchall()
-        ]
-        row_intel = con.execute("SELECT MAX(asof) AS v FROM intel24_snapshot").fetchone()
-        row_feed = con.execute("SELECT MAX(created_at) AS v FROM intel_feed").fetchone()
-        row_audit = con.execute("SELECT MAX(detected_at) AS v FROM changes").fetchone()
-        freshness = {
-            "intel24": str((row_intel["v"] if row_intel else "") or ""),
-            "news": str((row_feed["v"] if row_feed else "") or ""),
-            "audit": str((row_audit["v"] if row_audit else "") or ""),
-        }
-    finally:
-        con.close()
+    counts = {"companies": 0, "open_tasks": 0, "daily_notes": 0, "notes": 0, "reminders_open": 0}
+    movers_up: list[dict[str, object]] = []
+    movers_down: list[dict[str, object]] = []
+    feed: list[dict[str, str]] = []
+    freshness = {"intel24": "", "news": "", "audit": ""}
     return {
         "counts": counts,
         "movers_up": movers_up,
@@ -149,9 +88,8 @@ def dashboard_snapshot() -> dict[str, object]:
     }
 
 
-def _normalize_ticker(raw: str) -> str:
-    s = str(raw or "").strip().upper()
-    return re.sub(r"[^A-Z0-9.\-]", "", s)[:12]
+_normalize_ticker = normalize_ticker
+_yf_symbol = yfinance_symbol
 
 
 def quick_capture(mode: str, text: str, ticker: str = "") -> tuple[bool, str]:
@@ -160,55 +98,13 @@ def quick_capture(mode: str, text: str, ticker: str = "") -> tuple[bool, str]:
     tk = _normalize_ticker(ticker)
     if not txt:
         return False, "Please enter text."
-    now = dt.datetime.now().isoformat()
-    con = _conn()
-    try:
-        if m == "task":
-            cat = "company" if tk else "general"
-            con.execute(
-                """INSERT INTO todos (task, status, created_at, priority, due_date, ticker, category)
-                   VALUES (?, 'open', ?, 'P2', '', ?, ?)""",
-                (txt[:1000], now, tk, cat),
-            )
-            con.commit()
-            rid = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
-            v = con.execute("SELECT id FROM todos WHERE id=? LIMIT 1", (rid,)).fetchone()
-            if not v:
-                return False, "Task write verification failed."
-            memorize_user_note(
-                txt[:1000],
-                ticker=tk,
-                source_type="task",
-                source_id=f"todo:{rid}",
-            )
-            return True, "Task saved."
-        if tk:
-            con.execute(
-                "INSERT INTO workspace_journal (ticker, action, emotion, note, created_at) VALUES (?, 'Note', 'Calm', ?, ?)",
-                (tk, txt[:4000], now),
-            )
-            con.commit()
-            memorize_user_note(
-                txt[:4000],
-                ticker=tk,
-                source_type="journal",
-                source_id=f"workspace_journal:{int(con.execute('SELECT last_insert_rowid()').fetchone()[0])}",
-            )
-            return True, "Company note saved."
-        con.execute(
-            "INSERT INTO investor_notes (scope, ticker, sentiment, note, tags, created_at) VALUES ('general', '', 'neutral', ?, 'quick_capture', ?)",
-            (txt[:4000], now),
-        )
-        con.commit()
-        memorize_user_note(
-            txt[:4000],
-            ticker="",
-            source_type="investor_note",
-            source_id=f"investor_notes:{int(con.execute('SELECT last_insert_rowid()').fetchone()[0])}",
-        )
-        return True, "Note saved."
-    finally:
-        con.close()
+    if m == "task":
+        cat = "company" if tk else "general"
+        ok = add_task(task=txt[:1000], ticker=tk, category=cat, priority="P2", due_date="")
+        return (ok, "Task saved." if ok else "Task save failed.")
+    scope = "company_note" if tk else "organizer_note"
+    ok = add_general_note(txt[:4000], scope=scope, ticker=tk, tags="quick_capture")
+    return (ok, "Note saved." if ok else "Note save failed.")
 
 
 def ask_ai_local(question: str) -> str:
@@ -291,52 +187,28 @@ def _infer_ticker_for_quote_question(text: str) -> str:
         tk = _normalize_ticker(m[0] or m[1] or "")
         if tk and tk not in stop:
             tokens.append(tk)
-    con = _conn()
-    try:
-        for tk in tokens[:8]:
-            row = con.execute(
-                "SELECT ticker FROM company_profile_cache WHERE ticker = ? LIMIT 1",
-                (tk,),
-            ).fetchone()
-            if row:
-                return _normalize_ticker(str(row["ticker"] or ""))
-        # 2) Company-name mention fallback.
-        low = q.lower()
-        row = con.execute(
-            "SELECT ticker FROM company_profile_cache WHERE INSTR(?, LOWER(name)) > 0 ORDER BY LENGTH(name) DESC LIMIT 1",
-            (low,),
-        ).fetchone()
-        if row:
-            return _normalize_ticker(str(row["ticker"] or ""))
-        return ""
-    finally:
-        con.close()
+    name_map = company_name_map([])
+    for tk in tokens[:8]:
+        if tk in name_map:
+            return tk
+    low = q.lower()
+    best = ""
+    best_len = 0
+    for tk, nm in name_map.items():
+        n = str(nm or "").strip().lower()
+        if n and n in low and len(n) > best_len:
+            best = tk
+            best_len = len(n)
+    return best
 
 
 def _ticker_live_status(ticker: str) -> str:
     t = _normalize_ticker(ticker)
     if not t:
         return ""
-    # Prefer local intel snapshot (already computed in your stack).
-    con = _conn()
+    # Direct quote pull only.
     try:
-        row = con.execute(
-            "SELECT asof, day_pct FROM intel24_snapshot WHERE ticker = ? ORDER BY asof DESC LIMIT 1",
-            (t,),
-        ).fetchone()
-        if row:
-            asof = str(row["asof"] or "").strip() or dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            try:
-                day = float(row["day_pct"] or 0.0)
-            except Exception:
-                day = 0.0
-            direction = "up" if day > 0 else ("down" if day < 0 else "flat")
-            return f"[LIVE] {t} is {direction} {day:+.2f}% (as of {asof})."
-    finally:
-        con.close()
-    # Fallback to direct quote pull.
-    try:
-        tk = yf.Ticker(t)
+        tk = yf.Ticker(_yf_symbol(t))
         fi = tk.fast_info or {}
         last = fi.get("last_price")
         prev = fi.get("previous_close")
@@ -351,54 +223,14 @@ def _ticker_live_status(ticker: str) -> str:
 
 
 def _profile_map() -> dict[str, dict[str, str]]:
-    con = _conn()
     out: dict[str, dict[str, str]] = {}
-    try:
-        for r in con.execute("SELECT ticker, name, industry FROM company_profile_cache").fetchall():
-            t = _normalize_ticker(str(r["ticker"] or ""))
-            if not t:
-                continue
-            out[t] = {"name": str(r["name"] or "").strip(), "industry": str(r["industry"] or "").strip()}
-    finally:
-        con.close()
-    return out
-
-
-def _mcap_map(tickers: list[str]) -> dict[str, str]:
-    if not tickers:
-        return {}
-    p = ROOT / "data" / "cache.db"
-    con = connect_sqlite(str(p), row_factory=True)
-    out = {t: "-" for t in tickers}
-    try:
-        keys = [f"mcap:t:{t}" for t in tickers]
-        marks = ",".join("?" for _ in keys)
-        for r in con.execute(f"SELECT key,payload FROM cache_entries WHERE key IN ({marks})", tuple(keys)).fetchall():
-            k = str(r["key"] or "")
-            t = k.split("mcap:t:", 1)[-1].strip().upper()
-            if not t:
-                continue
-            out[t] = str(r["payload"] or "-").strip() or "-"
-    finally:
-        con.close()
+    for tk, nm in company_name_map([]).items():
+        out[tk] = {"name": str(nm or "").strip(), "industry": ""}
     return out
 
 
 def _daypct_map() -> dict[str, float]:
-    con = _conn()
-    out: dict[str, float] = {}
-    try:
-        for r in con.execute("SELECT ticker, day_pct FROM intel24_snapshot").fetchall():
-            t = _normalize_ticker(str(r["ticker"] or ""))
-            if not t:
-                continue
-            try:
-                out[t] = float(r["day_pct"] or 0.0)
-            except Exception:
-                out[t] = 0.0
-    finally:
-        con.close()
-    return out
+    return {}
 
 
 def _filing_stats_map(tickers: list[str]) -> dict[str, dict[str, str | int]]:
@@ -410,36 +242,8 @@ def _filing_stats_map(tickers: list[str]) -> dict[str, dict[str, str | int]]:
             if out_pg:
                 return out_pg
         except Exception:
-            if strict_postgres_mode():
-                return {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
-        if strict_postgres_mode():
-            return {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
-    con = _conn()
-    out: dict[str, dict[str, str | int]] = {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
-    marks = ",".join("?" for _ in tickers)
-    try:
-        rows = con.execute(
-            f"""
-            SELECT ticker, COUNT(*) AS c, MAX(date) AS last_date
-            FROM filings
-            WHERE ticker IN ({marks})
-            GROUP BY ticker
-            """,
-            tuple(tickers),
-        ).fetchall()
-        for r in rows:
-            t = _normalize_ticker(str(r["ticker"] or ""))
-            if not t:
-                continue
-            out[t] = {
-                "filings": int(r["c"] or 0),
-                "last_filing_date": str(r["last_date"] or ""),
-            }
-    except Exception:
-        pass
-    finally:
-        con.close()
-    return out
+            pass
+    return {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
 
 
 def _sec_sync_state_map() -> dict[str, dict[str, str]]:
@@ -525,7 +329,7 @@ def _fetch_text(url: str, timeout: int = 8) -> str:
 
 
 def _finnhub_general_news(limit: int = 12) -> list[dict[str, str]]:
-    key = _finnhub_key()
+    key = finnhub_key()
     if not key:
         return []
     try:
@@ -566,7 +370,7 @@ def _finnhub_general_news(limit: int = 12) -> list[dict[str, str]]:
 
 
 def _finnhub_company_news(tickers: list[str], limit: int = 12, days_back: int = 3) -> list[dict[str, str]]:
-    key = _finnhub_key()
+    key = finnhub_key()
     if not key:
         return []
     ts = [str(x or "").strip().upper() for x in tickers if str(x or "").strip()]
@@ -714,6 +518,8 @@ def _news_fallback_from_feed(
     include_fast: bool = False,
     tickers: list[str] | None = None,
 ) -> list[dict[str, str]]:
+    if strict_postgres_mode():
+        return []
     con = _conn()
     try:
         lim = max(1, min(40, int(limit)))
@@ -762,49 +568,8 @@ def _company_news_from_report_facts(tickers: list[str], limit: int = 8) -> list[
             if out_pg:
                 return out_pg
         except Exception:
-            if strict_postgres_mode():
-                return []
-        if strict_postgres_mode():
-            return []
-    con = _conn()
-    try:
-        marks = ",".join("?" for _ in tks)
-        rows = con.execute(
-            f"""SELECT ticker, fact_text, fact_date
-                FROM report_facts
-                WHERE ticker IN ({marks})
-                ORDER BY importance DESC, fact_date DESC, id DESC
-                LIMIT ?""",
-            tuple(tks + [max(1, min(40, int(limit) * 3))]),
-        ).fetchall()
-        out: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for r in rows:
-            tk = str(r["ticker"] or "").strip().upper()
-            txt = str(r["fact_text"] or "").strip()
-            if not tk or not txt:
-                continue
-            title = f"{tk}: {txt[:160]}"
-            key = " ".join(title.lower().split())
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(
-                {
-                    "title": title,
-                    "ticker": tk,
-                    "link": f"/company_file/sec?t={urllib.parse.quote(tk)}",
-                    "source": "Official Reports",
-                    "published_at": str(r["fact_date"] or ""),
-                }
-            )
-            if len(out) >= max(1, min(30, int(limit))):
-                break
-        return out
-    except Exception:
-        return []
-    finally:
-        con.close()
+            pass
+    return []
 
 
 def _dedupe_news(items: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -1107,6 +872,8 @@ def _market_pulse_cached() -> dict[str, object]:
 
 
 def _regulatory_audit(portfolio: list[str], watchlist: list[str]) -> dict[str, object]:
+    if strict_postgres_mode():
+        return {"portfolio_changes": 0, "watchlist_changes": 0, "recent": []}
     con = _conn()
     try:
         p_marks = ",".join("?" for _ in portfolio) if portfolio else "''"
@@ -1163,7 +930,7 @@ def home_snapshot() -> dict[str, object]:
     portfolio_rows = _read_portfolio()
     watchlist_rows = _read_watchlist()
     tickers = sorted({r["ticker"] for r in portfolio_rows + watchlist_rows})
-    mcap = _mcap_map(tickers)
+    mcap = market_cap_map(tickers)
     filing_stats = _filing_stats_map(tickers)
     sync_state = _sec_sync_state_map()
     for r in portfolio_rows:
@@ -1195,6 +962,14 @@ def home_snapshot() -> dict[str, object]:
 
     news_general: list[dict[str, str]] = []
     news_company: list[dict[str, str]] = []
+    # Primary: Finnhub feeds (fresh market wire).
+    news_general = _finnhub_general_news(limit=16)
+    news_general = _filter_relevant_news(news_general, company_mode=False)
+    news_general = _filter_recent_news(news_general, max_age_hours=96)
+    news_company = _finnhub_company_news(tickers[:10], limit=16, days_back=4)
+    news_company = _filter_relevant_news(news_company, company_mode=True)
+    news_company = _filter_recent_news(news_company, max_age_hours=120, keep_undated_company=True)
+    # Secondary: local SEC/intel feed fallbacks.
     if not news_general:
         news_general = _news_fallback_from_feed(limit=8, include_fast=False)
     if not news_general:
@@ -1208,6 +983,37 @@ def home_snapshot() -> dict[str, object]:
 
     news_general = _dedupe_news(news_general)[:8]
     news_company = _dedupe_news(news_company)[:8]
+    # Persist successful snapshots for durable fallback.
+    if news_general and core_backend() == "postgres":
+        try:
+            upsert_news_wire_snapshot_pg("general", news_general)
+        except Exception:
+            pass
+    if news_company and core_backend() == "postgres":
+        try:
+            upsert_news_wire_snapshot_pg("company", news_company)
+        except Exception:
+            pass
+    # Durable fallback from Postgres snapshots if live pulls are empty.
+    if not news_general and core_backend() == "postgres":
+        try:
+            news_general = [dict(x) for x in list_news_wire_snapshot_pg("general", limit=8, max_age_hours=168)]
+        except Exception:
+            news_general = []
+    if not news_company and core_backend() == "postgres":
+        try:
+            news_company = [dict(x) for x in list_news_wire_snapshot_pg("company", limit=8, max_age_hours=168)]
+        except Exception:
+            news_company = []
+    # Last-good fallback for transient provider outages.
+    if not news_general:
+        last_general = list(_HOME_CACHE.get("news_general_last") or [])
+        if last_general:
+            news_general = [dict(x) for x in last_general if isinstance(x, dict)][:8]
+    if not news_company:
+        last_company = list(_HOME_CACHE.get("news_company_last") or [])
+        if last_company:
+            news_company = [dict(x) for x in last_company if isinstance(x, dict)][:8]
     used = {" ".join(str(x.get("title") or "").lower().split()) for x in news_general}
     news_company = [x for x in news_company if " ".join(str(x.get("title") or "").lower().split()) not in used][:8]
 
@@ -1225,6 +1031,10 @@ def home_snapshot() -> dict[str, object]:
         "pulse": pulse,
         "audit": audit,
     }
+    if news_general:
+        _HOME_CACHE["news_general_last"] = [dict(x) for x in news_general]
+    if news_company:
+        _HOME_CACHE["news_company_last"] = [dict(x) for x in news_company]
     _HOME_CACHE["snapshot_ts"] = now
     _HOME_CACHE["snapshot"] = out
     return out

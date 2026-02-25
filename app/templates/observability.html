@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Observability | Investor OS v2{% endblock %}
+{% block head_extra %}
+<style>
+  .obs-grid { display:grid; gap:12px; grid-template-columns:1fr; }
+  @media (min-width:1100px){ .obs-grid { grid-template-columns:1fr 1fr; } }
+  .obs-card {
+    background:#fff; border:1px solid #dbe4ee; border-radius:12px; padding:12px;
+    box-shadow:0 1px 4px rgba(15,23,42,.05);
+  }
+  .obs-title { margin:0 0 8px 0; font-size:15px; font-weight:900; color:#0f172a; }
+  .obs-sub { color:#64748b; font-size:12px; margin-bottom:8px; }
+  .agent-row { display:flex; justify-content:space-between; gap:8px; padding:6px 0; border-bottom:1px solid #eef2f7; font-size:12px; }
+  .agent-row:last-child { border-bottom:none; }
+  .agent-tag { font-size:10px; font-weight:800; border-radius:999px; padding:2px 7px; border:1px solid #cbd5e1; color:#475569; background:#f8fafc; }
+  .agent-tag.ok { border-color:#86efac; background:#ecfdf5; color:#166534; }
+  .agent-tag.failed { border-color:#fecdd3; background:#fff1f2; color:#be123c; }
+  .agent-tag.skipped { border-color:#cbd5e1; background:#f8fafc; color:#64748b; }
+  .policy-box { border:1px solid #dbe4ee; border-radius:10px; background:#f8fafc; padding:10px; margin-top:8px; }
+  .risk-form { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; margin-top:8px; }
+  .risk-form .rf-row { display:flex; flex-direction:column; gap:4px; }
+  .risk-form label { font-size:11px; color:#64748b; font-weight:700; }
+  .risk-form input, .risk-form select {
+    border:1px solid #cbd5e1; border-radius:8px; padding:6px 8px; background:#fff; color:#334155; font-size:12px;
+  }
+  .risk-form .rf-full { grid-column:1/-1; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .analyze-btn { border:1px solid #dbe4ee; background:#fff; color:#334155; border-radius:8px; padding:6px 10px; text-decoration:none; font-size:12px; font-weight:700; cursor:pointer; }
+</style>
+{% endblock %}
+{% block body %}
+{% if message %}
+<div class="flash">{{ message }}</div>
+{% endif %}
+
+<div class="obs-grid">
+  <article class="obs-card">
+    <h3 class="obs-title">Autonomous Runs</h3>
+    <div class="obs-sub">Background agent activity</div>
+    {% for r in agent_runs[:10] %}
+    <div class="agent-row">
+      <div>
+        <div><strong>{{ r.agent_name or "-" }}</strong> · {{ r.trigger_type or "-" }}</div>
+        <div class="muted">{{ r.started_at or "-" }}</div>
+      </div>
+      <div style="text-align:right;">
+        <span class="agent-tag {% if (r.status or '') == 'ok' %}ok{% elif (r.status or '') == 'failed' %}failed{% elif (r.status or '') == 'skipped' %}skipped{% endif %}">{{ (r.status or '-').upper() }}</span>
+        <div class="muted">{{ "%.0f"|format(r.duration_ms or 0) }}ms</div>
+      </div>
+    </div>
+    {% else %}
+    <div class="muted">No autonomous runs yet.</div>
+    {% endfor %}
+  </article>
+
+  <article class="obs-card">
+    <h3 class="obs-title">Reflexion Policy</h3>
+    <div class="obs-sub">Self-learning safety rules</div>
+    {% if active_reflexion_policy and active_reflexion_policy.version_tag %}
+    <div class="policy-box">
+      <div><strong>Active Version:</strong> {{ active_reflexion_policy.version_tag }}</div>
+      <div class="muted">Created {{ active_reflexion_policy.created_at or "-" }}</div>
+    </div>
+    {% else %}
+    <div class="muted">No active reflexion policy version yet.</div>
+    {% endif %}
+    {% for n in (reflexions.notes if reflexions and reflexions.notes else [])[:6] %}
+    <div class="agent-row">
+      <div>
+        <div><strong>{{ n.rule_key or "-" }}</strong></div>
+        <div class="muted">{{ n.event_type or "-" }} · {{ n.created_at or "-" }}</div>
+      </div>
+    </div>
+    {% else %}
+    <div class="muted">No reflexion notes yet.</div>
+    {% endfor %}
+  </article>
+</div>
+
+<article class="obs-card" style="margin-top:12px;">
+  <h3 class="obs-title">Risk Veto</h3>
+  <div class="obs-sub">Pre-mutation brake log</div>
+  {% if risk_veto_config %}
+  <div class="policy-box" style="margin-bottom:8px;">
+    <div class="muted">
+      Enabled={{ "yes" if risk_veto_config.enabled else "no" }}
+      · MinConf={{ "%.2f"|format(risk_veto_config.min_confidence_for_mutation or 0) }}
+      · MaxAdd={{ "%.2f"|format(risk_veto_config.max_single_add_pct or 0) }}%
+      · MaxPos={{ "%.2f"|format(risk_veto_config.max_position_weight_pct or 0) }}%
+    </div>
+    <form class="risk-form" method="post" action="/observability/risk-veto/config">
+      <div class="rf-row">
+        <label>Enabled</label>
+        <select name="enabled">
+          <option value="1" {% if risk_veto_config.enabled %}selected{% endif %}>On</option>
+          <option value="0" {% if not risk_veto_config.enabled %}selected{% endif %}>Off</option>
+        </select>
+      </div>
+      <div class="rf-row">
+        <label>Min Confidence</label>
+        <input type="number" step="0.01" min="0.30" max="0.95" name="min_confidence_for_mutation" value="{{ '%.2f'|format(risk_veto_config.min_confidence_for_mutation or 0.62) }}">
+      </div>
+      <div class="rf-row">
+        <label>Max Single Add %</label>
+        <input type="number" step="0.01" min="0.25" max="50" name="max_single_add_pct" value="{{ '%.2f'|format(risk_veto_config.max_single_add_pct or 5.0) }}">
+      </div>
+      <div class="rf-row">
+        <label>Max Position Weight %</label>
+        <input type="number" step="0.01" min="1" max="100" name="max_position_weight_pct" value="{{ '%.2f'|format(risk_veto_config.max_position_weight_pct or 20.0) }}">
+      </div>
+      <div class="rf-row">
+        <label>Max VaR95 %</label>
+        <input type="number" step="0.01" min="0.5" max="50" name="max_var95_pct" value="{{ '%.2f'|format(risk_veto_config.max_var95_pct or 6.0) }}">
+      </div>
+      <div class="rf-row">
+        <label>Max CVaR95 %</label>
+        <input type="number" step="0.01" min="1" max="80" name="max_cvar95_pct" value="{{ '%.2f'|format(risk_veto_config.max_cvar95_pct or 8.0) }}">
+      </div>
+      <div class="rf-row">
+        <label>Min Quote Coverage %</label>
+        <input type="number" step="0.01" min="1" max="100" name="min_quote_coverage_pct" value="{{ '%.2f'|format(risk_veto_config.min_quote_coverage_pct or 75.0) }}">
+      </div>
+      <div class="rf-row">
+        <label>High Impact Notional %</label>
+        <input type="number" step="0.01" min="0.25" max="50" name="high_impact_notional_pct" value="{{ '%.2f'|format(risk_veto_config.high_impact_notional_pct or 3.0) }}">
+      </div>
+      <div class="rf-row">
+        <label>Require Known Ticker Scope</label>
+        <select name="require_known_ticker_scope">
+          <option value="1" {% if risk_veto_config.require_known_ticker_scope %}selected{% endif %}>Yes</option>
+          <option value="0" {% if not risk_veto_config.require_known_ticker_scope %}selected{% endif %}>No</option>
+        </select>
+      </div>
+      <div class="rf-row">
+        <label>Block Unknown Ticker</label>
+        <select name="block_on_unknown_ticker">
+          <option value="1" {% if risk_veto_config.block_on_unknown_ticker %}selected{% endif %}>Yes</option>
+          <option value="0" {% if not risk_veto_config.block_on_unknown_ticker %}selected{% endif %}>No</option>
+        </select>
+      </div>
+      <div class="rf-row">
+        <label>Review High Impact</label>
+        <select name="review_for_high_impact">
+          <option value="1" {% if risk_veto_config.review_for_high_impact %}selected{% endif %}>Yes</option>
+          <option value="0" {% if not risk_veto_config.review_for_high_impact %}selected{% endif %}>No</option>
+        </select>
+      </div>
+      <div class="rf-full">
+        <button class="analyze-btn" type="submit">Save Risk Veto Settings</button>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+  {% for v in risk_veto_decisions[:10] %}
+  <div class="agent-row">
+    <div>
+      <div><strong>{{ (v.action or '-').upper() }}</strong> · {{ (v.verdict or '-').upper() }}</div>
+      <div class="muted">{{ v.reason or "-" }}</div>
+    </div>
+    <div style="text-align:right;">
+      <span class="agent-tag {% if (v.verdict or '') == 'allow' %}ok{% elif (v.verdict or '') == 'veto' %}failed{% else %}skipped{% endif %}">
+        {{ "%.0f"|format((v.confidence or 0) * 100) }}%
+      </span>
+      <div class="muted">{{ v.created_at or "-" }}</div>
+    </div>
+  </div>
+  {% else %}
+  <div class="muted">No veto decisions logged yet.</div>
+  {% endfor %}
+</article>
+
+<div class="obs-card" style="margin-top:12px;">
+  <strong class="title">System Events (Last 50)</strong>
+  <table style="margin-top:8px;">
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>Service</th>
+        <th>Status</th>
+        <th>Latency</th>
+        <th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.created_at }}</td>
+        <td>{{ r.service }}</td>
+        <td>
+          {% if r.status == "ok" or r.status == "success" %}
+          <span class="chip" style="background:#ecfdf5;border-color:#a7f3d0;color:#065f46;">{{ r.status }}</span>
+          {% elif r.status == "error" or r.status == "failed" %}
+          <span class="chip" style="background:#fff1f2;border-color:#fecdd3;color:#9f1239;">{{ r.status }}</span>
+          {% else %}
+          <span class="chip">{{ r.status }}</span>
+          {% endif %}
+        </td>
+        <td>{{ r.latency_ms }} ms</td>
+        <td>{{ r.message }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">No events yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
