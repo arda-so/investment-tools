@@ -363,6 +363,7 @@
           <button type="button" class="ai-tab-btn" data-ai-tab="thesis">Thesis Alerts</button>
           <button type="button" class="ai-tab-btn" data-ai-tab="cascade">Cascades</button>
           <button type="button" class="ai-tab-btn" data-ai-tab="accuracy">AI Accuracy</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="audit">Audit Log</button>
         </div>
 
         <div class="ai-panel" data-ai-panel="insights">
@@ -524,14 +525,44 @@
 
         <div class="ai-panel" data-ai-panel="accuracy" hidden>
           {% if ai_accuracy and ai_accuracy.get("ok") %}
-            <div class="big-metric">
-              <div class="big-metric-num {% if (ai_accuracy.overall_hit_rate or 0) >= 60 %}good{% elif (ai_accuracy.overall_hit_rate or 0) >= 40 %}mid{% else %}bad{% endif %}">
-                {{ "%.1f"|format(ai_accuracy.overall_hit_rate or 0) }}%
+
+            {# Row 1: three headline KPI numbers #}
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+              <div class="big-metric">
+                <div class="big-metric-num {% if (ai_accuracy.overall_hit_rate or 0) >= 60 %}good{% elif (ai_accuracy.overall_hit_rate or 0) >= 40 %}mid{% else %}bad{% endif %}">
+                  {{ "%.1f"|format(ai_accuracy.overall_hit_rate or 0) }}%
+                </div>
+                <div class="mini-upd">Prediction hit rate</div>
+                <div class="mini-upd">{{ ai_accuracy.total_measured or 0 }} outcomes measured</div>
               </div>
-              <div class="mini-upd">{{ ai_accuracy.total_measured or 0 }} outcomes measured</div>
+              <div class="big-metric">
+                {% if ai_accuracy.acceptance_rate is not none %}
+                <div class="big-metric-num {% if (ai_accuracy.acceptance_rate or 0) >= 50 %}good{% elif (ai_accuracy.acceptance_rate or 0) >= 25 %}mid{% else %}bad{% endif %}">
+                  {{ "%.1f"|format(ai_accuracy.acceptance_rate) }}%
+                </div>
+                {% else %}
+                <div class="big-metric-num mid">—</div>
+                {% endif %}
+                <div class="mini-upd">Acceptance rate</div>
+                <div class="mini-upd">{{ ai_accuracy.proposals_executed or 0 }} executed / {{ ai_accuracy.proposals_total or 0 }} proposed</div>
+              </div>
+              <div class="big-metric">
+                {% if ai_accuracy.agent_success_rate is not none %}
+                <div class="big-metric-num {% if (ai_accuracy.agent_success_rate or 0) >= 90 %}good{% elif (ai_accuracy.agent_success_rate or 0) >= 70 %}mid{% else %}bad{% endif %}">
+                  {{ "%.1f"|format(ai_accuracy.agent_success_rate) }}%
+                </div>
+                {% else %}
+                <div class="big-metric-num mid">—</div>
+                {% endif %}
+                <div class="mini-upd">Agent success rate</div>
+                <div class="mini-upd">{{ ai_accuracy.agent_runs_completed or 0 }} ok / {{ ai_accuracy.agent_runs_total or 0 }} runs</div>
+              </div>
             </div>
+
+            {# Row 2: prediction accuracy by window #}
             {% if ai_accuracy.by_window %}
-            <table class="mini-table">
+            <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;">PREDICTION ACCURACY BY WINDOW</div>
+            <table class="mini-table" style="margin-bottom:12px;">
               <thead><tr><th>Window</th><th>Total</th><th>Correct</th><th>Hit Rate</th><th>Avg Return</th></tr></thead>
               <tbody>
                 {% for w, s in ai_accuracy.by_window.items() %}
@@ -539,15 +570,75 @@
                   <td>{{ w }}</td>
                   <td>{{ s.total }}</td>
                   <td>{{ s.correct }}</td>
-                  <td>{{ "%.1f"|format(s.hit_rate) }}%</td>
-                  <td>{{ "%+.1f"|format(s.avg_return_pct) }}%</td>
+                  <td class="{% if s.hit_rate >= 60 %}good{% elif s.hit_rate >= 40 %}mid{% else %}bad{% endif %}">{{ "%.1f"|format(s.hit_rate) }}%</td>
+                  <td class="{% if s.avg_return_pct >= 0 %}good{% else %}bad{% endif %}">{{ "%+.1f"|format(s.avg_return_pct) }}%</td>
                 </tr>
                 {% endfor %}
               </tbody>
             </table>
             {% endif %}
+
+            {# Row 3: proposal funnel #}
+            {% if (ai_accuracy.proposals_total or 0) > 0 %}
+            <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;">PROPOSAL FUNNEL (last 90 days)</div>
+            <table class="mini-table">
+              <thead><tr><th>Status</th><th>Count</th><th>Share</th></tr></thead>
+              <tbody>
+                {% set pt = ai_accuracy.proposals_total or 1 %}
+                <tr><td>Executed</td><td>{{ ai_accuracy.proposals_executed or 0 }}</td><td class="good">{{ "%.0f"|format((ai_accuracy.proposals_executed or 0) / pt * 100) }}%</td></tr>
+                <tr><td>Open</td><td>{{ ai_accuracy.proposals_open or 0 }}</td><td>{{ "%.0f"|format((ai_accuracy.proposals_open or 0) / pt * 100) }}%</td></tr>
+                <tr><td>Dismissed</td><td>{{ ai_accuracy.proposals_dismissed or 0 }}</td><td class="mid">{{ "%.0f"|format((ai_accuracy.proposals_dismissed or 0) / pt * 100) }}%</td></tr>
+                <tr><td>Rejected</td><td>{{ ai_accuracy.proposals_rejected or 0 }}</td><td class="bad">{{ "%.0f"|format((ai_accuracy.proposals_rejected or 0) / pt * 100) }}%</td></tr>
+              </tbody>
+            </table>
+            {% endif %}
+
           {% else %}
           <div class="proposal-empty">No measured outcomes yet — execute proposals to start tracking</div>
+          {% endif %}
+        </div>
+
+        {# ── Audit Log panel ── #}
+        <div class="ai-panel" data-ai-panel="audit" hidden>
+          {% if ai_audit_timeline %}
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th style="width:130px">Time</th>
+                <th style="width:90px">Type</th>
+                <th>Event</th>
+                <th style="width:70px">Status</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for ev in ai_audit_timeline %}
+              {% set k = ev.kind or "" %}
+              <tr>
+                <td style="font-size:10px;white-space:nowrap;color:#64748b">{{ (ev.ts or "")[:19] }}</td>
+                <td>
+                  {% if k == "agent_run" %}<span class="meta-chip">Agent</span>
+                  {% elif k == "proposal_executed" %}<span class="meta-chip" style="background:#dcfce7;color:#15803d">Executed</span>
+                  {% elif k == "proposal_rejected" or k == "proposal_debate_rejected" %}<span class="meta-chip" style="background:#fee2e2;color:#b91c1c">Rejected</span>
+                  {% elif k == "policy_update" %}<span class="meta-chip" style="background:#ede9fe;color:#7c3aed">Policy</span>
+                  {% else %}<span class="meta-chip">{{ k }}</span>
+                  {% endif %}
+                </td>
+                <td style="font-size:12px">{{ ev.label or "-" }}</td>
+                <td>
+                  {% set st = ev.status or "" %}
+                  <span class="{% if st in ('completed','ok','executed','active') %}good{% elif st in ('error','rejected','debate_rejected') %}bad{% else %}mid{% endif %}" style="font-size:11px;font-weight:600">{{ st }}</span>
+                </td>
+                <td style="font-size:11px;color:#64748b">
+                  {{ ev.detail or "" }}
+                  {% if ev.error %}<span style="color:#dc2626"> ⚠ {{ ev.error[:80] }}</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <div class="proposal-empty">◌ No audit events yet — agent runs and proposal actions will appear here</div>
           {% endif %}
         </div>
       </section>

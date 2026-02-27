@@ -43,7 +43,7 @@ from app.services.company_lookup_service import company_name_map as lookup_compa
 from app.services.ai_insight_service import list_ai_meta_suggestions, run_ai_meta_suggestions
 from app.services.company_file_service import add_company_reminder
 from app.services.company_file_service import list_companies
-from app.services.dashboard_service import ask_ai_local, dashboard_snapshot, quick_capture, portfolio_intelligence_brief
+from app.services.dashboard_service import ask_ai_local, ask_workspace_ai, dashboard_snapshot, quick_capture, portfolio_intelligence_brief
 from app.services.earnings_transcript_service import list_sec_earnings_releases
 from app.services.organizer_service import list_recent_notes, list_tasks
 from app.services.portfolio_memory_service import (
@@ -60,6 +60,7 @@ from app.services.proactive_ai_service import (
     dismiss_thesis_breach_alert,
     execute_action_proposal,
     get_ai_accuracy_stats,
+    get_ai_audit_timeline,
     learn_from_rejection,
     list_action_proposals,
     list_cascade_alerts,
@@ -81,6 +82,7 @@ from app.services.postgres_core_service import (
     upsert_earnings_calendar_snapshot_pg,
 )
 from app.services.watchlist_service import read_watchlist_rows, write_watchlist_rows
+from app.services.workspace_feed_service import add_workspace_message, list_workspace_channels, load_workspace_feed
 from app.services.portfolio_state_service import (
     read_cash_rows_state,
     read_portfolio_rows_state,
@@ -1807,6 +1809,7 @@ def _render(
     thesis_breach_alerts = list_thesis_breach_alerts(status="open", limit=10)
     cascade_alerts = list_cascade_alerts(status="open", limit=10)
     ai_accuracy = get_ai_accuracy_stats(days=90)
+    ai_audit_timeline = get_ai_audit_timeline(limit=30)
     from app.services.earnings_transcript_service import list_earnings_analysis
     earnings_analyses = list_earnings_analysis(limit=10)
     tpl = "components/dashboard_body.html" if _is_hx(request) else "dashboard.html"
@@ -1839,6 +1842,7 @@ def _render(
             "thesis_breach_alerts": thesis_breach_alerts,
             "cascade_alerts": cascade_alerts,
             "ai_accuracy": ai_accuracy,
+            "ai_audit_timeline": ai_audit_timeline,
             "earnings_analyses": earnings_analyses,
         },
     )
@@ -2557,7 +2561,74 @@ def _infer_ticker(text: str, user_ticker: str = "") -> str:
 @router.get("/")
 @router.get("/dashboard")
 def dashboard_page(request: Request):
+    templates = request.app.state.templates
+    channels = list_workspace_channels()
+    return templates.TemplateResponse(
+        "workspace_dashboard.html",
+        {
+            "request": request,
+            "channels": channels,
+            "active_channel": "all",
+        },
+    )
+
+
+@router.get("/dashboard/classic")
+def dashboard_page_classic(request: Request):
     return _render(request)
+
+
+@router.get("/dashboard/feed")
+def dashboard_workspace_feed(channel: str = "all", limit: int = 50):
+    items = load_workspace_feed(channel=channel, limit=limit)
+    return JSONResponse({"ok": True, "channel": str(channel or "all"), "items": items})
+
+
+@router.post("/dashboard/message")
+def dashboard_workspace_message(channel: str = Form("ai-agent"), text: str = Form("")):
+    ch = str(channel or "ai-agent").strip().lower() or "ai-agent"
+    prompt = str(text or "").strip()
+    if not prompt:
+        return JSONResponse({"ok": False, "error": "Message required."}, status_code=400)
+    add_workspace_message(channel=ch, role="user", message=prompt)
+    if ch != "ai-agent":
+        return JSONResponse(
+            {
+                "ok": True,
+                "channel": ch,
+                "reply": f"Posted to #{ch}.",
+                "ts": dt.datetime.now().isoformat(),
+            }
+        )
+    reply = str(ask_workspace_ai(prompt) or "").strip() or "No response."
+    add_workspace_message(channel="ai-agent", role="assistant", message=reply[:5000])
+    return JSONResponse(
+        {
+            "ok": True,
+            "channel": ch,
+            "reply": reply[:5000],
+            "ts": dt.datetime.now().isoformat(),
+        }
+    )
+
+
+@router.post("/dashboard/ai-agent/save-note")
+def dashboard_workspace_save_note(text: str = Form(""), ticker: str = Form("")):
+    body = str(text or "").strip()
+    tk = _safe_ticker(str(ticker or "").strip())
+    if not body:
+        return JSONResponse({"ok": False, "error": "missing_text"}, status_code=400)
+    if not tk:
+        tk = _infer_ticker(body)
+    ok, msg = quick_capture(mode="note", text=body, ticker=tk)
+    return JSONResponse(
+        {
+            "ok": bool(ok),
+            "message": str(msg or ("Saved." if ok else "Could not save note.")),
+            "ticker": tk,
+        },
+        status_code=200 if ok else 400,
+    )
 
 
 @router.post("/dashboard/quick-capture")
@@ -2669,11 +2740,19 @@ def dashboard_proposals_dismiss(
 def dashboard_proposals_execute(request: Request, proposal_id: int):
     out = execute_action_proposal(proposal_id=proposal_id)
     if not bool(out.get("ok")):
-        return _render(request, message=f"Could not open workspace: {out.get('error') or 'unknown_error'}")
+        err = out.get("error") or "unknown_error"
+        msg = out.get("message") or f"Could not execute proposal: {err}"
+        wants_json = _is_hx(request) or "application/json" in str(request.headers.get("accept") or "").lower()
+        if wants_json:
+            return JSONResponse({"ok": False, "error": err, "message": msg}, status_code=400)
+        if _is_hx(request):
+            return JSONResponse({"ok": False, "error": err, "message": msg}, status_code=400)
+        return _render(request, message=msg)
     route = str(out.get("route") or "/dashboard").strip()
     if not route.startswith("/"):
         route = "/dashboard"
-    if _is_hx(request):
+    wants_json = _is_hx(request) or "application/json" in str(request.headers.get("accept") or "").lower()
+    if wants_json:
         resp = JSONResponse({"ok": True, "route": route})
         resp.headers["HX-Redirect"] = route
         return resp
@@ -2707,12 +2786,17 @@ def dashboard_proposals_reject(
 ):
     rs = str(reason or "").strip()
     ok = reject_action_proposal(proposal_id=proposal_id, reason=rs)
+    wants_json = _is_hx(request) or "application/json" in str(request.headers.get("accept") or "").lower()
     if not ok:
+        if wants_json:
+            return JSONResponse({"ok": False, "error": "proposal_not_found_or_not_updated"}, status_code=404)
         return _render(request, message="Could not reject proposal.")
     try:
         learn_from_rejection(proposal_id=proposal_id, reason=rs)
     except Exception:
         pass
+    if wants_json:
+        return JSONResponse({"ok": True, "proposal_id": int(proposal_id), "status": "REJECTED"})
     return _render(request, message="Proposal rejected and preference learning saved.")
 
 

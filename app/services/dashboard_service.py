@@ -109,6 +109,28 @@ def quick_capture(mode: str, text: str, ticker: str = "") -> tuple[bool, str]:
     return (ok, "Note saved." if ok else "Note save failed.")
 
 
+def ask_workspace_ai(question: str) -> str:
+    """Full LLM response for workspace AI Agent channel, with investment context."""
+    q = str(question or "").strip()
+    if not q:
+        return ""
+    try:
+        from tools.llm_engine import ask_ai as _ask_ai
+        today = dt.datetime.now().strftime("%A, %B %d, %Y")
+        prompt = (
+            f"You are an investment AI assistant. Today is {today}.\n"
+            f"You help analyze portfolios, SEC filings, earnings, and investment theses.\n"
+            f"Be concise (3-5 sentences max) and factual. Do not guess numbers.\n\n"
+            f"User: {q}"
+        )
+        reply = _ask_ai(prompt, context="", mode="smart")
+        if reply and reply.strip():
+            return reply.strip()
+    except Exception:
+        pass
+    return ask_ai_local(q)
+
+
 def ask_ai_local(question: str) -> str:
     q = str(question or "").strip()
     if not q:

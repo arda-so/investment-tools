@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block title %}Workspace | Investor OS v2{% endblock %}
+{% block head_extra %}
+<style>
+  .ws{display:grid;grid-template-columns:220px 1fr 260px;gap:12px;padding:12px;}
+  .ws-card{background:#fff;border:1px solid #dbe4ee;border-radius:12px;padding:10px;}
+  .ws-side h3,.ws-right h3{margin:0 0 10px 0;font-size:12px;text-transform:uppercase;color:#64748b;letter-spacing:.06em;}
+  .ws-ch{display:block;width:100%;text-align:left;border:1px solid #e2e8f0;background:#f8fafc;color:#0f172a;border-radius:10px;padding:8px 10px;margin-bottom:6px;font-size:13px;font-weight:700;cursor:pointer;}
+  .ws-ch.active{background:#0f172a;color:#fff;border-color:#0f172a;}
+  .ws-main{display:grid;grid-template-rows:auto 1fr auto;min-height:78vh;}
+  .ws-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+  .ws-title{font-size:20px;font-weight:800;color:#0f172a;}
+  .ws-feed{overflow:auto;min-height:0;display:grid;gap:8px;padding-right:4px;}
+  .ws-item{border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;}
+  .ws-item-error{border-color:#fecaca;background:#fff7f7;}
+  .ws-item h4{margin:0 0 5px 0;font-size:14px;color:#0f172a;}
+  .ws-meta{font-size:11px;color:#64748b;margin-bottom:6px;}
+  .ws-text{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.4;}
+  .ws-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
+  .ws-act{border:1px solid #cbd5e1;background:#f8fafc;color:#0f172a;border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;}
+  .ws-act-primary{background:#0f172a;color:#fff;border-color:#0f172a;}
+  .ws-status{font-size:11px;color:#64748b;margin-top:6px;}
+  .ws-input{margin-top:10px;}
+  .ws-input-wrap{display:flex;align-items:center;gap:8px;border:1px solid #cbd5e1;border-radius:14px;background:#fff;padding:8px 10px;}
+  .ws-input-wrap input{flex:1;border:none;outline:none;background:transparent;height:28px;font-size:14px;color:#0f172a;}
+  .ws-icon{border:none;background:transparent;color:#475569;font-size:12px;padding:4px 6px;border-radius:8px;cursor:pointer;}
+  .ws-icon:hover{background:#f1f5f9;}
+  .ws-model{font-size:11px;color:#475569;border:1px solid #e2e8f0;border-radius:8px;padding:3px 6px;background:#f8fafc;}
+  .ws-send{border:1px solid #0f172a;background:#0f172a;color:#fff;border-radius:10px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;}
+  .ws-right .hint{font-size:12px;color:#475569;line-height:1.4;}
+  @media (max-width:1100px){.ws{grid-template-columns:1fr;}.ws-right{order:3;}.ws-side{order:1;}.ws-main{order:2;min-height:65vh;}}
+</style>
+{% endblock %}
+{% block content %}
+<div class="ws">
+  <aside class="ws-card ws-side">
+    <h3>Channels</h3>
+    {% for c in channels %}
+    <button class="ws-ch {% if c.id == active_channel %}active{% endif %}" data-channel="{{ c.id }}"># {{ c.label }}</button>
+    {% endfor %}
+  </aside>
+
+  <section class="ws-card ws-main">
+    <div class="ws-head">
+      <div class="ws-title" id="wsTitle"># All</div>
+      <a class="btn" href="/dashboard/classic">Classic Dashboard</a>
+    </div>
+    <div class="ws-feed" id="wsFeed"></div>
+    <form class="ws-input" id="wsForm">
+      <div class="ws-input-wrap">
+        <button class="ws-icon" id="wsAttach" type="button">Attach</button>
+        <input id="wsText" type="text" placeholder="Ask Investor OS..." autocomplete="off">
+        <button class="ws-icon" id="wsMic" type="button">Mic</button>
+        <span class="ws-model">1.0x</span>
+        <button class="ws-send" type="submit">Send</button>
+      </div>
+    </form>
+  </section>
+
+  <aside class="ws-card ws-right">
+    <h3>Context</h3>
+    <div class="hint">Workspace mode is now your default dashboard. It merges briefs, alerts, filings, notes, and agent runs into one feed.</div>
+    <div class="hint" style="margin-top:10px;">Use <b># AI Agent</b> for natural language questions and commands.</div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const channels = Array.from(document.querySelectorAll('.ws-ch'));
+  const feedEl = document.getElementById('wsFeed');
+  const titleEl = document.getElementById('wsTitle');
+  const formEl = document.getElementById('wsForm');
+  const textEl = document.getElementById('wsText');
+  let active = 'all';
+  let lastItems = [];
+
+  function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  function channelLabel(id){
+    const btn = channels.find(b => b.dataset.channel === id);
+    return btn ? btn.textContent.trim() : `# ${id}`;
+  }
+  function isAssistantMessage(it){
+    return String(it.channel || '') === 'ai-agent' && String(it.meta || '').toLowerCase() === 'assistant';
+  }
+  function isErrorText(text){
+    const t = String(text || '').toLowerCase();
+    return t.includes('transport issue') || t.includes('command failed') || t.includes('could not complete') || t.includes('error');
+  }
+  function smartErrorHelp(text){
+    const t = String(text || '').toLowerCase();
+    if(t.includes('transport issue')) return 'AI transport timeout. Retry once; if repeated, check AI provider key/network.';
+    if(t.includes('permission') || t.includes('forbidden')) return 'Permission issue. Verify auth token or service IAM access.';
+    return 'Request failed. Retry or switch to # AI Agent and ask for a narrower query.';
+  }
+  function withUiActions(it){
+    const base = Array.isArray(it.actions) ? it.actions.slice() : [];
+    if(isAssistantMessage(it) && String(it.text || '').trim()){
+      base.push({label:'Save to Notes', method:'POST_FORM', url:'/dashboard/ai-agent/save-note'});
+      base.push({label:'Discard', method:'CLIENT', action:'discard'});
+      if(isErrorText(it.text)){ base.push({label:'Retry', method:'CLIENT', action:'retry'}); }
+    }
+    return base;
+  }
+  function actionHtml(it){
+    const actions = withUiActions(it);
+    if(!actions.length) return '';
+    return `<div class="ws-actions">${actions.map((a, idx) => {
+      const label = esc(a.label || 'Action');
+      const cls = label.toLowerCase().includes('save') ? 'ws-act ws-act-primary' : 'ws-act';
+      return `<button class="${cls}" data-item-idx="__ITEMIDX__" data-action-idx="${idx}" type="button">${label}</button>`;
+    }).join('')}</div>`;
+  }
+  function render(items){
+    lastItems = Array.isArray(items) ? items.slice() : [];
+    if(!Array.isArray(items) || !items.length){
+      feedEl.innerHTML = '<div class="ws-item"><h4>No items yet</h4><div class="ws-text">No feed data for this channel.</div></div>';
+      return;
+    }
+    feedEl.innerHTML = items.map((it, itemIdx) => {
+      const err = isAssistantMessage(it) && isErrorText(it.text || '');
+      const info = err ? `<div class="ws-status">${esc(smartErrorHelp(it.text || ''))}</div>` : '';
+      return `<article class="ws-item ${err ? 'ws-item-error' : ''}" data-item-idx="${itemIdx}">
+        <h4>${esc(it.title || 'Update')}</h4>
+        <div class="ws-meta">${esc(it.meta || '')} ${it.ts ? '· ' + esc(it.ts) : ''}</div>
+        <div class="ws-text">${esc(it.text || '')}</div>
+        ${actionHtml(it).replaceAll('__ITEMIDX__', String(itemIdx))}
+        ${info}
+      </article>`; }).join('');
+    wireActions();
+  }
+  async function sendUserMessage(text){
+    const fd = new FormData();
+    fd.append('channel', active);
+    fd.append('text', text);
+    const res = await fetch('/dashboard/message', {method:'POST', body:fd});
+    return res.json();
+  }
+  async function runAction(btn){
+    const itemIdx = Number(btn.dataset.itemIdx || '-1');
+    const actIdx = Number(btn.dataset.actionIdx || '-1');
+    const it = lastItems[itemIdx] || {};
+    const actions = withUiActions(it);
+    const action = actions[actIdx] || {};
+    const method = String(action.method || 'GET').toUpperCase();
+    const url = String(action.url || '').trim();
+    if(!url && method !== 'CLIENT') return;
+    if(method === 'GET'){ window.location.href = url; return; }
+    if(method === 'POST_FORM'){
+      btn.disabled = true;
+      try{
+        const fd = new FormData();
+        fd.append('text', String(it.text || ''));
+        fd.append('ticker', String(it.ticker || ''));
+        await fetch(url, {method:'POST', body:fd, headers:{'Accept':'application/json'}});
+        await loadFeed();
+      }catch(_e){ btn.disabled = false; }
+      return;
+    }
+    if(method === 'CLIENT'){
+      if(String(action.action || '') === 'discard'){
+        lastItems.splice(itemIdx, 1);
+        render(lastItems);
+        return;
+      }
+      if(String(action.action || '') === 'retry'){
+        let retryPrompt = '';
+        for(let i = itemIdx + 1; i < lastItems.length; i += 1){
+          const cand = lastItems[i] || {};
+          if(String(cand.channel || '') === 'ai-agent' && String(cand.meta || '').toLowerCase() === 'user'){
+            retryPrompt = String(cand.text || '').trim();
+            break;
+          }
+        }
+        if(!retryPrompt){ retryPrompt = String(textEl.value || '').trim(); }
+        if(!retryPrompt){ return; }
+        const data = await sendUserMessage(retryPrompt);
+        if(data && data.reply){ await loadFeed(); }
+        return;
+      }
+      return;
+    }
+    btn.disabled = true;
+    try{
+      await fetch(url, {method, headers: {'Accept':'application/json'}});
+      await loadFeed();
+    }catch(_e){
+      btn.disabled = false;
+    }
+  }
+  function wireActions(){
+    document.querySelectorAll('.ws-act').forEach(btn => {
+      btn.onclick = () => runAction(btn);
+    });
+  }
+  async function loadFeed(){
+    const res = await fetch(`/dashboard/feed?channel=${encodeURIComponent(active)}&limit=50`);
+    const data = await res.json();
+    render(data.items || []);
+  }
+  channels.forEach(btn => {
+    btn.addEventListener('click', () => {
+      channels.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      active = btn.dataset.channel || 'all';
+      titleEl.textContent = channelLabel(active);
+      loadFeed();
+    });
+  });
+  formEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = textEl.value.trim();
+    if(!text) return;
+    const data = await sendUserMessage(text);
+    if(data && data.reply){
+      if(active === 'ai-agent'){
+        const mine = {title:'You', text, meta:'user', ts:new Date().toISOString()};
+        const bot = {title:'AI Agent', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
+        render([bot, mine, ...lastItems].slice(0, 50));
+      }else{
+        await loadFeed();
+      }
+    }
+    textEl.value = '';
+  });
+  loadFeed();
+  setInterval(loadFeed, 20000);
+})();
+</script>
+{% endblock %}

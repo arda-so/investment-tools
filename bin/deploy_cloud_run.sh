@@ -95,6 +95,13 @@ gcloud run deploy "$APP_SERVICE" \
 
 if [ "$DEPLOY_WORKER" = "1" ]; then
   echo "Deploying worker service: ${WORKER_SERVICE}"
+  WORKER_ENV="APP_ENV=cloud,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1"
+  if [ -n "${CLOUD_FILES_BUCKET:-}" ]; then
+    WORKER_ENV="${WORKER_ENV},CLOUD_FILES_BUCKET=${CLOUD_FILES_BUCKET}"
+  fi
+  if [ -n "${CLOUD_FILES_PREFIX:-}" ]; then
+    WORKER_ENV="${WORKER_ENV},CLOUD_FILES_PREFIX=${CLOUD_FILES_PREFIX}"
+  fi
   gcloud run deploy "$WORKER_SERVICE" \
     --image="$IMAGE" \
     --region="$REGION" \
@@ -103,7 +110,7 @@ if [ "$DEPLOY_WORKER" = "1" ]; then
     $SA_OPT \
     --command="/app/bin/run_ai_worker" \
     --add-cloudsql-instances="${PROJECT_ID}:${REGION}:${DB_INSTANCE}" \
-    --set-env-vars="APP_ENV=cloud,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1" \
+    --set-env-vars="$WORKER_ENV" \
     --set-secrets="$SECRETS"
 fi
 

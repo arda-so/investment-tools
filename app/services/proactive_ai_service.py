@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 import sqlite3
 from typing import Any
@@ -744,6 +745,104 @@ def list_recent_reflexions(limit: int = 20) -> dict[str, Any]:
         }
     finally:
         con.close()
+
+
+def get_ai_audit_timeline(limit: int = 40) -> list[dict[str, Any]]:
+    """Merge agent runs, proposal actions, and policy updates into a single chronological audit log."""
+    lim = max(1, min(200, int(limit or 40)))
+    events: list[dict[str, Any]] = []
+
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return []
+        try:
+            cur = con_pg.cursor()
+            # Agent runs
+            cur.execute(
+                """SELECT started_at, agent_name, status, trigger_type, duration_ms, error_text, run_uid
+                   FROM agent_runs_core ORDER BY id DESC LIMIT %s""",
+                (lim,),
+            )
+            for r in cur.fetchall() or []:
+                dur = float(r[4] or 0)
+                events.append({
+                    "ts": str(r[0] or ""),
+                    "kind": "agent_run",
+                    "label": f"Agent: {r[1] or 'worker'}",
+                    "status": str(r[2] or ""),
+                    "detail": f"trigger={r[3] or '-'}, {int(dur/1000)}s" if dur else f"trigger={r[3] or '-'}",
+                    "error": str(r[5] or ""),
+                    "uid": str(r[6] or ""),
+                })
+            # Proposal executions and rejections
+            cur.execute(
+                """SELECT created_at, ticker, direction, title, status, confidence
+                   FROM action_proposals_core
+                   WHERE status IN ('executed','rejected','debate_rejected')
+                   ORDER BY id DESC LIMIT %s""",
+                (lim,),
+            )
+            for r in cur.fetchall() or []:
+                st = str(r[4] or "")
+                conf = float(r[5] or 0.0)
+                events.append({
+                    "ts": str(r[0] or ""),
+                    "kind": f"proposal_{st}",
+                    "label": f"Proposal {st.replace('_',' ').title()}: {r[1] or '?'} {r[2] or ''}",
+                    "status": st,
+                    "detail": (str(r[3] or "")[:80]) + (f"  [conf {conf:.0%}]" if conf else ""),
+                    "error": "",
+                    "uid": "",
+                })
+            # Reflexion policy updates
+            cur.execute(
+                """SELECT created_at, version_tag, is_active, rolled_back_from
+                   FROM reflexion_policy_versions_core ORDER BY id DESC LIMIT 10"""
+            )
+            for r in cur.fetchall() or []:
+                tag = str(r[1] or "")
+                active = int(r[2] or 0)
+                rolled = str(r[3] or "")
+                events.append({
+                    "ts": str(r[0] or ""),
+                    "kind": "policy_update",
+                    "label": f"Policy {'rolled back to' if rolled else 'updated'}: {tag}",
+                    "status": "active" if active else "superseded",
+                    "detail": f"rolled_back_from={rolled}" if rolled else "",
+                    "error": "",
+                    "uid": "",
+                })
+        finally:
+            con_pg.close()
+    else:
+        # SQLite fallback
+        con = _conn_core()
+        try:
+            rows = con.execute(
+                """SELECT started_at, agent_name, status, trigger_type, duration_ms, error_text, run_uid
+                   FROM agent_runs ORDER BY id DESC LIMIT ?""", (lim,)
+            ).fetchall()
+            for r in rows:
+                dur = float(r["duration_ms"] or 0)
+                events.append({
+                    "ts": str(r["started_at"] or ""),
+                    "kind": "agent_run",
+                    "label": f"Agent: {r['agent_name'] or 'worker'}",
+                    "status": str(r["status"] or ""),
+                    "detail": f"trigger={r['trigger_type'] or '-'}, {int(dur/1000)}s" if dur else f"trigger={r['trigger_type'] or '-'}",
+                    "error": str(r["error_text"] or ""),
+                    "uid": str(r["run_uid"] or ""),
+                })
+        finally:
+            con.close()
+
+    # Sort by timestamp descending
+    def _ts_key(e: dict[str, Any]) -> str:
+        return str(e.get("ts") or "")
+
+    events.sort(key=_ts_key, reverse=True)
+    return events[:lim]
 
 
 def _state_get(con: sqlite3.Connection, key: str, default: str = "") -> str:
@@ -3370,6 +3469,18 @@ def execute_action_proposal(proposal_id: int) -> dict[str, Any]:
     row = _pg_get_action_proposal_row(pid)
     if not row:
         return {"ok": False, "route": "/dashboard", "error": "not_found"}
+    # Low-confidence gate: block execution if confidence < 0.70
+    _CONFIDENCE_GATE = float(os.getenv("AI_CONFIDENCE_GATE", "0.70"))
+    _conf = float(row.get("confidence") or row.get("confidence_score") or 0.0)
+    if _conf > 0.0 and _conf < _CONFIDENCE_GATE:
+        return {
+            "ok": False,
+            "route": "/dashboard",
+            "error": "confidence_below_gate",
+            "confidence": _conf,
+            "gate": _CONFIDENCE_GATE,
+            "message": f"Confidence {_conf:.0%} is below the {_CONFIDENCE_GATE:.0%} execution threshold. Review the proposal or lower the gate with AI_CONFIDENCE_GATE env var.",
+        }
     payload = dict(row.get("execute_payload_json") or {})
     route = str((payload or {}).get("route") or row.get("execute_route") or "/dashboard").strip()
     tk = _safe_ticker(str(row.get("ticker") or "") or str((payload or {}).get("ticker") or ""))
@@ -3626,11 +3737,64 @@ def get_ai_accuracy_stats(days: int = 90) -> dict[str, Any]:
             }
             total_correct += c
             total_measured += t
+        # --- Proposal acceptance / rejection stats ---
+        cur.execute(
+            """SELECT
+                 COUNT(*) FILTER (WHERE status='open')           AS open_count,
+                 COUNT(*) FILTER (WHERE status='executed')       AS executed_count,
+                 COUNT(*) FILTER (WHERE status='rejected')       AS rejected_count,
+                 COUNT(*) FILTER (WHERE status='dismissed')      AS dismissed_count,
+                 COUNT(*) FILTER (WHERE status='debate_rejected') AS debate_rejected_count,
+                 COUNT(*) AS total
+               FROM action_proposals_core
+               WHERE created_at >= %s""",
+            (since,),
+        )
+        pr = cur.fetchone()
+        p_open     = int((pr[0] or 0)) if pr else 0
+        p_executed = int((pr[1] or 0)) if pr else 0
+        p_rejected = int((pr[2] or 0)) if pr else 0
+        p_dismissed= int((pr[3] or 0)) if pr else 0
+        p_debate_r = int((pr[4] or 0)) if pr else 0
+        p_total    = int((pr[5] or 0)) if pr else 0
+        p_resolved = p_executed + p_rejected + p_dismissed + p_debate_r
+        acceptance_rate  = round(p_executed  / p_resolved * 100, 1) if p_resolved > 0 else None
+        false_pos_rate   = round((p_dismissed + p_rejected) / p_resolved * 100, 1) if p_resolved > 0 else None
+
+        # --- Agent run success stats ---
+        cur.execute(
+            """SELECT
+                 COUNT(*) FILTER (WHERE status='completed') AS completed,
+                 COUNT(*) FILTER (WHERE status='error')     AS errors,
+                 COUNT(*) AS total
+               FROM agent_runs_core
+               WHERE created_at >= %s""",
+            (since,),
+        )
+        ar = cur.fetchone()
+        ar_completed = int((ar[0] or 0)) if ar else 0
+        ar_errors    = int((ar[1] or 0)) if ar else 0
+        ar_total     = int((ar[2] or 0)) if ar else 0
+        agent_success_rate = round(ar_completed / ar_total * 100, 1) if ar_total > 0 else None
+
         return {
             "ok": True,
             "overall_hit_rate": round(total_correct / total_measured * 100, 1) if total_measured > 0 else 0.0,
             "total_measured": total_measured,
             "by_window": windows,
+            # Proposal lifecycle KPIs
+            "proposals_total":        p_total,
+            "proposals_executed":     p_executed,
+            "proposals_dismissed":    p_dismissed,
+            "proposals_rejected":     p_rejected,
+            "proposals_open":         p_open,
+            "acceptance_rate":        acceptance_rate,   # % of resolved proposals that were executed
+            "false_positive_rate":    false_pos_rate,    # % dismissed or rejected
+            # Agent worker KPIs
+            "agent_runs_total":       ar_total,
+            "agent_runs_completed":   ar_completed,
+            "agent_runs_errors":      ar_errors,
+            "agent_success_rate":     agent_success_rate,
         }
     except Exception:
         return {"ok": False}

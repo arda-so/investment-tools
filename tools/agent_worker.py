@@ -76,7 +76,7 @@ WATCH_DELAY_SEC: float = float(os.getenv("AGENT_WORKER_DELAY_SEC", "5"))
 # System prompts
 # ---------------------------------------------------------------------------
 
-def _build_system_prompt(today: str) -> str:
+def _build_system_prompt(today: str, rules: str = "") -> str:
     """Single-perspective (--no-debate) system prompt."""
     return f"""\
 You are an autonomous investment analysis agent. Today is {today}.
@@ -111,10 +111,10 @@ Required <STRUCTURED> fields:
   actual_values: <key numbers observed, e.g. "revenue +4% vs +12% prior, margin -180bps">
   cascade_tickers: <comma-separated portfolio tickers that may be affected, or "none">
   confidence: <integer 0-100>
-"""
+{rules}"""
 
 
-def _build_bull_prompt(ticker: str, today: str) -> str:
+def _build_bull_prompt(ticker: str, today: str, rules: str = "") -> str:
     return f"""\
 You are a bull-case analyst. Today is {today}.
 
@@ -133,10 +133,10 @@ Commands available (max 4):
 
 Gather data, then present your bull case in <BULL_CASE>...</BULL_CASE> (3-5 bullets max).
 Do NOT present bear arguments.
-"""
+{rules}"""
 
 
-def _build_bear_prompt(ticker: str, today: str) -> str:
+def _build_bear_prompt(ticker: str, today: str, rules: str = "") -> str:
     return f"""\
 You are a bear-case analyst. Today is {today}.
 
@@ -155,11 +155,11 @@ Commands available (max 4):
 
 Gather data, then present your bear case in <BEAR_CASE>...</BEAR_CASE> (3-5 bullets max).
 Do NOT present bull arguments.
-"""
+{rules}"""
 
 
 def _build_moderator_prompt(
-    ticker: str, thesis: str, bull_case: str, bear_case: str, today: str
+    ticker: str, thesis: str, bull_case: str, bear_case: str, today: str, rules: str = ""
 ) -> str:
     return f"""\
 You are the senior portfolio manager. Today is {today}.
@@ -192,7 +192,7 @@ actual_values: <key numbers, e.g. "revenue +4% vs +12% prior, margin -180bps">
 cascade_tickers: <comma-separated portfolio tickers affected, or "none">
 confidence: <integer 0-100>
 </STRUCTURED>
-"""
+{rules}"""
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +266,192 @@ def _fetch_outcome_history(ticker: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Feature 1: Agent memory across runs
+# ---------------------------------------------------------------------------
+
+def _ensure_agent_memory_table() -> None:
+    con = pg_connect()
+    if con is None:
+        return
+    try:
+        cur = con.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_core (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_memory_core_ticker "
+            "ON agent_memory_core(ticker, updated_at DESC)"
+        )
+        con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+    finally:
+        con.close()
+
+
+def _load_agent_memory(ticker: str) -> str:
+    """Return the last 3 distilled memories for this ticker."""
+    try:
+        con = pg_connect()
+        if con is None:
+            return ""
+        try:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT summary, updated_at FROM agent_memory_core "
+                "WHERE ticker=%s ORDER BY updated_at DESC LIMIT 3",
+                (ticker,),
+            )
+            rows = cur.fetchall() or []
+        finally:
+            con.close()
+        if not rows:
+            return ""
+        lines = [f"\nAGENT MEMORY FOR {ticker} (from past analyses):"]
+        for r in rows:
+            date = str(r[1] or "")[:10]
+            lines.append(f"  [{date}] {str(r[0] or '')[:300]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _save_agent_memory(ticker: str, report: str, structured: dict) -> None:
+    """Distill 2-3 sentence memory from this analysis via LLM, then save to Postgres."""
+    _ensure_agent_memory_table()
+    try:
+        sentiment  = structured.get("sentiment", "neutral")
+        status     = structured.get("thesis_status", "")
+        key_metric = structured.get("key_metric", "")
+        prompt = (
+            f"You just completed an investment analysis of {ticker}.\n\n"
+            f"REPORT:\n{report[:1500]}\n\n"
+            f"Distill this into 2-3 sentences of memory for future analyses. "
+            f"Focus on: key conclusion, main data points observed, and what to watch next. "
+            f"Be specific with numbers. Start with the ticker symbol.\n"
+            f"Output ONLY the memory sentences, nothing else."
+        )
+        memory = ask_ai(prompt, context="", mode="fast").strip()
+        if not memory or len(memory) < 20:
+            memory = f"{ticker}: {sentiment} — {status}. Key metric: {key_metric}."
+        con = pg_connect()
+        if con is None:
+            return
+        try:
+            cur = con.cursor()
+            now = datetime.datetime.now().isoformat()
+            cur.execute(
+                "INSERT INTO agent_memory_core (ticker, summary, updated_at, created_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (ticker, memory[:600], now, now),
+            )
+            con.commit()
+            print(f"[agent_worker] Memory saved for {ticker}: {memory[:80]}…")
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Reflexion policy injection
+# ---------------------------------------------------------------------------
+
+def _load_active_reflexion_rules() -> str:
+    """Load active reflexion policy rules from Postgres. Returns formatted string."""
+    try:
+        con = pg_connect()
+        if con is None:
+            return ""
+        try:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT policy_json::text FROM reflexion_policy_versions_core "
+                "WHERE is_active=1 ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        finally:
+            con.close()
+        if not row:
+            return ""
+        try:
+            policy = json.loads(str(row[0] or "{}"))
+        except Exception:
+            return ""
+        rules: list[str] = []
+        for key in ("rules", "guidelines", "principles", "lessons", "policy"):
+            val = policy.get(key)
+            if isinstance(val, list) and val:
+                rules = [str(r) for r in val]
+                break
+            elif isinstance(val, str) and val.strip():
+                rules = [val.strip()]
+                break
+        if not rules:
+            return ""
+        lines = ["\n[LEARNED RULES — reflexion policy, apply to this analysis]:"]
+        for r in rules[:8]:
+            lines.append(f"  - {r[:200]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: Macro context injection
+# ---------------------------------------------------------------------------
+
+def _load_macro_context() -> str:
+    """Read latest macro watchdog JSON and return a compact 3-line context."""
+    _macro_paths = [
+        ROOT / "reports" / ".terminal_inputs" / "macro_watchdog_latest.json",
+        ROOT / "reports" / "macro_watchdog_latest.json",
+        ROOT / "data" / "cache" / "macro_watchdog_latest.json",
+    ]
+    payload: dict = {}
+    for p in _macro_paths:
+        if p.exists():
+            try:
+                payload = json.loads(p.read_text(encoding="utf-8"))
+                break
+            except Exception:
+                continue
+    if not payload:
+        return ""
+    try:
+        asof     = str(payload.get("asof_utc") or "")[:16]
+        series   = payload.get("series") or {}
+        all_s    = series.get("all_items") or {}
+        core_s   = series.get("core") or {}
+        surprise = payload.get("cpi_surprise") or {}
+        lines = [f"\nMACRO ENVIRONMENT (as of {asof} UTC):"]
+        all_yoy = all_s.get("yoy_pct")
+        all_mom = all_s.get("mom_pct")
+        core_yoy = core_s.get("yoy_pct")
+        if all_yoy is not None:
+            mom_str = f" | MoM: {all_mom:+.2f}%" if all_mom is not None else ""
+            lines.append(f"  CPI YoY: {all_yoy:+.2f}%{mom_str}")
+        if core_yoy is not None:
+            lines.append(f"  Core CPI YoY: {core_yoy:+.2f}%")
+        vs_cons = surprise.get("core_mom_vs_consensus")
+        if vs_cons is not None:
+            direction = "above" if vs_cons > 0 else "below"
+            lines.append(f"  Core CPI vs consensus: {abs(vs_cons):.2f}pp {direction} expectations")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _build_investor_context(ticker: str) -> str:
     lines: list[str] = []
     try:
@@ -298,6 +484,14 @@ def _build_investor_context(ticker: str) -> str:
     outcome_history = _fetch_outcome_history(ticker)
     if outcome_history:
         lines.append(outcome_history)
+    # Inject agent memory from past analyses
+    memory = _load_agent_memory(ticker)
+    if memory:
+        lines.append(memory)
+    # Inject macro environment context
+    macro = _load_macro_context()
+    if macro:
+        lines.append(macro)
     return "\n".join(lines)
 
 
@@ -586,16 +780,53 @@ def _write_outcome_baseline(ticker: str, structured: dict, dry_run: bool) -> Non
 # Output persistence (sole note/journal write path)
 # ---------------------------------------------------------------------------
 
-def _persist_outputs(ticker: str, report: str, event: dict, dry_run: bool = False) -> None:
+def _format_sources(commands: list[str]) -> str:
+    """
+    Deduplicate commands and format as a compact SOURCES block.
+    Groups by command type (get_financials, fetch_filings, etc.) for readability.
+    """
+    if not commands:
+        return ""
+    seen: dict[str, list[str]] = {}
+    _cmd_re = re.compile(r"invest_app\s+(\S+)")
+    _ticker_re = re.compile(r"--ticker\s+(\S+)", re.IGNORECASE)
+    for cmd in commands:
+        m = _cmd_re.search(cmd)
+        if not m:
+            continue
+        cmd_name = m.group(1)
+        t = _ticker_re.search(cmd)
+        ticker_label = t.group(1).upper() if t else ""
+        entry = f"{ticker_label} ({cmd_name})" if ticker_label else cmd_name
+        seen.setdefault(cmd_name, [])
+        if entry not in seen[cmd_name]:
+            seen[cmd_name].append(entry)
+    lines = ["", "SOURCES:"]
+    for cmd_name, entries in seen.items():
+        lines.append(f"  • {', '.join(entries)}")
+    return "\n".join(lines)
+
+
+def _persist_outputs(
+    ticker: str,
+    report: str,
+    event: dict,
+    dry_run: bool = False,
+    commands: list[str] | None = None,
+) -> None:
     today      = datetime.date.today().isoformat()
     accession  = str(event.get("accession") or "").strip()
     form       = str(event.get("form") or "").strip()
-    note_text  = (f"[accession={accession}]\n{report}" if accession else report)[:4000]
+    sources    = _format_sources(commands or [])
+    body       = f"[accession={accession}]\n{report}" if accession else report
+    note_text  = (body + sources)[:4000]
     summary    = next((ln.strip() for ln in report.splitlines() if ln.strip()), f"{ticker} {form} analyzed.")
     journal    = f"[agent_worker] {today} — {summary[:200]}"
 
     if dry_run:
         print(f"[dry-run] investor_annotations_core ← note {ticker} ({len(note_text)} chars)")
+        if sources:
+            print(sources)
         print(f"[dry-run] investor_annotations_core ← journal: {journal[:100]}")
         return
 
@@ -642,14 +873,14 @@ def _log_run(result: dict, event: dict) -> None:
 # Phase 4.1: Multi-agent debate
 # ---------------------------------------------------------------------------
 
-def _run_perspective(event: dict, role: str, today: str) -> str:
+def _run_perspective(event: dict, role: str, today: str, rules: str = "") -> tuple[str, list[str]]:
     """
     Run bull or bear single-perspective loop (DEBATE_STEPS max).
-    Returns the case text extracted from <BULL_CASE> or <BEAR_CASE> tags.
+    Returns (case_text, commands_run).
     """
     ticker   = str(event.get("ticker") or "").strip().upper()
     end_tag  = "BULL_CASE" if role == "bull" else "BEAR_CASE"
-    sys_prompt = _build_bull_prompt(ticker, today) if role == "bull" else _build_bear_prompt(ticker, today)
+    sys_prompt = _build_bull_prompt(ticker, today, rules) if role == "bull" else _build_bear_prompt(ticker, today, rules)
 
     messages: list[dict] = [
         {"role": "system", "content": sys_prompt},
@@ -657,13 +888,14 @@ def _run_perspective(event: dict, role: str, today: str) -> str:
          "content": f"Analyze the {event.get('form','')} filing for {ticker} "
                     f"(filed {event.get('filing_date', today)})."},
     ]
+    commands_run: list[str] = []
 
     for _ in range(DEBATE_STEPS):
         response = ask_ai(_messages_to_prompt(messages), context="", mode="smart", temperature=0.3)
         messages.append({"role": "assistant", "content": response})
 
         if f"<{end_tag}>" in response:
-            return _extract_case(response, end_tag)
+            return _extract_case(response, end_tag), commands_run
 
         commands = _extract_commands(response)
         if not commands:
@@ -676,12 +908,13 @@ def _run_perspective(event: dict, role: str, today: str) -> str:
 
         results = []
         for cmd in commands:
+            commands_run.append(cmd)
             results.append(f"[Result for `{cmd}`]:\n{_truncate_tool_output(invest_cli.execute(cmd))}")
         messages.append({"role": "user", "content": "\n\n".join(results)})
 
     # Fallback: return whatever the last assistant message said
     last = next((m["content"] for m in reversed(messages) if m["role"] == "assistant"), "")
-    return last[:2000] or f"[{role} analysis incomplete]"
+    return (last[:2000] or f"[{role} analysis incomplete]"), commands_run
 
 
 def _run_debate(event: dict, dry_run: bool = False) -> dict:
@@ -691,31 +924,35 @@ def _run_debate(event: dict, dry_run: bool = False) -> dict:
     """
     ticker = str(event.get("ticker") or "").strip().upper()
     today  = datetime.date.today().isoformat()
+    rules  = _load_active_reflexion_rules()
 
     try:
         print(f"[agent_worker] [bull]  {ticker} …")
-        bull_case = _run_perspective(event, "bull", today)
+        bull_case, bull_cmds = _run_perspective(event, "bull", today, rules)
 
         time.sleep(min(WATCH_DELAY_SEC, 3))  # brief pause between LLM calls
 
         print(f"[agent_worker] [bear]  {ticker} …")
-        bear_case = _run_perspective(event, "bear", today)
+        bear_case, bear_cmds = _run_perspective(event, "bear", today, rules)
 
         print(f"[agent_worker] [mod]   {ticker} …")
         thesis    = _get_thesis_text(ticker)
         mod_resp  = ask_ai(
-            _build_moderator_prompt(ticker, thesis, bull_case, bear_case, today),
+            _build_moderator_prompt(ticker, thesis, bull_case, bear_case, today, rules),
             context="", mode="smart", temperature=0.1,
         )
 
         report     = _extract_report(mod_resp)
         structured = _parse_structured(mod_resp)
         cross      = structured.get("cascade_tickers", "")
+        all_cmds   = bull_cmds + bear_cmds
 
         _write_thesis_breach(ticker, structured, report, dry_run)
         _write_cascade_alerts(ticker, structured, dry_run)
         _write_outcome_baseline(ticker, structured, dry_run)
-        _persist_outputs(ticker, report, event, dry_run=dry_run)
+        _persist_outputs(ticker, report, event, dry_run=dry_run, commands=all_cmds)
+        if not dry_run:
+            _save_agent_memory(ticker, report, structured)
 
         result = {
             "mode":          "debate",
@@ -725,7 +962,7 @@ def _run_debate(event: dict, dry_run: bool = False) -> dict:
             "bull_case":     bull_case,
             "bear_case":     bear_case,
             "steps":         DEBATE_STEPS * 2 + 1,
-            "commands":      [],
+            "commands":      all_cmds,
             "cross_portfolio": cross,
         }
         _log_run(result, event)
@@ -750,8 +987,9 @@ def _run_single(event: dict, max_steps: int = MAX_STEPS, dry_run: bool = False) 
     ticker = str(event.get("ticker") or "").strip().upper()
     today  = datetime.date.today().isoformat()
 
+    rules = _load_active_reflexion_rules()
     messages: list[dict] = [
-        {"role": "system",  "content": _build_system_prompt(today)},
+        {"role": "system",  "content": _build_system_prompt(today, rules)},
         {"role": "user",    "content": _build_trigger_message(event)},
     ]
     commands_run: list[str] = []
@@ -769,7 +1007,9 @@ def _run_single(event: dict, max_steps: int = MAX_STEPS, dry_run: bool = False) 
                 _write_thesis_breach(ticker, structured, report, dry_run)
                 _write_cascade_alerts(ticker, structured, dry_run)
                 _write_outcome_baseline(ticker, structured, dry_run)
-                _persist_outputs(ticker, report, event, dry_run=dry_run)
+                _persist_outputs(ticker, report, event, dry_run=dry_run, commands=commands_run)
+                if not dry_run:
+                    _save_agent_memory(ticker, report, structured)
 
                 result = {
                     "mode": "single", "status": "ok", "report": report,

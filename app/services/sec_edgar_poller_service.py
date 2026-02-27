@@ -38,6 +38,8 @@ from app.services.postgres_core_service import core_backend, pg_connect
 POLL_FORMS = ("8-K", "10-Q", "10-K", "6-K", "20-F")
 # How many recent filings to check per ticker per poll run
 PER_TICKER_LIMIT = 8
+# Keep DB content as a fast excerpt layer; full text stays on disk/GCS.
+FILING_CONTENT_MAX_CHARS = 15000
 
 # Key tickers to monitor for cross-portfolio signals even if not held.
 # Seeded into signal_universe_core on first run; user can add/remove at runtime.
@@ -325,6 +327,7 @@ def _upsert_filing_core(
     if con is None:
         return 0
     try:
+        content_excerpt = str(content or "")[:FILING_CONTENT_MAX_CHARS]
         cur = con.cursor()
         # Check if this accession already exists for this ticker
         cur.execute(
@@ -335,10 +338,10 @@ def _upsert_filing_core(
         if existing:
             filing_id = int(existing[0] or 0)
             # Back-fill content if we have it now and row is empty
-            if content and filing_id:
+            if content_excerpt and filing_id:
                 cur.execute(
                     "UPDATE filings_core SET content=%s WHERE id=%s AND content=''",
-                    (str(content), filing_id),
+                    (content_excerpt, filing_id),
                 )
                 con.commit()
             return filing_id
@@ -361,7 +364,7 @@ def _upsert_filing_core(
                 str(doc_url or "")[:500],
                 str(path or "")[:500],
                 now,
-                str(content or ""),
+                content_excerpt,
             ),
         )
         con.commit()

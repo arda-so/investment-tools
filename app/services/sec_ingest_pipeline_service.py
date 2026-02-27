@@ -30,6 +30,7 @@ except Exception:  # pragma: no cover
 
 
 STRUCTURED_DATA_UNAVAILABLE_MSG = "Data not available in structured filings."
+FILING_CONTENT_MAX_CHARS = 15000
 
 def _insert_report_fact_core_pg(
     *,
@@ -1158,7 +1159,7 @@ def _process_one_filing(
                     # Update path and back-fill content so Cloud Run can read it without GCS
                     cur_fix.execute(
                         "UPDATE filings_core SET path=%s, content=CASE WHEN content='' THEN %s ELSE content END WHERE id=%s",
-                        (fpath, str(txt or ""), filing_id),
+                        (fpath, str(txt or "")[:FILING_CONTENT_MAX_CHARS], filing_id),
                     )
                     con_fix.commit()
                 except Exception:
