@@ -2655,6 +2655,53 @@ def dashboard_cleanup_stuck_runs():
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
+@router.post("/dashboard/agent-query")
+def dashboard_agent_query(
+    background_tasks: BackgroundTasks,
+    text: str = Form(""),
+    ticker: str = Form(""),
+):
+    """
+    Run a free-form investment question through the real agent loop (invest_cli data access).
+    Returns immediately with run_uid; the feed auto-refreshes to show the result.
+    The agent posts its answer to the ai-agent channel so it appears in the feed.
+    """
+    query = str(text or "").strip()
+    tk = _safe_ticker(str(ticker or "").strip())
+    if not query:
+        return JSONResponse({"ok": False, "error": "Query required."}, status_code=400)
+
+    # Save user message immediately so it appears in feed right away
+    from app.services.workspace_feed_service import add_workspace_message
+    add_workspace_message(channel="ai-agent", role="user", message=query)
+
+    def _run_and_post(q: str, t: str) -> None:
+        try:
+            from tools.agent_worker import run_query
+            from app.services.workspace_feed_service import add_workspace_message as _add
+            result = run_query(query=q, ticker=t)
+            report = str(result.get("report") or "").strip()
+            status = str(result.get("status") or "")
+            cmds = result.get("commands") or []
+            if not report:
+                report = "No analysis generated."
+            # Append data sources footer if commands were run
+            if cmds:
+                sources = ", ".join(c.split("--")[0].strip().replace("> invest_app ", "") for c in cmds[:5])
+                report = f"{report}\n\n_Sources: {sources}_"
+            _add(channel="ai-agent", role="assistant", message=report[:5000])
+        except Exception as exc:
+            from app.services.workspace_feed_service import add_workspace_message as _add
+            _add(channel="ai-agent", role="assistant", message=f"Agent error: {exc}")
+
+    background_tasks.add_task(_run_and_post, query, tk)
+    return JSONResponse({
+        "ok": True,
+        "queued": True,
+        "message": "Analyzing… result will appear in the feed shortly.",
+    })
+
+
 @router.post("/dashboard/ai-agent/save-note")
 def dashboard_workspace_save_note(text: str = Form(""), ticker: str = Form("")):
     body = str(text or "").strip()

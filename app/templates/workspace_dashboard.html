@@ -221,6 +221,28 @@
     wireActions();
   }
 
+  // ── deep query detection ─────────────────────────────────────────────────
+  // Returns true when a prompt warrants the real agent loop (invest_cli data access)
+  // vs a fast one-shot LLM call.
+  function isDeepQuery(text) {
+    const t = text.toLowerCase();
+    if (/\$[a-z]{1,5}/i.test(text)) return true; // $AAPL / $CRM
+    const kw = ['filing','10-k','10-q','8-k','earnings','margin','revenue','thesis',
+                'analyz','financials','holdings','portfolio','insider','sec filing',
+                'quarter','annual','cash flow','guidance','beat','miss','eps','fcf',
+                'valuation','breach','what happened','what\'s new','what is new',
+                'performance','results','balance sheet','buyback'];
+    return kw.some(k => t.includes(k));
+  }
+
+  function extractTicker(text) {
+    const m = text.match(/\$([A-Za-z]{1,5})/);
+    if (m) return m[1].toUpperCase();
+    // bare known tickers (holdings shown in context panel)
+    const bare = text.match(/\b(AAPL|MSFT|GOOGL|AMZN|META|NVDA|CRM|HUBS|UNH|IT|IBM|ORCL|QCOM)\b/i);
+    return bare ? bare[1].toUpperCase() : '';
+  }
+
   // ── network ───────────────────────────────────────────────────────────────
   async function sendUserMessage(text, channel){
     const fd = new FormData();
@@ -228,6 +250,30 @@
     fd.append('text', text);
     const res = await fetch('/dashboard/message', {method:'POST', body:fd});
     return res.json();
+  }
+
+  async function sendAgentQuery(text) {
+    const fd = new FormData();
+    fd.append('text', text);
+    const tk = extractTicker(text);
+    if (tk) fd.append('ticker', tk);
+    const res = await fetch('/dashboard/agent-query', {method:'POST', body:fd});
+    return res.json();
+  }
+
+  // Poll feed every 4s for up to 90s waiting for agent response, then revert to normal 20s
+  let _agentPollTimer = null;
+  function startAgentPoll() {
+    if (_agentPollTimer) return;
+    let elapsed = 0;
+    _agentPollTimer = setInterval(async () => {
+      elapsed += 4;
+      await loadFeed();
+      if (elapsed >= 90) {
+        clearInterval(_agentPollTimer);
+        _agentPollTimer = null;
+      }
+    }, 4000);
   }
 
   async function runAction(btn){
@@ -343,32 +389,70 @@
     }
 
     textEl.value = '';
-    setLoading(true);
 
-    // Bug 1: both mine and bot include channel:'ai-agent' so isAssistantMessage() is correct immediately
     const mine = {channel:'ai-agent', title:'You', text, meta:'user', ts:new Date().toISOString()};
-    // Bug 2: show "Thinking…" placeholder while waiting
-    render([{_thinking:true}, mine, ...lastItems].slice(0, 51));
+    const deep  = isDeepQuery(text);
 
-    try{
-      const data = await sendUserMessage(text, 'ai-agent');
-      if(data && data.reply){
-        // Bug 1: action buttons (Save to Notes / Discard) appear immediately on this reply
-        const bot = {channel:'ai-agent', title:'AI Agent', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
-        render([bot, mine, ...lastItems].slice(0, 50));
-      } else {
-        await loadFeed();
+    if (deep) {
+      // Deep query: agent loop fetches real data. Returns immediately, result appears in feed.
+      const analyzing = {channel:'ai-agent', title:'AI Agent',
+        text:'Analyzing… fetching real portfolio data. Result will appear here shortly.',
+        meta:'assistant', _thinking:true, ts:new Date().toISOString()};
+      render([analyzing, mine, ...lastItems].slice(0, 51));
+      try {
+        await sendAgentQuery(text);
+        startAgentPoll(); // speed up feed refresh while agent runs
+      } catch(_e) {
+        const err = {channel:'ai-agent', title:'AI Agent',
+          text:'Could not reach agent. Check network.', meta:'assistant', ts:new Date().toISOString()};
+        render([err, mine, ...lastItems].slice(0, 50));
       }
-    } catch(_e) {
-      const bot = {channel:'ai-agent', title:'AI Agent', text:'Could not reach AI. Check network and try again.', meta:'assistant', ts:new Date().toISOString()};
-      render([bot, mine, ...lastItems].slice(0, 50));
-    } finally {
-      setLoading(false);
+    } else {
+      // Fast path: one-shot LLM for simple questions
+      setLoading(true);
+      render([{_thinking:true}, mine, ...lastItems].slice(0, 51));
+      try{
+        const data = await sendUserMessage(text, 'ai-agent');
+        if(data && data.reply){
+          const bot = {channel:'ai-agent', title:'AI Agent', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
+          render([bot, mine, ...lastItems].slice(0, 50));
+        } else {
+          await loadFeed();
+        }
+      } catch(_e) {
+        const bot = {channel:'ai-agent', title:'AI Agent', text:'Could not reach AI. Check network and try again.', meta:'assistant', ts:new Date().toISOString()};
+        render([bot, mine, ...lastItems].slice(0, 50));
+      } finally {
+        setLoading(false);
+      }
     }
   });
 
   loadFeed();
   setInterval(loadFeed, 20000);
+
+  // ── global top bar interception (dashboard page only) ─────────────────────
+  // If the user types an investment question in the global omnibox (top of page),
+  // route it to the agent instead of the organizer task input.
+  const globalOmnibox     = document.getElementById('globalOmniboxInput');
+  const globalOmniboxForm = globalOmnibox && globalOmnibox.closest('form');
+  if (globalOmnibox && globalOmniboxForm) {
+    globalOmnibox.placeholder = 'Ask AI or add a task… (e.g., "analyze $CRM earnings" or "Review margins")';
+    globalOmniboxForm.addEventListener('submit', async (e) => {
+      const text = (globalOmnibox.value || '').trim();
+      if (!text) return;
+      // Route to agent if it looks like an investment question
+      if (isDeepQuery(text) || text.includes('?')) {
+        e.preventDefault();
+        globalOmnibox.value = '';
+        switchToAiAgent();
+        // Feed the text into the AI Agent channel input and trigger the submit flow
+        textEl.value = text;
+        formEl.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+      }
+      // else: let the organizer handle task/note entries as normal
+    });
+  }
 
   // ── live right panel ──────────────────────────────────────────────────────
   async function loadContext(){

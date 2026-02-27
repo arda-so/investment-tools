@@ -1120,6 +1120,117 @@ def run(
 
 
 # ---------------------------------------------------------------------------
+# Interactive / chat query mode  (called from the dashboard top bar / AI Agent channel)
+# ---------------------------------------------------------------------------
+
+_QUERY_SYSTEM_PROMPT = f"""\
+You are an autonomous investment analysis agent with access to real portfolio data.
+
+Available data commands (use these to gather facts before answering):
+> invest_app list_holdings
+> invest_app get_financials --ticker AAPL
+> invest_app get_price --ticker AAPL
+> invest_app get_intel --ticker AAPL
+> invest_app get_thesis --ticker AAPL
+> invest_app fetch_filings --ticker AAPL [--limit 5]
+> invest_app read_filing --ticker AAPL --form 10-Q [--accession X] [--offset 6000]
+> invest_app list_notes --ticker AAPL --limit 10
+
+Rules:
+- Maximum {MAX_STEPS} commands per session.
+- Do NOT guess numbers — use commands to fetch real data first.
+- Be concise: 3-5 sentences or bullet points in your final answer.
+- When done, wrap your answer in <FINAL_REPORT>...</FINAL_REPORT> tags.
+- Do NOT call post_note or post_journal.
+"""
+
+def run_query(
+    query: str,
+    ticker: str = "",
+    max_steps: int = 6,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Run the agent loop for a free-form investment question from the dashboard.
+
+    Returns: {status, report, steps, commands, run_uid}
+    """
+    from tools.llm_engine import ask_ai as _ask_ai
+    from app.services.postgres_core_service import start_agent_run, finish_agent_run
+
+    query = str(query or "").strip()
+    ticker = str(ticker or "").strip().upper()
+    if not query:
+        return {"status": "error", "report": "Empty query.", "steps": 0, "commands": []}
+
+    run_uid = ""
+    if not dry_run:
+        try:
+            run_uid = start_agent_run(
+                agent_name="chat_query",
+                trigger_type="manual",
+                input_payload={"query": query, "ticker": ticker},
+            )
+        except Exception:
+            pass
+
+    ticker_hint = f"\nThe user is asking about ticker: {ticker}." if ticker else ""
+    messages = [
+        {"role": "system", "content": _QUERY_SYSTEM_PROMPT},
+        {"role": "user", "content": f"User question: {query}{ticker_hint}\n\nFetch the data you need, then answer."},
+    ]
+    commands_run: list[str] = []
+
+    report = ""
+    status = "no_report"
+
+    for step in range(max_steps):
+        full_prompt = "\n\n".join(
+            f"[{m['role'].upper()}]: {m['content']}" for m in messages
+        )
+        response = _ask_ai(full_prompt, context="", mode="smart")
+        messages.append({"role": "assistant", "content": response})
+
+        if "<FINAL_REPORT>" in response:
+            m = re.search(r"<FINAL_REPORT>(.*?)</FINAL_REPORT>", response, re.DOTALL)
+            report = m.group(1).strip() if m else response.strip()
+            status = "ok"
+            break
+
+        commands = _extract_commands(response)
+        if not commands:
+            # No commands and no report — treat response as the answer
+            report = response.strip()
+            status = "ok"
+            break
+
+        results = []
+        for cmd in commands[:4]:
+            out = invest_cli.execute(cmd) if not dry_run else "[dry-run]"
+            commands_run.append(cmd)
+            results.append(f"[Result for `{cmd}`]:\n{_truncate_tool_output(out)}")
+        messages.append({"role": "user", "content": "\n\n".join(results)})
+
+    if not dry_run and run_uid:
+        try:
+            finish_agent_run(
+                run_uid=run_uid,
+                status=status,
+                output_payload={"query": query, "steps": step + 1, "report_chars": len(report)},
+            )
+        except Exception:
+            pass
+
+    return {
+        "status": status,
+        "report": report,
+        "steps": step + 1,
+        "commands": commands_run,
+        "run_uid": run_uid,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Watch mode
 # ---------------------------------------------------------------------------
 
