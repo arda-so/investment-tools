@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Cloud Run job: daily data refresh (weekdays 6 PM UTC, after US market close)
+# Runs: macro, insider data, earnings + signals data, proactive monitor, integrity check
+# Note: build_terminal_reports skipped (local terminal tool, writes to ephemeral FS)
+set -euo pipefail
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+export CORE_DB_BACKEND="postgres"
+export CORE_DB_GUARD_ENFORCE="1"
+export CORE_DB_STRICT_POSTGRES="1"
+export PHASE2_POSTGRES_ENABLED="${PHASE2_POSTGRES_ENABLED:-1}"
+export AI_QUEUE_BACKEND="${AI_QUEUE_BACKEND:-postgres}"
+
+if [ -x "$ROOT/.venv-memory/bin/python" ]; then
+  PY="$ROOT/.venv-memory/bin/python"
+else
+  PY="python3"
+fi
+
+echo "[daily_job] Starting $(date -u)"
+"$PY" "$ROOT/tools/macro_watchdog.py" --write
+"$PY" "$ROOT/tools/insider_refresh.py" --all --months 3
+"$PY" "$ROOT/market_scanner.py" --earnings --data
+"$PY" "$ROOT/market_scanner.py" --signals --data
+"$PY" "$ROOT/tools/run_proactive_monitor.py"
+"$PY" "$ROOT/tools/integrity_financial_data.py"
+echo "[daily_job] Done $(date -u)"

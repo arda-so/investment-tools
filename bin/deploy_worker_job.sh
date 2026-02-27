@@ -10,6 +10,10 @@ need_cmd() {
 
 need_cmd gcloud
 
+secret_exists() {
+  gcloud secrets describe "$1" --project="$PROJECT_ID" >/dev/null 2>&1
+}
+
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${REGION:-europe-west1}"
 DB_INSTANCE="${DB_INSTANCE:-investor-os-pg}"
@@ -18,7 +22,7 @@ APP_SERVICE="${APP_SERVICE:-investor-tools-app}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-investor-tools-runtime@${PROJECT_ID}.iam.gserviceaccount.com}"
 SCHEDULER_JOB="${SCHEDULER_JOB:-investor-tools-worker-cron}"
 SCHEDULER_LOCATION="${SCHEDULER_LOCATION:-europe-west1}"
-SCHEDULE="${SCHEDULE:-*/2 * * * *}"
+SCHEDULE="${SCHEDULE:-*/10 * * * *}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-900s}"
 MAX_RETRIES="${MAX_RETRIES:-0}"
 TASKS="${TASKS:-1}"
@@ -41,11 +45,23 @@ if [ -z "$IMAGE" ]; then
 fi
 
 SECRETS="POSTGRES_DSN=POSTGRES_DSN:latest"
-if [ "$INCLUDE_GEMINI_SECRET" = "1" ]; then
+if [ "$INCLUDE_GEMINI_SECRET" = "1" ] && secret_exists GEMINI_API_KEY; then
   SECRETS="${SECRETS},GEMINI_API_KEY=GEMINI_API_KEY:latest"
 fi
+if secret_exists OPENAI_API_KEY; then
+  SECRETS="${SECRETS},OPENAI_API_KEY=OPENAI_API_KEY:latest"
+fi
+if secret_exists GEMINI_API_KEY; then
+  SECRETS="${SECRETS},GEMINI_API_KEY=GEMINI_API_KEY:latest"
+fi
+if secret_exists ANTHROPIC_API_KEY; then
+  SECRETS="${SECRETS},ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest"
+fi
+if secret_exists GROQ_API_KEY; then
+  SECRETS="${SECRETS},GROQ_API_KEY=GROQ_API_KEY:latest"
+fi
 
-ENV_VARS="APP_ENV=cloud,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1,AI_WORKER_ONCE=1"
+ENV_VARS="APP_ENV=cloud,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1,AI_WORKER_ONCE=1,AI_TIMEOUT_SECONDS=${AI_TIMEOUT_SECONDS:-45},AI_MAX_TOKENS=${AI_MAX_TOKENS:-1200},AI_ENABLE_RESPONSE_CACHE=${AI_ENABLE_RESPONSE_CACHE:-1},AI_CACHE_TTL_SEC=${AI_CACHE_TTL_SEC:-300},AI_CACHE_MAX_ENTRIES=${AI_CACHE_MAX_ENTRIES:-256}"
 if [ -n "${CLOUD_FILES_BUCKET:-}" ]; then
   ENV_VARS="${ENV_VARS},CLOUD_FILES_BUCKET=${CLOUD_FILES_BUCKET}"
 fi
@@ -153,4 +169,95 @@ if [ "$ENABLE_SCHEDULER" = "1" ]; then
   echo "Scheduler job ${SCHEDULER_JOB} active with schedule: ${SCHEDULE}"
 fi
 
-echo "Done."
+echo "Done deploying core jobs."
+
+# ---------------------------------------------------------------------------
+# Helper: deploy_job NAME COMMAND ARGS SCHEDULE TIMEOUT
+#   NAME     — Cloud Run job name (e.g. investor-morning-job)
+#   COMMAND  — container entrypoint (e.g. /app/bin/run_morning_job)
+#   ARGS     — comma-separated args or "" for none
+#   SCHEDULE — cron expression (e.g. "0 7 * * 1-5")
+#   TIMEOUT  — task timeout (e.g. 1800s)
+# ---------------------------------------------------------------------------
+deploy_job() {
+  local name="$1" cmd="$2" args="$3" sched="$4" timeout="$5"
+  local cron_name="${name}-cron"
+  local uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${name}:run"
+
+  echo ""
+  echo "── Deploying job: ${name} (${sched}) ──"
+
+  local deploy_args=(
+    gcloud run jobs deploy "$name"
+    --project="$PROJECT_ID"
+    --region="$REGION"
+    --image="$IMAGE"
+    --service-account="$SERVICE_ACCOUNT"
+    --set-cloudsql-instances="$CONN_NAME"
+    --set-env-vars="$ENV_VARS"
+    --set-secrets="$SECRETS"
+    --command="$cmd"
+    --tasks=1
+    --max-retries=0
+    --task-timeout="$timeout"
+  )
+  if [ -n "$args" ]; then
+    deploy_args+=(--args="$args")
+  fi
+  "${deploy_args[@]}"
+
+  if [ "${ENABLE_SCHEDULER:-1}" = "1" ]; then
+    if gcloud scheduler jobs describe "$cron_name" --project="$PROJECT_ID" --location="$SCHEDULER_LOCATION" >/dev/null 2>&1; then
+      gcloud scheduler jobs update http "$cron_name" \
+        --project="$PROJECT_ID" \
+        --location="$SCHEDULER_LOCATION" \
+        --schedule="$sched" \
+        --uri="$uri" \
+        --http-method=POST \
+        --oauth-service-account-email="$SERVICE_ACCOUNT" \
+        --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+    else
+      gcloud scheduler jobs create http "$cron_name" \
+        --project="$PROJECT_ID" \
+        --location="$SCHEDULER_LOCATION" \
+        --schedule="$sched" \
+        --uri="$uri" \
+        --http-method=POST \
+        --oauth-service-account-email="$SERVICE_ACCOUNT" \
+        --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+    fi
+    echo "  Scheduler ${cron_name}: ${sched}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Automation jobs (mirrors local launchd automations, now cloud-primary)
+# ---------------------------------------------------------------------------
+
+# SEC nightly sync: runs at 02:00 UTC so filings are fresh before agent worker (02:30)
+deploy_job "investor-sec-nightly-job" \
+  "/app/bin/run_sec_nightly_job" "" \
+  "0 2 * * *" "1200s"
+
+# Morning brief + proactive proposals: weekdays 07:00 UTC (07/08 AM London)
+deploy_job "investor-morning-job" \
+  "/app/bin/run_morning_job" "" \
+  "0 7 * * 1-5" "1800s"
+
+# Pre-earnings prep: weekdays 07:30 UTC (just after morning brief)
+deploy_job "investor-earnings-job" \
+  "/app/bin/run_earnings_job" "" \
+  "30 7 * * 1-5" "1800s"
+
+# Midday signals refresh: weekdays 12:00 UTC
+deploy_job "investor-signals-job" \
+  "/app/bin/run_signals_job" "" \
+  "0 12 * * 1-5" "600s"
+
+# End-of-day full refresh: weekdays 18:00 UTC (after US market close)
+deploy_job "investor-daily-job" \
+  "/app/bin/run_daily_job" "" \
+  "0 18 * * 1-5" "2400s"
+
+echo ""
+echo "All jobs deployed."

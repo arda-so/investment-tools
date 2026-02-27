@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Cloud Run job: morning refresh (weekdays 7 AM UTC)
+# Runs: macro watchdog, earnings data, morning brief, proactive proposals
+set -euo pipefail
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+export CORE_DB_BACKEND="postgres"
+export CORE_DB_GUARD_ENFORCE="1"
+export CORE_DB_STRICT_POSTGRES="1"
+export PHASE2_POSTGRES_ENABLED="${PHASE2_POSTGRES_ENABLED:-1}"
+export AI_QUEUE_BACKEND="${AI_QUEUE_BACKEND:-postgres}"
+
+if [ -x "$ROOT/.venv-memory/bin/python" ]; then
+  PY="$ROOT/.venv-memory/bin/python"
+else
+  PY="python3"
+fi
+
+echo "[morning_job] Starting $(date -u)"
+"$PY" "$ROOT/tools/macro_watchdog.py" --write
+"$PY" "$ROOT/market_scanner.py" --earnings --data
+"$PY" "$ROOT/tools/run_morning_brief.py"
+"$PY" "$ROOT/tools/run_proactive_monitor.py" --force
+echo "[morning_job] Done $(date -u)"
