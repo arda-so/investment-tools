@@ -5,7 +5,7 @@ from typing import Any
 
 from app.core import cloud_files
 from app.core.ticker import normalize_ticker
-from app.services.postgres_core_service import core_backend, pg_connect
+from app.services.postgres_core_service import core_backend, pg_connect, strict_postgres_mode
 
 
 def _to_float(v: Any, default: float = 0.0) -> float:
@@ -162,9 +162,13 @@ def read_portfolio_rows_state() -> list[dict[str, str]]:
     if core_backend() != "postgres":
         return _read_local_portfolio_rows()
     if not _ensure_state_schema_pg():
+        if strict_postgres_mode():
+            return []
         return _read_local_portfolio_rows()
     con = pg_connect()
     if con is None:
+        if strict_postgres_mode():
+            return []
         return _read_local_portfolio_rows()
     try:
         cur = con.cursor()
@@ -182,8 +186,12 @@ def read_portfolio_rows_state() -> list[dict[str, str]]:
         ]
         if out:
             return out
+        if strict_postgres_mode():
+            return []
         return _read_local_portfolio_rows()
     except Exception:
+        if strict_postgres_mode():
+            return []
         return _read_local_portfolio_rows()
     finally:
         con.close()
@@ -205,7 +213,8 @@ def write_portfolio_rows_state(rows: list[dict[str, str]]) -> None:
                 "note": str(r.get("note") or "").replace("\n", " ").strip(),
             }
         )
-    _mirror_portfolio_to_file(cleaned)
+    if not strict_postgres_mode():
+        _mirror_portfolio_to_file(cleaned)
     if core_backend() != "postgres":
         return
     if not _ensure_state_schema_pg():
@@ -238,9 +247,13 @@ def read_cash_rows_state() -> list[dict[str, str]]:
     if core_backend() != "postgres":
         return _read_local_cash_rows()
     if not _ensure_state_schema_pg():
+        if strict_postgres_mode():
+            return []
         return _read_local_cash_rows()
     con = pg_connect()
     if con is None:
+        if strict_postgres_mode():
+            return []
         return _read_local_cash_rows()
     try:
         cur = con.cursor()
@@ -249,8 +262,12 @@ def read_cash_rows_state() -> list[dict[str, str]]:
         out = [{"currency": str(r[0] or "USD").upper(), "amount": f"{_to_float(r[1], 0.0):g}"} for r in rows]
         if out:
             return out
+        if strict_postgres_mode():
+            return []
         return _read_local_cash_rows()
     except Exception:
+        if strict_postgres_mode():
+            return []
         return _read_local_cash_rows()
     finally:
         con.close()
@@ -265,7 +282,8 @@ def write_cash_rows_state(rows: list[dict[str, str]]) -> None:
             continue
         seen.add(ccy)
         cleaned.append({"currency": ccy, "amount": f"{_to_float(r.get('amount'), 0.0):g}"})
-    _mirror_cash_to_file(cleaned)
+    if not strict_postgres_mode():
+        _mirror_cash_to_file(cleaned)
     if core_backend() != "postgres":
         return
     if not _ensure_state_schema_pg():
@@ -295,9 +313,13 @@ def read_watchlist_rows_state() -> list[dict[str, str]]:
     if core_backend() != "postgres":
         return _read_local_watchlist_rows()
     if not _ensure_state_schema_pg():
+        if strict_postgres_mode():
+            return []
         return _read_local_watchlist_rows()
     con = pg_connect()
     if con is None:
+        if strict_postgres_mode():
+            return []
         return _read_local_watchlist_rows()
     try:
         cur = con.cursor()
@@ -311,8 +333,12 @@ def read_watchlist_rows_state() -> list[dict[str, str]]:
             out.append({"ticker": tk, "added_at": str(r[1] or ""), "reason": str(r[2] or "")})
         if out:
             return out
+        if strict_postgres_mode():
+            return []
         return _read_local_watchlist_rows()
     except Exception:
+        if strict_postgres_mode():
+            return []
         return _read_local_watchlist_rows()
     finally:
         con.close()
@@ -333,7 +359,8 @@ def write_watchlist_rows_state(rows: list[dict[str, str]]) -> None:
                 "reason": str(r.get("reason") or "").replace("\n", " ").strip(),
             }
         )
-    _mirror_watchlist_to_file(cleaned)
+    if not strict_postgres_mode():
+        _mirror_watchlist_to_file(cleaned)
     if core_backend() != "postgres":
         return
     if not _ensure_state_schema_pg():

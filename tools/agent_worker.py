@@ -90,7 +90,7 @@ You have access to these READ-ONLY data commands:
 > invest_app list_holdings
 > invest_app get_thesis --ticker AAPL
 > invest_app list_notes --ticker AAPL --limit 10
-> invest_app read_filing --ticker AAPL --form 10-Q [--accession 0001193125-26-012345]
+> invest_app read_filing --ticker AAPL --form 10-Q [--accession 0001193125-26-012345] [--offset 6000]
 
 Rules:
 - Gather data with commands before drawing conclusions.
@@ -98,6 +98,7 @@ Rules:
 - Do NOT guess numbers — state clearly when data is unavailable.
 - Keep analysis focused: 3-5 bullet points.
 - The system writes your report to the database — do not call post_note or post_journal.
+- For long filings (10-K, 10-Q), use --offset 6000, 12000, 18000 to read successive chunks.
 - When done, output your analysis in <FINAL_REPORT>...</FINAL_REPORT> followed immediately
   by a <STRUCTURED>...</STRUCTURED> block (see required fields below).
 
@@ -129,7 +130,7 @@ Commands available (max 4):
 > invest_app get_price --ticker {ticker}
 > invest_app get_intel --ticker {ticker}
 > invest_app get_thesis --ticker {ticker}
-> invest_app read_filing --ticker {ticker} --form 10-Q
+> invest_app read_filing --ticker {ticker} --form 10-Q [--offset 6000]
 
 Gather data, then present your bull case in <BULL_CASE>...</BULL_CASE> (3-5 bullets max).
 Do NOT present bear arguments.
@@ -151,7 +152,7 @@ Commands available (max 4):
 > invest_app get_price --ticker {ticker}
 > invest_app get_intel --ticker {ticker}
 > invest_app get_thesis --ticker {ticker}
-> invest_app read_filing --ticker {ticker} --form 10-Q
+> invest_app read_filing --ticker {ticker} --form 10-Q [--offset 6000]
 
 Gather data, then present your bear case in <BEAR_CASE>...</BEAR_CASE> (3-5 bullets max).
 Do NOT present bull arguments.
@@ -511,6 +512,10 @@ def _get_thesis_text(ticker: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_trigger_message(event: dict) -> str:
+    # Earnings prep (or any other mode) can override the full trigger message
+    override = event.get("_override_trigger")
+    if override:
+        return str(override)
     ticker = str(event.get("ticker") or "").strip().upper()
     form = event.get("form", "")
     date = event.get("filing_date", "")
@@ -1271,6 +1276,131 @@ def _log_universe_processed(ticker: str, accession: str, cascades: int, dry_run:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Earnings preparation mode
+# ---------------------------------------------------------------------------
+
+def _build_earnings_prep_message(ticker: str, event_date: str, days_until: int, eps_estimate: str) -> str:
+    ctx = _build_investor_context(ticker)
+    ctx_section = f"\n\n{ctx}\n" if ctx else ""
+    return (
+        f"UPCOMING EARNINGS ALERT — {ticker} reports in {days_until} day(s) on {event_date}.{ctx_section}\n"
+        f"EPS Estimate: {eps_estimate or 'not available'}\n\n"
+        f"Your task: prepare a pre-earnings brief.\n"
+        f"1. Fetch the most recent filing and financial data for {ticker}.\n"
+        f"2. Identify the key metrics the market is focused on this quarter.\n"
+        f"3. Compare current guidance vs. thesis expectations.\n"
+        f"4. Highlight what a BEAT vs MISS would mean for the thesis.\n"
+        f"5. List 2-3 specific things to watch in the earnings call.\n"
+        f"Begin by fetching data, then output <FINAL_REPORT> + <STRUCTURED> when done."
+    )
+
+
+def _earnings_prep_already_done(ticker: str) -> bool:
+    """Return True if a prep note for this ticker was written in the last 7 days."""
+    try:
+        con = pg_connect()
+        if con is None:
+            return False
+        try:
+            cur = con.cursor()
+            cutoff = (datetime.datetime.now() - datetime.timedelta(days=7)).isoformat()
+            cur.execute(
+                """SELECT id FROM investor_annotations_core
+                   WHERE entity_id=%s AND tags LIKE '%%earnings_prep%%' AND created_at >= %s LIMIT 1""",
+                (ticker, cutoff),
+            )
+            return bool(cur.fetchone())
+        finally:
+            con.close()
+    except Exception:
+        return False
+
+
+def run_earnings_prep(days_ahead: int = 3, dry_run: bool = False, debate: bool = True) -> list[dict]:
+    """
+    Find held tickers with earnings in the next `days_ahead` days.
+    Run the agent in earnings-prep mode for each — writes a pre-earnings brief note.
+    Skips tickers already prepped in the last 7 days.
+    """
+    from app.services.postgres_core_service import list_earnings_calendar_snapshot_pg
+
+    today     = datetime.date.today()
+    week_end  = (today + datetime.timedelta(days=days_ahead)).isoformat()
+    week_start = today.isoformat()
+
+    # Held tickers
+    holdings  = get_holdings(limit=500)
+    held      = {str(h.get("ticker") or "").strip().upper() for h in holdings if h.get("ticker")}
+    if not held:
+        print("[earnings_prep] No holdings — nothing to prep.")
+        return []
+
+    # Upcoming earnings
+    cal_rows = list_earnings_calendar_snapshot_pg(week_start=week_start, week_end=week_end, limit=200)
+    upcoming = [r for r in cal_rows if str(r.get("symbol") or "").upper() in held]
+
+    if not upcoming:
+        print(f"[earnings_prep] No earnings in next {days_ahead} days for held tickers.")
+        return []
+
+    results = []
+    for cal in upcoming:
+        ticker     = str(cal.get("symbol") or "").strip().upper()
+        event_date = str(cal.get("event_date") or "")
+        eps_est    = str(cal.get("eps_estimate") or "")
+
+        if _earnings_prep_already_done(ticker):
+            print(f"[earnings_prep] {ticker} — already prepped, skipping.")
+            continue
+
+        try:
+            days_until = (datetime.date.fromisoformat(event_date) - today).days
+        except Exception:
+            days_until = days_ahead
+
+        print(f"[earnings_prep] Running prep for {ticker} (earnings {event_date}, {days_until}d away)…")
+
+        event = {
+            "type":        "earnings_prep",
+            "ticker":      ticker,
+            "form":        "10-Q",
+            "accession":   "",
+            "filing_path": "",
+            "filing_date": today.isoformat(),
+        }
+
+        # Override trigger message for earnings prep context
+        # We monkey-patch _build_trigger_message behaviour via the event dict
+        event["_override_trigger"] = _build_earnings_prep_message(ticker, event_date, days_until, eps_est)
+
+        result = run(event, dry_run=dry_run, debate=debate)
+        results.append({"ticker": ticker, "event_date": event_date, **result})
+
+        # Tag the note as earnings_prep (update last annotation row)
+        if not dry_run and result.get("status") == "ok":
+            try:
+                con = pg_connect()
+                if con:
+                    try:
+                        cur = con.cursor()
+                        cur.execute(
+                            """UPDATE investor_annotations_core SET tags='ai,sec,earnings_prep'
+                               WHERE entity_id=%s AND created_by='ai'
+                               ORDER BY created_at DESC LIMIT 1""",
+                            (ticker,),
+                        )
+                        con.commit()
+                    finally:
+                        con.close()
+            except Exception:
+                pass
+
+        time.sleep(WATCH_DELAY_SEC)
+
+    return results
+
+
 def run_universe_watch(
     lookback_days: int = 1,
     dry_run:       bool = False,
@@ -1396,6 +1526,8 @@ Examples:
   python tools/agent_worker.py --ticker IT --form 10-Q --dry-run
   python tools/agent_worker.py --ticker IT --form 10-Q --no-debate
   python tools/agent_worker.py --ticker AAPL --form 10-Q --accession 0001193125-26-012345
+  python tools/agent_worker.py --earnings-prep --days-ahead 3
+  python tools/agent_worker.py --earnings-prep --days-ahead 5 --dry-run
 """,
     )
     p.add_argument("--watch",          action="store_true", help="Scan all held tickers for new filings.")
@@ -1408,11 +1540,15 @@ Examples:
     p.add_argument("--form",      metavar="FORM",  default="")
     p.add_argument("--accession", metavar="ACC",   default="")
     p.add_argument("--filing-date", metavar="YYYY-MM-DD", default="")
-    p.add_argument("--dry-run",   action="store_true", help="Full run, no DB writes.")
-    p.add_argument("--no-debate", action="store_true", help="Single-perspective mode (faster/cheaper).")
-    p.add_argument("--json",      action="store_true", dest="output_json", help="Output JSON.")
-    p.add_argument("--event-uid", metavar="UID", default="",
+    p.add_argument("--dry-run",       action="store_true", help="Full run, no DB writes.")
+    p.add_argument("--no-debate",     action="store_true", help="Single-perspective mode (faster/cheaper).")
+    p.add_argument("--json",          action="store_true", dest="output_json", help="Output JSON.")
+    p.add_argument("--event-uid",     metavar="UID", default="",
                    help="(stub) Future: look up filing event by UID.")
+    p.add_argument("--earnings-prep", action="store_true", dest="earnings_prep",
+                   help="Run pre-earnings brief for held tickers with upcoming earnings.")
+    p.add_argument("--days-ahead",    type=int, default=3, dest="days_ahead",
+                   help="Days ahead to scan for upcoming earnings (default 3, used with --earnings-prep).")
     return p
 
 
@@ -1435,6 +1571,12 @@ def main() -> None:
 
     if args.universe_watch:
         results = run_universe_watch(lookback_days=max(1, args.days), dry_run=args.dry_run)
+        if args.output_json:
+            print(json.dumps(results, indent=2, default=str))
+        sys.exit(0)
+
+    if args.earnings_prep:
+        results = run_earnings_prep(days_ahead=max(1, args.days_ahead), dry_run=args.dry_run, debate=debate)
         if args.output_json:
             print(json.dumps(results, indent=2, default=str))
         sys.exit(0)

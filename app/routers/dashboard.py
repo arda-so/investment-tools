@@ -82,7 +82,7 @@ from app.services.postgres_core_service import (
     upsert_earnings_calendar_snapshot_pg,
 )
 from app.services.watchlist_service import read_watchlist_rows, write_watchlist_rows
-from app.services.workspace_feed_service import add_workspace_message, list_workspace_channels, load_workspace_feed
+from app.services.workspace_feed_service import add_workspace_message, get_workspace_context, list_workspace_channels, load_workspace_feed
 from app.services.portfolio_state_service import (
     read_cash_rows_state,
     read_portfolio_rows_state,
@@ -2582,6 +2582,11 @@ def dashboard_page_classic(request: Request):
 def dashboard_workspace_feed(channel: str = "all", limit: int = 50):
     items = load_workspace_feed(channel=channel, limit=limit)
     return JSONResponse({"ok": True, "channel": str(channel or "all"), "items": items})
+
+
+@router.get("/dashboard/context")
+def dashboard_workspace_context():
+    return JSONResponse({"ok": True, **get_workspace_context()})
 
 
 @router.post("/dashboard/message")

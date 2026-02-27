@@ -96,6 +96,55 @@ def _norm_time(raw: str) -> str:
     return s
 
 
+def get_workspace_context() -> dict[str, Any]:
+    """Lightweight context snapshot for the workspace right panel."""
+    ctx: dict[str, Any] = {
+        "open_proposals": 0,
+        "breach_alerts": 0,
+        "last_run_status": "",
+        "last_run_at": "",
+        "last_run_agent": "",
+        "holdings": [],
+    }
+    con = pg_connect()
+    if con is None:
+        return ctx
+    try:
+        cur = con.cursor()
+        if _table_exists(cur, "action_proposals_core"):
+            cur.execute("SELECT COUNT(*) FROM action_proposals_core WHERE COALESCE(status,'open')='open'")
+            row = cur.fetchone()
+            ctx["open_proposals"] = int((row or [0])[0] or 0)
+        if _table_exists(cur, "thesis_breach_alerts_core"):
+            cur.execute("SELECT COUNT(*) FROM thesis_breach_alerts_core WHERE COALESCE(status,'open')='open'")
+            row = cur.fetchone()
+            ctx["breach_alerts"] = int((row or [0])[0] or 0)
+        if _table_exists(cur, "agent_runs_core"):
+            cur.execute(
+                "SELECT agent_name, status, started_at FROM agent_runs_core ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if row:
+                ctx["last_run_agent"] = str(row[0] or "")
+                ctx["last_run_status"] = str(row[1] or "")
+                ctx["last_run_at"] = str(row[2] or "")[:16]
+    except Exception:
+        pass
+    finally:
+        con.close()
+    # Holdings from portfolio service
+    try:
+        from app.services.portfolio_memory_service import get_holdings
+        holdings = get_holdings(limit=10)
+        ctx["holdings"] = [
+            {"ticker": str(h.get("ticker") or ""), "weight": str(h.get("weight") or h.get("pct_weight") or "")}
+            for h in (holdings or [])
+        ]
+    except Exception:
+        pass
+    return ctx
+
+
 def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str, Any]]:
     ch = str(channel or "all").strip().lower() or "all"
     lim = max(1, min(int(limit or 50), 200))

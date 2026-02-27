@@ -115,7 +115,7 @@ def ask_workspace_ai(question: str) -> str:
     if not q:
         return ""
     try:
-        from tools.llm_engine import ask_ai as _ask_ai
+        from tools.llm_engine import ask_ai as _ask_ai, get_ai_runtime_metrics as _ai_metrics
         today = dt.datetime.now().strftime("%A, %B %d, %Y")
         prompt = (
             f"You are an investment AI assistant. Today is {today}.\n"
@@ -125,7 +125,18 @@ def ask_workspace_ai(question: str) -> str:
         )
         reply = _ask_ai(prompt, context="", mode="smart")
         if reply and reply.strip():
-            return reply.strip()
+            out = reply.strip()
+            low = out.lower()
+            if ("transport issue while waiting for analysis result" in low) or ("service temporarily degraded" in low):
+                detail = ""
+                try:
+                    m = dict(_ai_metrics() or {})
+                    detail = str(m.get("last_error") or "").strip()
+                except Exception:
+                    detail = ""
+                if detail:
+                    return f"{out} Details: {detail[:220]}"
+            return out
     except Exception:
         pass
     return ask_ai_local(q)

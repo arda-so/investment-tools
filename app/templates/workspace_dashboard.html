@@ -59,8 +59,9 @@
 
   <aside class="ws-card ws-right">
     <h3>Context</h3>
-    <div class="hint">Workspace mode is now your default dashboard. It merges briefs, alerts, filings, notes, and agent runs into one feed.</div>
-    <div class="hint" style="margin-top:10px;">Use <b># AI Agent</b> for natural language questions and commands.</div>
+    <div id="wsContext">
+      <div class="hint">Loading…</div>
+    </div>
   </aside>
 </div>
 
@@ -224,6 +225,43 @@
   });
   loadFeed();
   setInterval(loadFeed, 20000);
+
+  // Live right panel
+  async function loadContext(){
+    try{
+      const res = await fetch('/dashboard/context');
+      const d = await res.json();
+      const el = document.getElementById('wsContext');
+      if(!el) return;
+      const statusColor = (d.last_run_status||'').toLowerCase() === 'completed' ? '#16a34a'
+                        : (d.last_run_status||'').toLowerCase() === 'error' ? '#dc2626' : '#64748b';
+      let holdingsHtml = '';
+      if(Array.isArray(d.holdings) && d.holdings.length){
+        holdingsHtml = '<div style="margin-top:10px;font-size:11px;font-weight:700;color:#64748b;letter-spacing:.05em;">HOLDINGS</div>'
+          + d.holdings.map(h => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0;">
+              <span style="font-weight:700">${esc(h.ticker)}</span>
+              <span style="color:#64748b">${esc(h.weight)}</span></div>`).join('');
+      }
+      el.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+          <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:20px;font-weight:800;color:#15803d">${esc(String(d.open_proposals||0))}</div>
+            <div style="font-size:10px;color:#64748b">Open Proposals</div>
+          </div>
+          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:20px;font-weight:800;color:#dc2626">${esc(String(d.breach_alerts||0))}</div>
+            <div style="font-size:10px;color:#64748b">Breach Alerts</div>
+          </div>
+        </div>
+        <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:.05em;margin-bottom:4px;">LAST AGENT RUN</div>
+        <div style="font-size:12px;font-weight:700;color:${statusColor}">${esc(d.last_run_status||'—')}</div>
+        <div style="font-size:11px;color:#64748b">${esc(d.last_run_agent||'')} ${esc(d.last_run_at||'')}</div>
+        ${holdingsHtml}
+        <div style="margin-top:12px;font-size:11px;color:#94a3b8;">Use <b># AI Agent</b> for questions.</div>`;
+    }catch(_){}
+  }
+  loadContext();
+  setInterval(loadContext, 60000);
 })();
 </script>
 {% endblock %}

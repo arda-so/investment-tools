@@ -80,6 +80,49 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def _is_truthy(v: str | None) -> bool:
+    return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _provider_has_key(provider: str) -> bool:
+    p = str(provider or "").strip().lower()
+    if p == "openai":
+        return bool(os.getenv("OPENAI_API_KEY", "").strip())
+    if p == "gemini":
+        return bool(os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip())
+    if p == "anthropic":
+        return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
+    if p == "groq":
+        return bool(os.getenv("GROQ_API_KEY", "").strip())
+    if p == "ollama":
+        return True
+    return False
+
+
+def _is_cloud_env() -> bool:
+    return _is_truthy(os.getenv("K_SERVICE")) or str(os.getenv("APP_ENV", "")).strip().lower() == "cloud"
+
+
+def _default_primary_provider() -> str:
+    for p in ("openai", "gemini", "anthropic", "groq"):
+        if _provider_has_key(p):
+            return p
+    return "openai"
+
+
+def _default_fallback_provider(primary: str) -> str:
+    p0 = str(primary or "").strip().lower()
+    candidates = ["gemini", "openai", "anthropic", "groq"]
+    if not _is_cloud_env():
+        candidates.append("ollama")
+    for p in candidates:
+        if p != p0 and _provider_has_key(p):
+            return p
+    if not _is_cloud_env() and p0 != "ollama":
+        return "ollama"
+    return p0
+
+
 class AIEngine:
     """
     Hybrid routing engine:
@@ -96,8 +139,11 @@ class AIEngine:
         fallback_override: str | None = None,
         model_override: str | None = None,
     ) -> None:
-        self.provider = (provider_override or str(_cfg("AI_PROVIDER", "openai"))).strip().lower()
-        self.fallback = str(_cfg("AI_FALLBACK_PROVIDER", "ollama")).strip().lower()
+        env_provider = str(os.getenv("AI_PROVIDER", "")).strip().lower()
+        chosen_provider = provider_override or env_provider or _default_primary_provider()
+        self.provider = str(chosen_provider or "openai").strip().lower()
+        env_fallback = str(os.getenv("AI_FALLBACK_PROVIDER", "")).strip().lower()
+        self.fallback = str(fallback_override or env_fallback or _default_fallback_provider(self.provider)).strip().lower()
         if fallback_override:
             self.fallback = str(fallback_override).strip().lower()
         self.openai_model = str(_cfg("OPENAI_MODEL", "gpt-4o-mini")).strip()
@@ -728,6 +774,7 @@ def ask_ai(
         _CB_STATE["consecutive_failures"] = 0.0
         return out
     except Exception as exc:
+        _log(f"[AIEngine] request failed: {exc}")
         _AI_TELEMETRY["errors"] = int(_AI_TELEMETRY.get("errors") or 0) + 1
         _AI_TELEMETRY["last_error"] = str(exc)[:200]
         _CB_STATE["consecutive_failures"] = float(_CB_STATE.get("consecutive_failures") or 0.0) + 1.0

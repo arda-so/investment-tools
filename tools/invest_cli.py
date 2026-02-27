@@ -213,15 +213,23 @@ def _cmd_list_notes(ticker: str = "", limit: str = "10") -> str:
         con.close()
 
 
-def _cmd_read_filing(ticker: str, form: str, accession: str = "") -> str:
+_CHUNK_SIZE = 6000
+_MAX_OFFSET = 36000  # cap at 6 chunks (36KB total readable)
+
+
+def _cmd_read_filing(ticker: str, form: str, accession: str = "", offset: str = "0") -> str:
     tk = _safe_ticker(ticker)
     if not tk:
         return "[Error]: ticker is required."
     form_safe = re.sub(r"[^A-Za-z0-9\-/]", "", str(form or ""))[:20]
     if not form_safe:
         return "[Error]: form is required."
+    try:
+        off = max(0, min(_MAX_OFFSET, int(offset or 0)))
+    except (ValueError, TypeError):
+        off = 0
 
-    # If accession provided, look up local_path from DB
+    # Look up local_path from DB
     con = pg_connect()
     path = ""
     if con is not None:
@@ -250,10 +258,16 @@ def _cmd_read_filing(ticker: str, form: str, accession: str = "") -> str:
         return f"[Error]: No filing path found for {tk} {form_safe}."
 
     try:
-        text = read_filing_text_any(path, max_chars=6000)
-        if not text:
+        # Read enough to serve the requested chunk
+        full = read_filing_text_any(path, max_chars=off + _CHUNK_SIZE)
+        if not full:
             return f"[Error]: Filing file empty or unreadable: {path}"
-        return f"Filing text ({tk} {form_safe}):\n{text[:6000]}"
+        chunk = full[off: off + _CHUNK_SIZE]
+        if not chunk:
+            return f"Filing text ({tk} {form_safe}): [offset {off} is past end of available content ({len(full)} chars total)]"
+        total_hint = f" [chars {off}–{off + len(chunk)} of ~{len(full)}+]"
+        next_hint = f" [use --offset {off + _CHUNK_SIZE} to read next chunk]" if len(chunk) == _CHUNK_SIZE else " [end of content]"
+        return f"Filing text ({tk} {form_safe}){total_hint}{next_hint}:\n{chunk}"
     except Exception as exc:
         return f"[Error]: Could not read filing: {exc}"
 

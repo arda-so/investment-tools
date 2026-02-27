@@ -758,6 +758,18 @@ def get_ai_audit_timeline(limit: int = 40) -> list[dict[str, Any]]:
             return []
         try:
             cur = con_pg.cursor()
+            proposal_cols: set[str] = set()
+            try:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='action_proposals_core'
+                    """
+                )
+                proposal_cols = {str(r[0] or "").strip().lower() for r in (cur.fetchall() or [])}
+            except Exception:
+                proposal_cols = set()
             # Agent runs
             cur.execute(
                 """SELECT started_at, agent_name, status, trigger_type, duration_ms, error_text, run_uid
@@ -776,8 +788,14 @@ def get_ai_audit_timeline(limit: int = 40) -> list[dict[str, Any]]:
                     "uid": str(r[6] or ""),
                 })
             # Proposal executions and rejections
+            dir_expr = "direction" if "direction" in proposal_cols else (
+                "suggested_action" if "suggested_action" in proposal_cols else "''"
+            )
+            conf_expr = "confidence" if "confidence" in proposal_cols else (
+                "confidence_score" if "confidence_score" in proposal_cols else "0.0"
+            )
             cur.execute(
-                """SELECT created_at, ticker, direction, title, status, confidence
+                f"""SELECT created_at, ticker, {dir_expr} AS direction, title, status, {conf_expr} AS confidence
                    FROM action_proposals_core
                    WHERE status IN ('executed','rejected','debate_rejected')
                    ORDER BY id DESC LIMIT %s""",
