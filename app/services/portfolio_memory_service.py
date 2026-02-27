@@ -580,6 +580,8 @@ def _memory_freshness_weight(updated_at: str) -> float:
 
 
 def list_compact_memories(query: str = "", bucket: str = "", limit: int = 30, include_archived: bool = False) -> list[dict[str, Any]]:
+    if pg_enabled():
+        return []  # memory_compact not yet migrated to Postgres; skip gracefully
     ensure_portfolio_memory_schema()
     q = str(query or "").strip().lower()
     b = str(bucket or "").strip().lower()
@@ -876,6 +878,8 @@ def promote_rule_candidate(rule_key: str) -> dict[str, Any]:
 
 
 def list_active_rules(limit: int = 30) -> list[dict[str, Any]]:
+    if pg_enabled():
+        return []  # active_rules not yet migrated to Postgres; skip gracefully
     ensure_portfolio_memory_schema()
     con = _conn()
     try:
@@ -1491,8 +1495,8 @@ def record_decision(
             cur.execute(
                 """
                 INSERT INTO decision_log_core
-                    (created_at, timestamp, ticker, action, reason, reasoning, confidence, source, trace_id, quantity, price)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (id, created_at, timestamp, ticker, action, reason, reasoning, confidence, source, trace_id, quantity, price)
+                VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM decision_log_core), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     now,

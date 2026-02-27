@@ -591,16 +591,32 @@ def _ai_command_sync(payload: dict) -> dict:
             )
     ctx["history"] = merged_hist[-80:]
     if q:
-        _ = learn_preferences_from_text(q, history=ctx["history"])
-        _ = learn_preferences_from_trajectory(ctx["history"], latest_user_text=q)
-        _ = learn_compact_memory_from_text(q, source="chat_turn")
-        _ = learn_from_chat_turn(q, source="chat")
-        # Long-term style memory: capture structured answers to follow-up prompts.
+        # Wrap all learning side-effects — any SQLite-based call will raise
+        # sqlite_forbidden_in_strict_postgres_mode on cloud; must not crash sync path.
+        try:
+            _ = learn_preferences_from_text(q, history=ctx["history"])
+        except Exception:
+            pass
+        try:
+            _ = learn_preferences_from_trajectory(ctx["history"], latest_user_text=q)
+        except Exception:
+            pass
+        try:
+            _ = learn_compact_memory_from_text(q, source="chat_turn")
+        except Exception:
+            pass
+        try:
+            _ = learn_from_chat_turn(q, source="chat")
+        except Exception:
+            pass
         try:
             _ = learn_investor_style_from_answer(q)
         except Exception:
             pass
-    ctx["user_profile"] = _profile_text(ctx)
+    try:
+        ctx["user_profile"] = _profile_text(ctx)
+    except Exception:
+        ctx["user_profile"] = ""
     if not str(ctx.get("last_intent") or "").strip():
         for m in reversed(ctx["history"]):
             if str(m.get("role") or "") == "assistant" and str(m.get("intent") or "").strip():
