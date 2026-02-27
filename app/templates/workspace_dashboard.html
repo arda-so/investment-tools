@@ -2,42 +2,54 @@
 {% block title %}Workspace | Investor OS v2{% endblock %}
 {% block head_extra %}
 <style>
-  .ws{display:grid;grid-template-columns:220px 1fr 260px;gap:12px;padding:12px;}
+  /* Hide the legacy AI* floating button and worker badge on the dashboard —
+     the bottom bar is the single AI entry point here. */
+  #aiOpenBtn, #aiWorkerBadge { display: none !important; }
+
+  .ws{display:grid;grid-template-columns:200px 1fr 260px;gap:12px;padding:12px;}
   .ws-card{background:#fff;border:1px solid #dbe4ee;border-radius:12px;padding:10px;}
-  .ws-side h3,.ws-right h3{margin:0 0 10px 0;font-size:12px;text-transform:uppercase;color:#64748b;letter-spacing:.06em;}
-  .ws-ch{display:block;width:100%;text-align:left;border:1px solid #e2e8f0;background:#f8fafc;color:#0f172a;border-radius:10px;padding:8px 10px;margin-bottom:6px;font-size:13px;font-weight:700;cursor:pointer;}
-  .ws-ch.active{background:#0f172a;color:#fff;border-color:#0f172a;}
+  .ws-side h3,.ws-right h3{margin:0 0 10px 0;font-size:11px;text-transform:uppercase;color:#94a3b8;letter-spacing:.07em;font-weight:800;}
+  .ws-ch{display:block;width:100%;text-align:left;border:none;background:transparent;color:#475569;border-radius:8px;padding:7px 10px;margin-bottom:2px;font-size:13px;font-weight:600;cursor:pointer;transition:background .1s,color .1s;}
+  .ws-ch:hover{background:#f1f5f9;color:#0f172a;}
+  .ws-ch.active{background:#f1f5f9;color:#0f172a;font-weight:800;}
+  .ws-ch.active::before{content:'';display:inline-block;width:3px;height:14px;background:#0f172a;border-radius:2px;margin-right:8px;vertical-align:middle;}
   .ws-main{display:grid;grid-template-rows:auto 1fr auto;min-height:78vh;}
   .ws-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
-  .ws-title{font-size:20px;font-weight:800;color:#0f172a;}
+  .ws-title{font-size:18px;font-weight:800;color:#0f172a;}
   .ws-feed{overflow:auto;min-height:0;display:grid;gap:8px;padding-right:4px;align-content:start;}
-  .ws-item{border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;}
+  .ws-item{border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px 12px;}
   .ws-item-error{border-color:#fecaca;background:#fff7f7;}
-  /* Bug 2: thinking/loading state */
   .ws-item-thinking{border-color:#e0f2fe;background:#f0f9ff;animation:ws-pulse 1.4s ease-in-out infinite;}
   @keyframes ws-pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
-  .ws-item h4{margin:0 0 5px 0;font-size:14px;color:#0f172a;}
-  .ws-meta{font-size:11px;color:#64748b;margin-bottom:6px;}
-  .ws-text{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.5;}
-  /* Chat bubbles: user messages get a subtle tint */
-  .ws-item-user{background:#f8fafc;border-color:#e2e8f0;}
-  .ws-item-ai{background:#fff;}
-  .ws-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
-  .ws-act{border:1px solid #cbd5e1;background:#f8fafc;color:#0f172a;border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;}
+  .ws-item h4{margin:0 0 4px 0;font-size:13px;font-weight:700;color:#0f172a;}
+  .ws-meta{font-size:11px;color:#94a3b8;margin-bottom:5px;}
+  .ws-text{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.55;}
+  .ws-item-user{background:#f8fafc;}
+  .ws-item-ai{background:#fff;border-color:#dbeafe;}
+  .ws-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
+  .ws-act{border:1px solid #e2e8f0;background:#f8fafc;color:#475569;border-radius:7px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer;transition:background .1s;}
+  .ws-act:hover{background:#f1f5f9;color:#0f172a;}
   .ws-act-primary{background:#0f172a;color:#fff;border-color:#0f172a;}
+  .ws-act-primary:hover{background:#1e293b;}
   .ws-status{font-size:11px;color:#64748b;margin-top:6px;}
-  .ws-input{margin-top:10px;}
-  .ws-input-wrap{display:flex;align-items:center;gap:8px;border:1px solid #cbd5e1;border-radius:14px;background:#fff;padding:8px 10px;transition:border-color .15s;}
-  .ws-input-wrap:focus-within{border-color:#94a3b8;}
-  .ws-input-wrap input{flex:1;border:none;outline:none;background:transparent;height:28px;font-size:14px;color:#0f172a;}
+
+  /* ── AI Input bar ─────────────────────────────────────────────────────── */
+  .ws-input{margin-top:12px;}
+  .ws-input-wrap{display:flex;align-items:center;gap:8px;border:1.5px solid #e2e8f0;border-radius:16px;background:#fff;padding:9px 12px;transition:border-color .15s,box-shadow .15s;}
+  .ws-input-wrap:focus-within{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.08);}
+  .ws-input-wrap input{flex:1;border:none;outline:none;background:transparent;height:26px;font-size:14px;color:#0f172a;}
+  .ws-input-wrap input::placeholder{color:#94a3b8;}
   .ws-input-wrap input:disabled{color:#94a3b8;}
-  .ws-model{font-size:11px;color:#475569;border:1px solid #e2e8f0;border-radius:8px;padding:3px 6px;background:#f8fafc;white-space:nowrap;}
-  /* Bug 2: disabled send button */
-  .ws-send{border:1px solid #0f172a;background:#0f172a;color:#fff;border-radius:10px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;min-width:52px;transition:opacity .15s;}
-  .ws-send:disabled{opacity:.4;cursor:not-allowed;}
-  /* Bug 3: hint bar below input */
-  .ws-hint{font-size:11px;color:#475569;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:5px 10px;margin-top:6px;display:none;}
+  /* Mode badge — changes based on query type */
+  .ws-mode{font-size:11px;font-weight:700;border-radius:8px;padding:3px 8px;white-space:nowrap;transition:all .2s;}
+  .ws-mode-fast{color:#059669;background:#ecfdf5;border:1px solid #a7f3d0;}
+  .ws-mode-deep{color:#7c3aed;background:#f5f3ff;border:1px solid #ddd6fe;}
+  .ws-send{border:none;background:#0f172a;color:#fff;border-radius:10px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;min-width:52px;transition:background .15s,opacity .15s;}
+  .ws-send:hover{background:#1e293b;}
+  .ws-send:disabled{opacity:.35;cursor:not-allowed;}
+  .ws-hint{font-size:11px;color:#475569;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:5px 10px;margin-top:6px;display:none;}
   .ws-hint.visible{display:block;}
+
   .ws-clear-btn{font-size:11px;color:#94a3b8;background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;}
   .ws-clear-btn:hover{color:#dc2626;}
   .ws-right .hint{font-size:12px;color:#475569;line-height:1.4;}
@@ -64,9 +76,9 @@
     <div class="ws-feed" id="wsFeed"></div>
     <form class="ws-input" id="wsForm">
       <div class="ws-input-wrap">
-        <input id="wsText" type="text" placeholder="Ask Investor OS…" autocomplete="off">
-        <span class="ws-model" id="wsModelBadge">AI</span>
-        <button class="ws-send" id="wsSend" type="submit">Send</button>
+        <input id="wsText" type="text" placeholder="Ask your portfolio anything…" autocomplete="off" autocorrect="off" spellcheck="false">
+        <span class="ws-mode ws-mode-fast" id="wsModeBadge">⚡ Fast</span>
+        <button class="ws-send" id="wsSend" type="submit">Ask</button>
       </div>
       <div class="ws-hint" id="wsHint"></div>
     </form>
@@ -89,11 +101,19 @@
   const textEl       = document.getElementById('wsText');
   const sendBtn      = document.getElementById('wsSend');
   const hintEl       = document.getElementById('wsHint');
+  const modeBadge    = document.getElementById('wsModeBadge');
   const clearHistBtn = document.getElementById('wsClearHistory');
   let active    = 'all';
   let lastItems = [];
   let isSending = false;
   let hintTimer = null;
+
+  // Dynamic mode badge: update as user types
+  textEl.addEventListener('input', () => {
+    const deep = isDeepQuery(textEl.value);
+    modeBadge.textContent  = deep ? '🔍 Deep' : '⚡ Fast';
+    modeBadge.className    = 'ws-mode ' + (deep ? 'ws-mode-deep' : 'ws-mode-fast');
+  });
 
   // ── helpers ──────────────────────────────────────────────────────────────
   function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -141,7 +161,7 @@
     const t = String(text || '').toLowerCase();
     if(t.includes('transport issue')) return 'AI transport timeout. Retry once; if repeated, check AI provider key/network.';
     if(t.includes('permission') || t.includes('forbidden')) return 'Permission issue. Verify auth token or service IAM access.';
-    return 'Request failed. Retry or switch to # AI Agent and ask for a narrower query.';
+    return 'Request failed. Retry with a more specific question, e.g. "analyze $CRM margins".';
   }
   function withUiActions(it){
     const base = Array.isArray(it.actions) ? it.actions.slice() : [];
@@ -187,7 +207,7 @@
       // Bug 2: thinking placeholder (not stored in DB, purely local)
       if(it._thinking){
         return `<article class="ws-item ws-item-thinking">
-          <h4>AI Agent</h4>
+          <h4>Investor AI</h4>
           <div class="ws-text" style="color:#64748b">Thinking…</div>
         </article>`;
       }
@@ -359,7 +379,7 @@
   });
 
   clearHistBtn.addEventListener('click', async () => {
-    if(!confirm('Clear all AI Agent chat history? This cannot be undone.')) return;
+    if(!confirm('Clear all AI Chat history? This cannot be undone.')) return;
     clearHistBtn.disabled = true;
     try{
       await fetch('/dashboard/ai-agent/clear-history', {method:'POST', headers:{'Accept':'application/json'}});
@@ -379,23 +399,16 @@
     const text = textEl.value.trim();
     if(!text) return;
 
-    // Bug 3: typing on a non-AI channel → silently switch to AI Agent + restore text
-    if(active !== 'ai-agent'){
-      switchToAiAgent();
-      textEl.value = text;
-      showHint('Switched to # AI Agent — press Send again to ask your question.');
-      textEl.focus();
-      return;
-    }
-
     textEl.value = '';
+    // Always switch to AI Chat channel so the response is visible
+    switchToAiAgent();
 
     const mine = {channel:'ai-agent', title:'You', text, meta:'user', ts:new Date().toISOString()};
     const deep  = isDeepQuery(text);
 
     if (deep) {
       // Deep query: agent loop fetches real data. Returns immediately, result appears in feed.
-      const analyzing = {channel:'ai-agent', title:'AI Agent',
+      const analyzing = {channel:'ai-agent', title:'Investor AI',
         text:'Analyzing… fetching real portfolio data. Result will appear here shortly.',
         meta:'assistant', _thinking:true, ts:new Date().toISOString()};
       render([analyzing, mine, ...lastItems].slice(0, 51));
@@ -403,7 +416,7 @@
         await sendAgentQuery(text);
         startAgentPoll(); // speed up feed refresh while agent runs
       } catch(_e) {
-        const err = {channel:'ai-agent', title:'AI Agent',
+        const err = {channel:'ai-agent', title:'Investor AI',
           text:'Could not reach agent. Check network.', meta:'assistant', ts:new Date().toISOString()};
         render([err, mine, ...lastItems].slice(0, 50));
       }
@@ -414,13 +427,13 @@
       try{
         const data = await sendUserMessage(text, 'ai-agent');
         if(data && data.reply){
-          const bot = {channel:'ai-agent', title:'AI Agent', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
+          const bot = {channel:'ai-agent', title:'Investor AI', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
           render([bot, mine, ...lastItems].slice(0, 50));
         } else {
           await loadFeed();
         }
       } catch(_e) {
-        const bot = {channel:'ai-agent', title:'AI Agent', text:'Could not reach AI. Check network and try again.', meta:'assistant', ts:new Date().toISOString()};
+        const bot = {channel:'ai-agent', title:'Investor AI', text:'Could not reach AI. Check network and try again.', meta:'assistant', ts:new Date().toISOString()};
         render([bot, mine, ...lastItems].slice(0, 50));
       } finally {
         setLoading(false);
@@ -437,7 +450,7 @@
   const globalOmnibox     = document.getElementById('globalOmniboxInput');
   const globalOmniboxForm = globalOmnibox && globalOmnibox.closest('form');
   if (globalOmnibox && globalOmniboxForm) {
-    globalOmnibox.placeholder = 'Ask AI or add a task… (e.g., "analyze $CRM earnings" or "Review margins")';
+    globalOmnibox.placeholder = 'Add a task or note… (investment questions go in the bar below)';
     globalOmniboxForm.addEventListener('submit', async (e) => {
       const text = (globalOmnibox.value || '').trim();
       if (!text) return;
@@ -485,7 +498,7 @@
         <div style="font-size:12px;font-weight:700;color:${statusColor}">${esc(d.last_run_status||'—')}</div>
         <div style="font-size:11px;color:#64748b">${esc(d.last_run_agent||'')} ${esc(d.last_run_at||'')}</div>
         ${holdingsHtml}
-        <div style="margin-top:12px;font-size:11px;color:#94a3b8;">Use <b># AI Agent</b> for questions.</div>`;
+        <div style="margin-top:12px;font-size:11px;color:#94a3b8;">Type in the bar below to ask AI anything about your portfolio.</div>`;
     }catch(_){}
   }
   loadContext();

@@ -14,8 +14,8 @@ CHANNELS: list[dict[str, str]] = [
     {"id": "filings", "label": "Filings"},
     {"id": "portfolio", "label": "Portfolio"},
     {"id": "notes", "label": "Notes"},
-    {"id": "agent-runs", "label": "Agent Runs"},
-    {"id": "ai-agent", "label": "AI Agent"},
+    {"id": "agent-runs", "label": "Automation"},
+    {"id": "ai-agent", "label": "AI Chat"},
 ]
 
 
