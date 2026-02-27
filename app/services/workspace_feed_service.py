@@ -352,10 +352,28 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                 )
 
         if ch in {"all", "agent-runs"} and _table_exists(cur, "agent_runs_core"):
+            # Auto-timeout any run stuck in 'running' for > 5 minutes
+            try:
+                cur.execute(
+                    """
+                    UPDATE agent_runs_core
+                    SET status='timeout', finished_at=started_at,
+                        error_text='Auto-timeout: no completion received', updated_at=NOW()::text
+                    WHERE status='running'
+                      AND started_at < (NOW() - INTERVAL '5 minutes')::text
+                    """
+                )
+            except Exception:
+                pass
+
+            # In #All channel: only show completed/failed/timeout/error runs (not raw RUNNING noise)
+            # In #Agent Runs channel: show everything including in-progress
+            status_filter = "AND status != 'running'" if ch == "all" else ""
             cur.execute(
-                """
+                f"""
                 SELECT agent_name, trigger_type, status, started_at, finished_at, duration_ms
                 FROM agent_runs_core
+                {status_filter}
                 ORDER BY started_at DESC
                 LIMIT %s
                 """,

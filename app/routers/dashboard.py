@@ -2630,6 +2630,31 @@ def dashboard_clear_ai_history():
     return JSONResponse({"ok": True, "deleted": n})
 
 
+@router.post("/dashboard/cleanup-stuck-runs")
+def dashboard_cleanup_stuck_runs():
+    """Mark all agent runs stuck in 'running' for > 5 min as timeout. Called on deploy and via UI."""
+    from app.services.postgres_core_service import pg_connect
+    try:
+        con = pg_connect()
+        cur = con.cursor()
+        cur.execute(
+            """
+            UPDATE agent_runs_core
+            SET status='timeout', finished_at=started_at,
+                error_text='Auto-timeout: no completion received', updated_at=NOW()::text
+            WHERE status='running'
+              AND started_at < (NOW() - INTERVAL '5 minutes')::text
+            RETURNING id
+            """
+        )
+        n = len(cur.fetchall() or [])
+        con.commit()
+        con.close()
+        return JSONResponse({"ok": True, "cleaned": n})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
 @router.post("/dashboard/ai-agent/save-note")
 def dashboard_workspace_save_note(text: str = Form(""), ticker: str = Form("")):
     body = str(text or "").strip()
