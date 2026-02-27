@@ -2100,7 +2100,9 @@
                 return;
               }
             }
-            var res = await fetch('/ai/command/async', {
+            // Use sync-first endpoint: tries direct LLM call (up to AI_COMMAND_SYNC_BUDGET_MS),
+            // falls back to queue+SSE only if LLM takes longer than the budget.
+            var res = await fetch('/ai/command', {
               method:'POST',
               headers:{'Content-Type':'application/json'},
               body: JSON.stringify({query:q, context: ctx, image_data_url: pendingImageDataUrl || ''})
