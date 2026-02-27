@@ -9,7 +9,6 @@ need_cmd() {
 }
 
 need_cmd gcloud
-need_cmd docker
 need_cmd curl
 
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
@@ -53,8 +52,17 @@ fi
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/app:${TAG}"
 
 echo "Building image: $IMAGE"
-docker build -t "$IMAGE" .
-docker push "$IMAGE"
+if [ "${USE_CLOUD_BUILD:-0}" = "1" ] || ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  echo "Using Cloud Build (no local Docker required)..."
+  gcloud builds submit \
+    --project="$PROJECT_ID" \
+    --tag="$IMAGE" \
+    --machine-type=e2-highcpu-8 \
+    .
+else
+  docker build -t "$IMAGE" .
+  docker push "$IMAGE"
+fi
 
 SECRETS="POSTGRES_DSN=POSTGRES_DSN:latest"
 if [ "$INCLUDE_GEMINI_SECRET" = "1" ]; then
