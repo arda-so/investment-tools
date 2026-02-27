@@ -8,7 +8,16 @@ from app.core.config import CORE_DB_PATH, ROOT
 from app.core.sqlite_hardening import connect_sqlite, sqlite_retry as _sqlite_retry
 
 
+def _sqlite_forbidden() -> bool:
+    # Local import avoids module-load cycles.
+    from app.services.postgres_core_service import core_backend as _core_backend, strict_postgres_mode as _strict
+
+    return _core_backend() == "postgres" and _strict()
+
+
 def get_sqlite_conn(path: str | Path | None = None, *, row_factory: bool = True) -> sqlite3.Connection:
+    if _sqlite_forbidden():
+        raise RuntimeError("sqlite_forbidden_in_strict_postgres_mode")
     p = str(path or CORE_DB_PATH)
     return connect_sqlite(p, row_factory=row_factory)
 

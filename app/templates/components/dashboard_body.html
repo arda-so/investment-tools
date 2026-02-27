@@ -466,15 +466,18 @@
           {% if thesis_breach_alerts %}
           <div class="stack-list">
             {% for a in thesis_breach_alerts %}
-            <div class="stack-item">
+            <div class="stack-item" id="breach-alert-{{ a.id }}">
               <div class="proposal-title-row">
                 <div>
                   <a class="tk-strong" href="/company_file?t={{ a.ticker|urlencode }}">{{ a.ticker }}</a>
                   <span class="meta-chip with-gap">{{ a.breach_type or "breach" }}</span>
                 </div>
-                <span class="risk-badge {% if a.severity == 'critical' %}red{% elif a.severity == 'high' %}red{% else %}orange{% endif %}">
-                  {{ (a.severity or "medium")|upper }}
-                </span>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span class="risk-badge {% if a.severity == 'critical' %}red{% elif a.severity == 'high' %}red{% else %}orange{% endif %}">
+                    {{ (a.severity or "medium")|upper }}
+                  </span>
+                  <button class="btn-ghost-sm" onclick="dismissBreachAlert({{ a.id }})" title="Dismiss">✕</button>
+                </div>
               </div>
               <div class="stack-text">{{ a.breach_detail or "-" }}</div>
               {% if a.actual_values %}
@@ -492,7 +495,7 @@
           {% if cascade_alerts %}
           <div class="stack-list">
             {% for c in cascade_alerts %}
-            <div class="stack-item">
+            <div class="stack-item" id="cascade-alert-{{ c.id }}">
               <div class="proposal-title-row">
                 <div>
                   <a class="tk-strong" href="/company_file?t={{ c.trigger_ticker|urlencode }}">{{ c.trigger_ticker }}</a>
@@ -500,9 +503,12 @@
                   <a class="tk-strong" href="/company_file?t={{ c.affected_ticker|urlencode }}">{{ c.affected_ticker }}</a>
                   <span class="meta-chip with-gap">{{ c.effect_type or "cascade" }}</span>
                 </div>
-                <span class="risk-badge {% if c.severity == 'critical' %}red{% elif c.severity == 'high' %}red{% else %}orange{% endif %}">
-                  {{ "%.0f"|format((c.confidence or 0) * 100) }}% conf
-                </span>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span class="risk-badge {% if c.severity == 'critical' %}red{% elif c.severity == 'high' %}red{% else %}orange{% endif %}">
+                    {{ "%.0f"|format((c.confidence or 0) * 100) }}% conf
+                  </span>
+                  <button class="btn-ghost-sm" onclick="dismissCascadeAlert({{ c.id }})" title="Dismiss">✕</button>
+                </div>
               </div>
               <div class="stack-text">{{ c.effect_summary or "-" }}</div>
               {% if c.relationship %}
@@ -691,4 +697,26 @@
     if(drawerOverlay){ drawerOverlay.addEventListener('click', closeDrawer); }
     if(drawerClose){ drawerClose.addEventListener('click', closeDrawer); }
   })();
+
+  function dismissBreachAlert(id) {
+    fetch('/api/agent/breach-alerts/' + id + '/dismiss', {method: 'POST'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d.ok) {
+          var el = document.getElementById('breach-alert-' + id);
+          if(el) el.remove();
+        }
+      });
+  }
+
+  function dismissCascadeAlert(id) {
+    fetch('/api/agent/cascade-alerts/' + id + '/dismiss', {method: 'POST'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d.ok) {
+          var el = document.getElementById('cascade-alert-' + id);
+          if(el) el.remove();
+        }
+      });
+  }
 </script>

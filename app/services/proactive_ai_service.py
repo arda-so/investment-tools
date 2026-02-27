@@ -35,6 +35,7 @@ from app.services.user_preferences_service import upsert_user_preference
 from app.services.mini_statements_service import fetch_historical_financials
 from app.services.company_intel_service import get_company_intel
 from app.services.price_metrics_service import get_price_metrics
+from app.services.portfolio_state_service import read_portfolio_rows_state, read_watchlist_rows_state
 
 try:
     from tools.llm_engine import ask_ai, ask_ai_json_schema
@@ -51,23 +52,14 @@ def _read_scope_tickers() -> tuple[set[str], set[str], set[str]]:
     portfolio: set[str] = set()
     watchlist: set[str] = set()
     bluechips: set[str] = set()
-    p = ROOT / "data" / "portfolio.csv"
-    if p.exists():
-        for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            parts = [x.strip() for x in ln.split(",")]
-            t = _safe_ticker(parts[0] if parts else "")
-            if t:
-                portfolio.add(t)
-    w = ROOT / "data" / "my_watchlist.txt"
-    if w.exists():
-        for ln in w.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = str(ln or "").strip()
-            if not s or s.startswith("#"):
-                continue
-            parts = [x.strip() for x in s.split(",")]
-            t = _safe_ticker(parts[0] if parts else "")
-            if t:
-                watchlist.add(t)
+    for r in read_portfolio_rows_state():
+        t = _safe_ticker(str(r.get("ticker") or ""))
+        if t:
+            portfolio.add(t)
+    for r in read_watchlist_rows_state():
+        t = _safe_ticker(str(r.get("ticker") or ""))
+        if t:
+            watchlist.add(t)
     if core_backend() == "postgres":
         con_pg = pg_connect()
         if con_pg is not None:
@@ -1432,18 +1424,15 @@ def _day_pct_map() -> dict[str, float]:
 
 def _portfolio_weight_map() -> dict[str, float]:
     positions: dict[str, tuple[float, float]] = {}
-    p = ROOT / "data" / "portfolio.csv"
-    if p.exists():
-        for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            parts = [x.strip() for x in ln.split(",")]
-            tk = _safe_ticker(parts[0] if parts else "")
-            if not tk:
-                continue
-            sh = _to_float(parts[1] if len(parts) > 1 else 0.0, 0.0)
-            cost = _to_float(parts[2] if len(parts) > 2 else 0.0, 0.0)
-            if sh <= 0:
-                continue
-            positions[tk] = (sh, cost)
+    for r in read_portfolio_rows_state():
+        tk = _safe_ticker(str(r.get("ticker") or ""))
+        if not tk:
+            continue
+        sh = _to_float(r.get("shares"), 0.0)
+        cost = _to_float(r.get("cost"), 0.0)
+        if sh <= 0:
+            continue
+        positions[tk] = (sh, cost)
 
     if not positions:
         return {}
@@ -3757,6 +3746,58 @@ def detect_thesis_breaches(ticker: str | None = None) -> dict[str, Any]:
             continue
 
     return {"ok": True, "breaches": breaches_created, "checked": checked}
+
+
+def dismiss_thesis_breach_alert(alert_id: int) -> bool:
+    """Mark a thesis breach alert as dismissed."""
+    if core_backend() != "postgres":
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE thesis_breach_alerts_core SET status='dismissed' WHERE id=%s AND status='open'",
+            (int(alert_id),),
+        )
+        changed = int(cur.rowcount or 0) > 0
+        con.commit()
+        return changed
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def dismiss_cascade_alert(alert_id: int) -> bool:
+    """Mark a cascade alert as dismissed."""
+    if core_backend() != "postgres":
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE portfolio_cascade_alerts_core SET status='dismissed' WHERE id=%s AND status='open'",
+            (int(alert_id),),
+        )
+        changed = int(cur.rowcount or 0) > 0
+        con.commit()
+        return changed
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
 
 
 def list_thesis_breach_alerts(status: str = "open", limit: int = 20) -> list[dict[str, Any]]:

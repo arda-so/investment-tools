@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from app.core.config import ROOT
+from app.core import cloud_files
 from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.events_service import create_event, process_event
 from app.services.postgres_core_service import core_backend, pg_connect
@@ -55,9 +55,6 @@ DEFAULT_SIGNAL_UNIVERSE: dict[str, tuple[str, str]] = {
     "WMT":   ("Walmart — consumer spending + supply chain health", "macro"),
     "CAT":   ("Caterpillar — industrial capex + China exposure proxy", "macro"),
 }
-
-_FILING_DOCS_DIR = ROOT / "filing_docs"
-
 
 def _now() -> str:
     return dt.datetime.now().isoformat()
@@ -288,19 +285,19 @@ def _download_markdown(filing_obj: Any) -> str:
 
 def _save_filing_text(ticker: str, form: str, accession: str, text: str) -> str:
     """
-    Save filing text to filing_docs/ and return the file path string.
+    Save filing text and return canonical runtime path.
+    Path is stored as repo-relative `filing_docs/...` so cloud/local both resolve.
     Returns "" on failure.
     """
     if not text:
         return ""
     try:
-        _FILING_DOCS_DIR.mkdir(parents=True, exist_ok=True)
         # Sanitize accession for filename: replace / with - and strip special chars
         safe_acc = re.sub(r"[^A-Za-z0-9\-]", "", str(accession or "").replace("/", "-"))[:40]
         fname = f"{ticker}_{form}_{safe_acc}.txt"
-        fpath = _FILING_DOCS_DIR / fname
-        fpath.write_text(text, encoding="utf-8", errors="ignore")
-        return str(fpath)
+        rel_path = f"filing_docs/{fname}"
+        ok = cloud_files.write_text(rel_path, text)
+        return rel_path if ok else ""
     except Exception:
         return ""
 
@@ -312,10 +309,12 @@ def _upsert_filing_core(
     accession: str,
     doc_url: str,
     path: str,
+    content: str = "",
 ) -> int:
     """
     Insert into filings_core if accession not seen for this ticker.
     Returns the filing_id (existing or new), or 0 on failure.
+    content is stored in the DB so Cloud Run can read it without GCS.
     """
     tk = _safe_ticker(ticker)
     if not tk or not accession:
@@ -334,15 +333,23 @@ def _upsert_filing_core(
         )
         existing = cur.fetchone()
         if existing:
-            return int(existing[0] or 0)
+            filing_id = int(existing[0] or 0)
+            # Back-fill content if we have it now and row is empty
+            if content and filing_id:
+                cur.execute(
+                    "UPDATE filings_core SET content=%s WHERE id=%s AND content=''",
+                    (str(content), filing_id),
+                )
+                con.commit()
+            return filing_id
         # Generate new ID
         cur.execute("SELECT COALESCE(MAX(id),0)+1 FROM filings_core")
         new_id = int((cur.fetchone() or [1])[0] or 1)
         now = _now()
         cur.execute(
             """
-            INSERT INTO filings_core(id, ticker, form, date, accession, doc_url, path, downloaded_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO filings_core(id, ticker, form, date, accession, doc_url, path, downloaded_at, content)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO NOTHING
             """,
             (
@@ -354,6 +361,7 @@ def _upsert_filing_core(
                 str(doc_url or "")[:500],
                 str(path or "")[:500],
                 now,
+                str(content or ""),
             ),
         )
         con.commit()
@@ -415,6 +423,7 @@ def poll_ticker(
         filing_id = _upsert_filing_core(
             ticker=tk, form=form, filing_date=filing_date,
             accession=accession, doc_url=doc_url, path=path,
+            content=md_text or "",
         )
         if filing_id <= 0:
             continue
@@ -629,6 +638,7 @@ def poll_form4_for_tickers(
                 filing_id = _upsert_filing_core(
                     ticker=tk, form="4", filing_date=filing_date,
                     accession=accession, doc_url=str(fi.get("doc_url") or ""), path=path,
+                    content=md_text,
                 )
                 _mark_seen(tk, accession, "4", filing_date, filing_id or 0)
                 signal_summary = (

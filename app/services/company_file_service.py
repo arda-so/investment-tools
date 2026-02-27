@@ -12,7 +12,8 @@ from pathlib import Path
 from app.core.config import DATA_DIR, ROOT
 from app.core.db import core_conn as _conn_core
 from app.core.date import parse_datetime_flexible
-from app.core.filing_text import resolve_filing_path
+from app.core.filing_text import resolve_filing_path, normalize_filing_rel_path, filing_path_available
+from app.core import cloud_files
 from app.core.proposal_text import clean_task_text, is_ai_task_text
 from app.core.ticker import normalize_ticker as _normalize_ticker
 from app.services.postgres_core_service import (
@@ -27,6 +28,7 @@ from app.services.postgres_core_service import (
     list_company_reminders_pg,
     list_todos_pg,
     list_recent_notes_pg,
+    pg_connect,
     toggle_company_reminder_pg,
     toggle_todo_pg,
     update_company_reminder_pg,
@@ -78,6 +80,33 @@ FILING_CATEGORY_ORDER: list[tuple[str, str]] = [
     ("other", "Other Filings"),
 ]
 
+# Counterparty role is from the anchor ticker perspective.
+# Example: ("NVDA", "TSM", "supplier", ...) means TSM supplies NVDA.
+SUPPLY_CHAIN_SEED_RELATIONSHIPS: list[tuple[str, str, str, str, float]] = [
+    ("NVDA", "TSM", "supplier", "Advanced wafer foundry partner for flagship GPUs.", 0.95),
+    ("NVDA", "ASML", "supplier", "Lithography equipment provider critical to advanced node capacity.", 0.74),
+    ("NVDA", "AMAT", "supplier", "Semiconductor equipment exposure via advanced packaging and process tools.", 0.66),
+    ("NVDA", "KLAC", "supplier", "Process control/metrology tooling in leading-edge chip manufacturing.", 0.64),
+    ("NVDA", "LRCX", "supplier", "Etch/deposition equipment supplier in fabrication stack.", 0.63),
+    ("NVDA", "VRT", "supplier", "Power/cooling infrastructure tied to AI datacenter buildouts.", 0.72),
+    ("NVDA", "COHR", "supplier", "Optical components exposure for AI network interconnect demand.", 0.71),
+    ("NVDA", "ANET", "partner", "AI networking partner in hyperscale cluster deployments.", 0.68),
+    ("AAPL", "TSM", "supplier", "Primary advanced-node manufacturing partner for key SoCs.", 0.95),
+    ("AAPL", "QCOM", "supplier", "Modem and connectivity silicon supplier.", 0.82),
+    ("AAPL", "SWKS", "supplier", "RF front-end component supplier for wireless devices.", 0.76),
+    ("AAPL", "QRVO", "supplier", "RF component supplier with handset exposure.", 0.74),
+    ("AAPL", "AVGO", "supplier", "Custom connectivity and RF chips supplier.", 0.78),
+    ("AAPL", "GLW", "supplier", "Specialty glass/materials supplier exposure.", 0.69),
+    ("MSFT", "NVDA", "supplier", "AI accelerator supplier for cloud AI workloads.", 0.88),
+    ("GOOGL", "NVDA", "supplier", "AI accelerator supplier for hyperscale compute.", 0.84),
+    ("AMZN", "NVDA", "supplier", "AI accelerator supplier for cloud capacity expansion.", 0.84),
+    ("META", "NVDA", "supplier", "AI accelerator supplier for large training clusters.", 0.83),
+    ("TSLA", "ON", "supplier", "Power semiconductor supplier exposure for EV systems.", 0.74),
+    ("TSLA", "STM", "supplier", "Semiconductor and control component supplier exposure.", 0.72),
+    ("LLY", "DHR", "supplier", "Life-science tools exposure through bioprocess instrumentation.", 0.64),
+    ("LLY", "TMO", "supplier", "Bioprocess and analytical tools supplier exposure.", 0.66),
+]
+
 _LOOKUP_CACHE_LOCK = threading.Lock()
 _LOOKUP_CACHE_TTL_SEC = 45.0
 _PROFILES_CACHE: tuple[float, dict[str, dict[str, str]]] = (0.0, {})
@@ -85,6 +114,458 @@ _NAMES_CACHE: tuple[float, dict[str, str]] = (0.0, {})
 _UNIVERSE_CACHE_TTL_SEC = 45.0
 _UNIVERSE_ALL_CACHE: tuple[float, list[str]] = (0.0, [])
 _UNIVERSE_REG_CACHE: dict[str, tuple[float, list[str]]] = {}
+_SUPPLY_LINK_ROLES = {"supplier", "customer", "partner"}
+_PROFILE_PREFETCH_LOCK = threading.Lock()
+_PROFILE_PREFETCH_INFLIGHT: set[str] = set()
+
+
+def _fetch_profile_live_one(ticker: str) -> dict[str, str]:
+    tk = _normalize_ticker(ticker)
+    if not tk:
+        return {}
+    try:
+        import yfinance as yf  # type: ignore
+    except Exception:
+        return {}
+    try:
+        obj = yf.Ticker(tk)
+        info = obj.info or {}
+        name = str(info.get("longName") or info.get("shortName") or "").strip()
+        country = str(info.get("country") or "").strip()
+        industry = str(info.get("industry") or "").strip()
+        sector = str(info.get("sector") or "").strip()
+        if not (name or country or industry or sector):
+            return {}
+        return {
+            "ticker": tk,
+            "name": name,
+            "country": country,
+            "industry": industry,
+            "sector": sector,
+            "updated_at": dt.datetime.now().isoformat(),
+        }
+    except Exception:
+        return {}
+
+
+def _upsert_profile_cache_rows(rows: list[dict[str, str]]) -> None:
+    clean = [r for r in rows if str(r.get("ticker") or "").strip()]
+    if not clean:
+        return
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return
+        try:
+            cur = con_pg.cursor()
+            for r in clean:
+                cur.execute(
+                    """
+                    INSERT INTO company_profile_cache_core (ticker, name, country, industry, sector, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                      name=CASE WHEN trim(COALESCE(EXCLUDED.name,''))<>'' THEN EXCLUDED.name ELSE company_profile_cache_core.name END,
+                      country=CASE WHEN trim(COALESCE(EXCLUDED.country,''))<>'' THEN EXCLUDED.country ELSE company_profile_cache_core.country END,
+                      industry=CASE WHEN trim(COALESCE(EXCLUDED.industry,''))<>'' THEN EXCLUDED.industry ELSE company_profile_cache_core.industry END,
+                      sector=CASE WHEN trim(COALESCE(EXCLUDED.sector,''))<>'' THEN EXCLUDED.sector ELSE company_profile_cache_core.sector END,
+                      updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        str(r.get("ticker") or ""),
+                        str(r.get("name") or ""),
+                        str(r.get("country") or ""),
+                        str(r.get("industry") or ""),
+                        str(r.get("sector") or ""),
+                        str(r.get("updated_at") or dt.datetime.now().isoformat()),
+                    ),
+                )
+            con_pg.commit()
+        except Exception:
+            try:
+                con_pg.rollback()
+            except Exception:
+                pass
+        finally:
+            con_pg.close()
+        return
+
+    con = None if core_backend() == "postgres" else _conn_core()
+    try:
+        for r in clean:
+            con.execute(
+                """
+                INSERT INTO company_profile_cache (ticker, name, country, industry, sector, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                  name=CASE WHEN trim(excluded.name)<>'' THEN excluded.name ELSE company_profile_cache.name END,
+                  country=CASE WHEN trim(excluded.country)<>'' THEN excluded.country ELSE company_profile_cache.country END,
+                  industry=CASE WHEN trim(excluded.industry)<>'' THEN excluded.industry ELSE company_profile_cache.industry END,
+                  sector=CASE WHEN trim(excluded.sector)<>'' THEN excluded.sector ELSE company_profile_cache.sector END,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    str(r.get("ticker") or ""),
+                    str(r.get("name") or ""),
+                    str(r.get("country") or ""),
+                    str(r.get("industry") or ""),
+                    str(r.get("sector") or ""),
+                    str(r.get("updated_at") or dt.datetime.now().isoformat()),
+                ),
+            )
+        con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+    finally:
+        if con is not None:
+            con.close()
+
+
+def prefetch_company_profiles_async(tickers: list[str] | None = None, *, limit: int = 40) -> None:
+    wanted = sorted({_normalize_ticker(t) for t in (tickers or []) if _normalize_ticker(t)})
+    if not wanted:
+        return
+    wanted = wanted[: max(1, min(120, int(limit or 40)))]
+    with _PROFILE_PREFETCH_LOCK:
+        batch = [t for t in wanted if t not in _PROFILE_PREFETCH_INFLIGHT][: max(1, min(80, int(limit or 40)))]
+        for t in batch:
+            _PROFILE_PREFETCH_INFLIGHT.add(t)
+    if not batch:
+        return
+
+    def _worker(items: list[str]) -> None:
+        rows: list[dict[str, str]] = []
+        try:
+            for tk in items:
+                r = _fetch_profile_live_one(tk)
+                if r:
+                    rows.append(r)
+            if rows:
+                _upsert_profile_cache_rows(rows)
+                with _LOOKUP_CACHE_LOCK:
+                    global _PROFILES_CACHE
+                    _PROFILES_CACHE = (0.0, {})
+        finally:
+            with _PROFILE_PREFETCH_LOCK:
+                for tk in items:
+                    _PROFILE_PREFETCH_INFLIGHT.discard(tk)
+
+    th = threading.Thread(target=_worker, args=(batch,), daemon=True)
+    th.start()
+
+
+def _normalize_supply_role(role: str) -> str:
+    r = str(role or "").strip().lower()
+    if r in {"suppliers", "supplier"}:
+        return "supplier"
+    if r in {"customers", "customer"}:
+        return "customer"
+    if r in {"partners", "partner"}:
+        return "partner"
+    return "partner"
+
+
+def _ensure_supply_chain_table_sqlite(con: sqlite3.Connection) -> None:
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS company_supply_chain_links (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           anchor_ticker TEXT NOT NULL,
+           counterparty_ticker TEXT NOT NULL DEFAULT '',
+           counterparty_name TEXT NOT NULL DEFAULT '',
+           relationship_type TEXT NOT NULL DEFAULT 'supplier',
+           evidence TEXT NOT NULL DEFAULT '',
+           confidence REAL NOT NULL DEFAULT 0.6,
+           source TEXT NOT NULL DEFAULT 'manual',
+           status TEXT NOT NULL DEFAULT 'active',
+           updated_at TEXT NOT NULL
+        )"""
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_supply_chain_anchor ON company_supply_chain_links(anchor_ticker, status, id DESC)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_supply_chain_counterparty ON company_supply_chain_links(counterparty_ticker, status)"
+    )
+
+
+def _ensure_supply_chain_table_pg() -> None:
+    con_pg = pg_connect()
+    if con_pg is None:
+        return
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS company_supply_chain_links_core (
+               id BIGSERIAL PRIMARY KEY,
+               anchor_ticker TEXT NOT NULL,
+               counterparty_ticker TEXT NOT NULL DEFAULT '',
+               counterparty_name TEXT NOT NULL DEFAULT '',
+               relationship_type TEXT NOT NULL DEFAULT 'supplier',
+               evidence TEXT NOT NULL DEFAULT '',
+               confidence DOUBLE PRECISION NOT NULL DEFAULT 0.6,
+               source TEXT NOT NULL DEFAULT 'manual',
+               status TEXT NOT NULL DEFAULT 'active',
+               updated_at TEXT NOT NULL
+            )"""
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_supply_chain_core_anchor ON company_supply_chain_links_core(anchor_ticker, status, id DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_supply_chain_core_counterparty ON company_supply_chain_links_core(counterparty_ticker, status)"
+        )
+        con_pg.commit()
+    except Exception:
+        try:
+            con_pg.rollback()
+        except Exception:
+            pass
+    finally:
+        con_pg.close()
+
+
+def list_manual_supply_chain_links(anchor_ticker: str) -> list[dict[str, object]]:
+    t = _normalize_ticker(anchor_ticker)
+    if not t:
+        return []
+    out: list[dict[str, object]] = []
+    if core_backend() == "postgres":
+        _ensure_supply_chain_table_pg()
+        con_pg = pg_connect()
+        if con_pg is None:
+            return []
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """SELECT id, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence
+                   FROM company_supply_chain_links_core
+                   WHERE anchor_ticker = %s AND status = 'active'
+                   ORDER BY id DESC
+                   LIMIT 500""",
+                (t,),
+            )
+            for r in cur.fetchall() or []:
+                rid = int((r[0] if isinstance(r, (tuple, list)) else r["id"]) or 0)
+                ct = _normalize_ticker(str((r[1] if isinstance(r, (tuple, list)) else r["counterparty_ticker"]) or ""))
+                cn = str((r[2] if isinstance(r, (tuple, list)) else r["counterparty_name"]) or "").strip()
+                rl = _normalize_supply_role(str((r[3] if isinstance(r, (tuple, list)) else r["relationship_type"]) or ""))
+                ev = str((r[4] if isinstance(r, (tuple, list)) else r["evidence"]) or "").strip()
+                cf = float((r[5] if isinstance(r, (tuple, list)) else r["confidence"]) or 0.6)
+                out.append(
+                    {
+                        "id": rid,
+                        "counterparty_ticker": ct,
+                        "counterparty_name": cn,
+                        "relationship_type": rl,
+                        "evidence": ev,
+                        "confidence": max(0.0, min(1.0, cf)),
+                    }
+                )
+        except Exception:
+            return []
+        finally:
+            con_pg.close()
+        return out
+
+    con = None if core_backend() == "postgres" else _conn_core()
+    try:
+        _ensure_supply_chain_table_sqlite(con)
+        for r in con.execute(
+            """SELECT id, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence
+               FROM company_supply_chain_links
+               WHERE anchor_ticker = ? AND status = 'active'
+               ORDER BY id DESC
+               LIMIT 500""",
+            (t,),
+        ).fetchall():
+            out.append(
+                {
+                    "id": int(r["id"] or 0),
+                    "counterparty_ticker": _normalize_ticker(str(r["counterparty_ticker"] or "")),
+                    "counterparty_name": str(r["counterparty_name"] or "").strip(),
+                    "relationship_type": _normalize_supply_role(str(r["relationship_type"] or "")),
+                    "evidence": str(r["evidence"] or "").strip(),
+                    "confidence": max(0.0, min(1.0, float(r["confidence"] or 0.6))),
+                }
+            )
+        return out
+    finally:
+        if con is not None:
+            con.close()
+
+
+def _supply_chain_for_ticker(
+    ticker: str,
+    *,
+    profiles: dict[str, dict[str, str]],
+    names: dict[str, str],
+    manual_links: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    tk = _normalize_ticker(ticker)
+    if not tk:
+        return {"suppliers": [], "customers": [], "partners": [], "total": 0}
+    mcap_map = market_cap_map([x[1] for x in SUPPLY_CHAIN_SEED_RELATIONSHIPS])
+    seen: set[tuple[str, str]] = set()
+    buckets: dict[str, list[dict[str, object]]] = {"suppliers": [], "customers": [], "partners": []}
+    for raw in list(manual_links or []):
+        cp = _normalize_ticker(str(raw.get("counterparty_ticker") or ""))
+        if not cp:
+            continue
+        role_norm = _normalize_supply_role(str(raw.get("relationship_type") or ""))
+        bucket = "suppliers" if role_norm == "supplier" else ("customers" if role_norm == "customer" else "partners")
+        key = (bucket, cp)
+        if key in seen:
+            continue
+        seen.add(key)
+        prof = profiles.get(cp, {})
+        buckets[bucket].append(
+            {
+                "id": int(raw.get("id") or 0),
+                "source": "manual",
+                "ticker": cp,
+                "name": str(raw.get("counterparty_name") or prof.get("name") or names.get(cp) or cp).strip(),
+                "industry": str(prof.get("industry") or "").strip(),
+                "market_cap": str(mcap_map.get(cp) or "-").strip() or "-",
+                "evidence": str(raw.get("evidence") or "").strip(),
+                "confidence": max(0.0, min(1.0, float(raw.get("confidence") or 0.6))),
+            }
+        )
+
+    for anchor, counterparty, role, evidence, confidence in SUPPLY_CHAIN_SEED_RELATIONSHIPS:
+        if _normalize_ticker(anchor) != tk:
+            continue
+        cp = _normalize_ticker(counterparty)
+        if not cp:
+            continue
+        role_norm = _normalize_supply_role(role)
+        if role_norm == "supplier":
+            bucket = "suppliers"
+        elif role_norm == "customer":
+            bucket = "customers"
+        else:
+            bucket = "partners"
+        key = (bucket, cp)
+        if key in seen:
+            continue
+        seen.add(key)
+        prof = profiles.get(cp, {})
+        buckets[bucket].append(
+            {
+                "id": 0,
+                "source": "seed",
+                "ticker": cp,
+                "name": str(prof.get("name") or names.get(cp) or cp).strip(),
+                "industry": str(prof.get("industry") or "").strip(),
+                "market_cap": str(mcap_map.get(cp) or "-").strip() or "-",
+                "evidence": str(evidence or "").strip(),
+                "confidence": float(confidence or 0.0),
+            }
+        )
+    for rows in buckets.values():
+        rows.sort(key=lambda x: (-float(x.get("confidence") or 0.0), str(x.get("ticker") or "")))
+    total = len(buckets["suppliers"]) + len(buckets["customers"]) + len(buckets["partners"])
+    return {
+        "suppliers": buckets["suppliers"],
+        "customers": buckets["customers"],
+        "partners": buckets["partners"],
+        "total": total,
+    }
+
+
+def add_supply_chain_link(
+    anchor_ticker: str,
+    counterparty_ticker: str,
+    counterparty_name: str,
+    relationship_type: str,
+    evidence: str = "",
+    confidence: float = 0.7,
+) -> bool:
+    anchor = _normalize_ticker(anchor_ticker)
+    cp = _normalize_ticker(counterparty_ticker)
+    name = str(counterparty_name or "").strip()
+    if not anchor or not cp:
+        return False
+    if not name:
+        name = cp
+    role = _normalize_supply_role(relationship_type)
+    ev = str(evidence or "").strip()[:1200]
+    conf = max(0.0, min(1.0, float(confidence or 0.0)))
+    if conf <= 0:
+        conf = 0.7
+    now = dt.datetime.now().isoformat()
+
+    if core_backend() == "postgres":
+        _ensure_supply_chain_table_pg()
+        con_pg = pg_connect()
+        if con_pg is None:
+            return False
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """INSERT INTO company_supply_chain_links_core
+                   (anchor_ticker, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence, source, status, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'manual', 'active', %s)""",
+                (anchor, cp, name[:160], role, ev, conf, now),
+            )
+            con_pg.commit()
+            return True
+        except Exception:
+            try:
+                con_pg.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            con_pg.close()
+
+    con = _conn_core()
+    try:
+        _ensure_supply_chain_table_sqlite(con)
+        con.execute(
+            """INSERT INTO company_supply_chain_links
+               (anchor_ticker, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence, source, status, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'manual', 'active', ?)""",
+            (anchor, cp, name[:160], role, ev, conf, now),
+        )
+        con.commit()
+        return True
+    finally:
+        con.close()
+
+
+def remove_supply_chain_link(row_id: int) -> bool:
+    rid = int(row_id or 0)
+    if rid <= 0:
+        return False
+    if core_backend() == "postgres":
+        _ensure_supply_chain_table_pg()
+        con_pg = pg_connect()
+        if con_pg is None:
+            return False
+        try:
+            cur = con_pg.cursor()
+            cur.execute("UPDATE company_supply_chain_links_core SET status = 'removed' WHERE id = %s", (rid,))
+            con_pg.commit()
+            return bool(cur.rowcount and int(cur.rowcount) > 0)
+        except Exception:
+            try:
+                con_pg.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            con_pg.close()
+
+    con = _conn_core()
+    try:
+        _ensure_supply_chain_table_sqlite(con)
+        cur = con.execute("UPDATE company_supply_chain_links SET status = 'removed' WHERE id = ?", (rid,))
+        con.commit()
+        return bool(cur.rowcount and int(cur.rowcount) > 0)
+    finally:
+        con.close()
 
 
 def _clean_seg_label(label: str) -> str:
@@ -135,6 +616,16 @@ class CompanyRow:
 
 def safe_resolve_filing_path(path_s: str) -> Path | None:
     return resolve_filing_path(path_s)
+
+
+def _canonical_filing_path(path_s: str) -> str:
+    p = safe_resolve_filing_path(path_s)
+    if p is not None:
+        return str(p)
+    rel = normalize_filing_rel_path(path_s)
+    if rel and cloud_files.exists(rel):
+        return rel
+    return ""
 
 
 def _filing_category(form: str) -> str:
@@ -205,23 +696,55 @@ def _company_profiles() -> dict[str, dict[str, str]]:
         ts, cached = _PROFILES_CACHE
         if cached and (now - float(ts)) <= _LOOKUP_CACHE_TTL_SEC:
             return dict(cached)
-    con = _conn_core()
     out: dict[str, dict[str, str]] = {}
-    try:
-        rows = con.execute(
-            "SELECT ticker, name, country, industry FROM company_profile_cache"
-        ).fetchall()
-        for r in rows:
-            t = _normalize_ticker(str(r["ticker"] or ""))
-            if not t:
-                continue
-            out[t] = {
-                "name": str(r["name"] or "").strip(),
-                "country": str(r["country"] or "").strip(),
-                "industry": str(r["industry"] or "").strip(),
-            }
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute("SELECT ticker, name, country, industry, sector FROM company_profile_cache_core")
+                for r in cur.fetchall() or []:
+                    t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
+                    if not t:
+                        continue
+                    out[t] = {
+                        "name": str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip(),
+                        "country": str((r[2] if isinstance(r, (tuple, list)) else r["country"]) or "").strip(),
+                        "industry": str((r[3] if isinstance(r, (tuple, list)) else r["industry"]) or "").strip(),
+                        "sector": str((r[4] if isinstance(r, (tuple, list)) else r["sector"]) or "").strip(),
+                    }
+                if not out:
+                    cur.execute("SELECT ticker, name FROM companies_core")
+                    for r in cur.fetchall() or []:
+                        t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
+                        if not t:
+                            continue
+                        out[t] = {
+                            "name": str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip(),
+                            "country": "",
+                            "industry": "",
+                            "sector": "",
+                        }
+            except Exception:
+                out = {}
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_core()
+        try:
+            rows = con.execute("SELECT ticker, name, country, industry, sector FROM company_profile_cache").fetchall()
+            for r in rows:
+                t = _normalize_ticker(str(r["ticker"] or ""))
+                if not t:
+                    continue
+                out[t] = {
+                    "name": str(r["name"] or "").strip(),
+                    "country": str(r["country"] or "").strip(),
+                    "industry": str(r["industry"] or "").strip(),
+                    "sector": str(r["sector"] or "").strip(),
+                }
+        finally:
+            con.close()
     with _LOOKUP_CACHE_LOCK:
         _PROFILES_CACHE = (now, dict(out))
     return out
@@ -293,16 +816,35 @@ def _companies_name_map() -> dict[str, str]:
         ts, cached = _NAMES_CACHE
         if cached and (now - float(ts)) <= _LOOKUP_CACHE_TTL_SEC:
             return dict(cached)
-    con = _conn_core()
     out: dict[str, str] = {}
-    try:
-        for r in con.execute("SELECT ticker, name FROM companies").fetchall():
-            t = _normalize_ticker(str(r["ticker"] or ""))
-            if not t:
-                continue
-            out[t] = str(r["name"] or "").strip()
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                try:
+                    cur.execute("SELECT ticker, name FROM companies_core")
+                except Exception:
+                    cur.execute("SELECT ticker, name FROM company_profile_cache_core")
+                for r in cur.fetchall() or []:
+                    t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
+                    if not t:
+                        continue
+                    out[t] = str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip()
+            except Exception:
+                out = {}
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_core()
+        try:
+            for r in con.execute("SELECT ticker, name FROM companies").fetchall():
+                t = _normalize_ticker(str(r["ticker"] or ""))
+                if not t:
+                    continue
+                out[t] = str(r["name"] or "").strip()
+        finally:
+            con.close()
     with _LOOKUP_CACHE_LOCK:
         _NAMES_CACHE = (now, dict(out))
     return out
@@ -337,6 +879,8 @@ def _live_price(ticker: str) -> str:
 
 
 def _saved_lists() -> list[dict[str, str | int]]:
+    if core_backend() == "postgres":
+        return []
     con = _conn_core()
     rows: list[dict[str, str | int]] = []
     try:
@@ -364,6 +908,8 @@ def _saved_list_tickers(list_name: str) -> list[str]:
     n = str(list_name or "").strip()
     if not n:
         return []
+    if core_backend() == "postgres":
+        return []
     con = _conn_core()
     try:
         row = con.execute("SELECT id FROM company_lists WHERE name = ?", (n,)).fetchone()
@@ -387,6 +933,8 @@ def _moat_tickers(moat_key: str) -> list[str]:
     mk = str(moat_key or "").strip().lower()
     if not mk:
         return []
+    if core_backend() == "postgres":
+        return []
     con = _conn_core()
     try:
         out = []
@@ -409,28 +957,52 @@ def _all_universe() -> list[str]:
         ts, cached = _UNIVERSE_ALL_CACHE
         if cached and (now - float(ts)) <= _UNIVERSE_CACHE_TTL_SEC:
             return list(cached)
-    con = _conn_core()
     seen: set[str] = set()
     out: list[str] = []
-    try:
-        for sql in (
-            "SELECT ticker FROM company_profile_cache",
-            "SELECT ticker FROM companies",
-            "SELECT ticker FROM company_list_items",
-            "SELECT ticker FROM universe_registry WHERE is_us_listed = 1",
-        ):
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
             try:
-                rows = con.execute(sql).fetchall()
-            except Exception:
-                continue
-            for r in rows:
-                t = _normalize_ticker(str(r["ticker"] or ""))
-                if not t or t in seen:
+                cur = con_pg.cursor()
+                for sql in (
+                    "SELECT ticker FROM company_profile_cache_core",
+                    "SELECT ticker FROM companies_core",
+                    "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE",
+                ):
+                    try:
+                        cur.execute(sql)
+                        rows = cur.fetchall() or []
+                    except Exception:
+                        continue
+                    for r in rows:
+                        t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
+                        if not t or t in seen:
+                            continue
+                        seen.add(t)
+                        out.append(t)
+            finally:
+                con_pg.close()
+    else:
+        con = _conn_core()
+        try:
+            for sql in (
+                "SELECT ticker FROM company_profile_cache",
+                "SELECT ticker FROM companies",
+                "SELECT ticker FROM company_list_items",
+                "SELECT ticker FROM universe_registry WHERE is_us_listed = 1",
+            ):
+                try:
+                    rows = con.execute(sql).fetchall()
+                except Exception:
                     continue
-                seen.add(t)
-                out.append(t)
-    finally:
-        con.close()
+                for r in rows:
+                    t = _normalize_ticker(str(r["ticker"] or ""))
+                    if not t or t in seen:
+                        continue
+                    seen.add(t)
+                    out.append(t)
+        finally:
+            con.close()
     with _LOOKUP_CACHE_LOCK:
         _UNIVERSE_ALL_CACHE = (now, list(out))
     return out
@@ -448,27 +1020,52 @@ def _registry_universe(mode: str) -> list[str]:
             ts, cached = row
             if cached and (now - float(ts)) <= _UNIVERSE_CACHE_TTL_SEC:
                 return list(cached)
-    con = _conn_core()
     seen: set[str] = set()
     out: list[str] = []
-    try:
-        if m == "us_listed":
-            sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1"
-        elif m == "otc_only":
-            sql = "SELECT ticker FROM universe_registry WHERE is_otc = 1"
-        else:
-            sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1 OR is_otc = 1"
-        rows = con.execute(sql).fetchall()
-        for r in rows:
-            t = _normalize_ticker(str(r["ticker"] or ""))
-            if not t or t in seen:
-                continue
-            seen.add(t)
-            out.append(t)
-    except Exception:
-        return []
-    finally:
-        con.close()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return []
+        try:
+            cur = con_pg.cursor()
+            if m == "us_listed":
+                sql = "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE"
+            elif m == "otc_only":
+                sql = "SELECT ticker FROM universe_registry_core WHERE is_otc = TRUE"
+            else:
+                sql = "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE OR is_otc = TRUE"
+            cur.execute(sql)
+            rows = cur.fetchall() or []
+            for r in rows:
+                t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                out.append(t)
+        except Exception:
+            return []
+        finally:
+            con_pg.close()
+    else:
+        con = _conn_core()
+        try:
+            if m == "us_listed":
+                sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1"
+            elif m == "otc_only":
+                sql = "SELECT ticker FROM universe_registry WHERE is_otc = 1"
+            else:
+                sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1 OR is_otc = 1"
+            rows = con.execute(sql).fetchall()
+            for r in rows:
+                t = _normalize_ticker(str(r["ticker"] or ""))
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                out.append(t)
+        except Exception:
+            return []
+        finally:
+            con.close()
     with _LOOKUP_CACHE_LOCK:
         _UNIVERSE_REG_CACHE[m] = (now, list(out))
     return out
@@ -512,6 +1109,8 @@ def list_filters() -> list[dict[str, str | int]]:
 
 
 def moat_filters() -> list[dict[str, str | int]]:
+    if core_backend() == "postgres":
+        return [{"key": key, "label": label, "count": 0} for key, label in MOAT_OPTIONS]
     con = _conn_core()
     cnt_map: dict[str, int] = {}
     try:
@@ -584,7 +1183,7 @@ def list_companies(
         p = profiles.get(t, {})
         nm = str(p.get("name") or names.get(t) or t).strip()
         ctry = str(p.get("country") or "-").strip() or "-"
-        ind_txt = str(p.get("industry") or "Unknown").strip() or "Unknown"
+        ind_txt = str(p.get("industry") or p.get("sector") or "Unknown").strip() or "Unknown"
         if ind_set and ind_txt not in ind_set:
             continue
         if q:
@@ -656,6 +1255,9 @@ def list_companies(
                     refreshed.append(r)
             page_rows = refreshed
         prefetch_market_cap_async(visible_tickers, limit=80)
+    unknown_tickers = [r.ticker for r in page_rows if str(r.industry or "").strip().lower() == "unknown"]
+    if unknown_tickers:
+        prefetch_company_profiles_async(unknown_tickers, limit=40)
     return {
         "rows": page_rows,
         "total": total,
@@ -677,7 +1279,7 @@ def company_detail(ticker: str) -> dict[str, object]:
     p = profiles.get(t, {})
     mcap = market_cap_map([t]).get(t, "-")
 
-    con = _conn_core()
+    con = None if core_backend() == "postgres" else _conn_core()
     moats: list[str] = []
     competitors: list[dict[str, str | int]] = []
     notes: list[dict[str, str | int]] = []
@@ -688,26 +1290,27 @@ def company_detail(ticker: str) -> dict[str, object]:
     filings: list[dict[str, str]] = []
     active_proposal: dict[str, object] = {}
     try:
-        for r in con.execute("SELECT moat_key FROM company_moat_tags WHERE ticker = ? ORDER BY moat_key", (t,)).fetchall():
-            mk = str(r["moat_key"] or "").strip().lower()
-            if mk:
-                moats.append(mk)
-        for r in con.execute(
-            """SELECT id, competitor_ticker, competitor_name, evidence, source_date
-               FROM company_sec_competitors
-               WHERE ticker = ? AND status = 'active'
-               ORDER BY confidence DESC, id DESC LIMIT 50""",
-            (t,),
-        ).fetchall():
-            competitors.append(
-                {
-                    "id": int(r["id"] or 0),
-                    "ticker": _normalize_ticker(str(r["competitor_ticker"] or "")),
-                    "name": str(r["competitor_name"] or "").strip(),
-                    "evidence": str(r["evidence"] or "").strip(),
-                    "date": str(r["source_date"] or "").strip(),
-                }
-            )
+        if core_backend() != "postgres":
+            for r in con.execute("SELECT moat_key FROM company_moat_tags WHERE ticker = ? ORDER BY moat_key", (t,)).fetchall():
+                mk = str(r["moat_key"] or "").strip().lower()
+                if mk:
+                    moats.append(mk)
+            for r in con.execute(
+                """SELECT id, competitor_ticker, competitor_name, evidence, source_date
+                   FROM company_sec_competitors
+                   WHERE ticker = ? AND status = 'active'
+                   ORDER BY confidence DESC, id DESC LIMIT 50""",
+                (t,),
+            ).fetchall():
+                competitors.append(
+                    {
+                        "id": int(r["id"] or 0),
+                        "ticker": _normalize_ticker(str(r["competitor_ticker"] or "")),
+                        "name": str(r["competitor_name"] or "").strip(),
+                        "evidence": str(r["evidence"] or "").strip(),
+                        "date": str(r["source_date"] or "").strip(),
+                    }
+                )
         if core_backend() == "postgres":
             for r in list_recent_notes_pg(limit=400):
                 if str(r.get("source_table") or "") != "workspace_journal":
@@ -809,27 +1412,29 @@ def company_detail(ticker: str) -> dict[str, object]:
                         "created_at": str(r["created_at"] or ""),
                     }
                 )
-        for r in con.execute(
-            """SELECT form, date, accession, doc_url, path
-               FROM filings
-               WHERE ticker = ?
-               ORDER BY date DESC, id DESC
-               LIMIT 10000""",
-            (t,),
-        ).fetchall():
-            pth = str(r["path"] or "").strip()
-            fp = safe_resolve_filing_path(pth)
-            filings.append(
-                {
-                    "form": str(r["form"] or "").strip() or "-",
-                    "date": str(r["date"] or "").strip() or "-",
-                    "accession": str(r["accession"] or "").strip() or "-",
-                    "doc_url": str(r["doc_url"] or "").strip(),
-                    "path": str(fp) if fp is not None else "",
-                    "file_name": (fp.name if fp is not None else (Path(pth).name if pth else "")),
-                    "has_local": "1" if fp is not None else "0",
-                }
-            )
+        if core_backend() != "postgres":
+            for r in con.execute(
+                """SELECT form, date, accession, doc_url, path
+                   FROM filings
+                   WHERE ticker = ?
+                   ORDER BY date DESC, id DESC
+                   LIMIT 10000""",
+                (t,),
+            ).fetchall():
+                pth = str(r["path"] or "").strip()
+                fp = safe_resolve_filing_path(pth)
+                cpath = _canonical_filing_path(pth)
+                filings.append(
+                    {
+                        "form": str(r["form"] or "").strip() or "-",
+                        "date": str(r["date"] or "").strip() or "-",
+                        "accession": str(r["accession"] or "").strip() or "-",
+                        "doc_url": str(r["doc_url"] or "").strip(),
+                        "path": cpath,
+                        "file_name": (Path(cpath).name if cpath else (Path(pth).name if pth else "")),
+                        "has_local": "1" if filing_path_available(pth) else "0",
+                    }
+                )
         if core_backend() == "postgres":
             cands = [x for x in list_action_proposals_pg(status="executed", limit=120) if str(x.get("ticker") or "").upper() == t]
             if not cands:
@@ -886,7 +1491,79 @@ def company_detail(ticker: str) -> dict[str, object]:
                     "citations": [x for x in list(citations or []) if isinstance(x, dict)][:6],
                 }
     finally:
-        con.close()
+        if con is not None:
+            con.close()
+
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                if not moats:
+                    cur.execute(
+                        "SELECT moat_key FROM company_moat_tags_core WHERE ticker = %s ORDER BY moat_key",
+                        (t,),
+                    )
+                    for r in cur.fetchall() or []:
+                        mk = str((r[0] if isinstance(r, (tuple, list)) else r["moat_key"]) or "").strip().lower()
+                        if mk:
+                            moats.append(mk)
+                if not competitors:
+                    cur.execute(
+                        """SELECT id, competitor_ticker, competitor_name, evidence, source_date
+                           FROM company_sec_competitors_core
+                           WHERE ticker = %s AND status = 'active'
+                           ORDER BY confidence DESC, id DESC
+                           LIMIT 50""",
+                        (t,),
+                    )
+                    for r in cur.fetchall() or []:
+                        rid = int((r[0] if isinstance(r, (tuple, list)) else r["id"]) or 0)
+                        ct = str((r[1] if isinstance(r, (tuple, list)) else r["competitor_ticker"]) or "")
+                        cn = str((r[2] if isinstance(r, (tuple, list)) else r["competitor_name"]) or "").strip()
+                        ev = str((r[3] if isinstance(r, (tuple, list)) else r["evidence"]) or "").strip()
+                        sd = str((r[4] if isinstance(r, (tuple, list)) else r["source_date"]) or "").strip()
+                        competitors.append(
+                            {
+                                "id": rid,
+                                "ticker": _normalize_ticker(ct),
+                                "name": cn,
+                                "evidence": ev,
+                                "date": sd,
+                            }
+                        )
+                if not filings:
+                    cur.execute(
+                        """SELECT form, date, accession, doc_url, path
+                           FROM filings_core
+                           WHERE ticker = %s
+                           ORDER BY date DESC, id DESC
+                           LIMIT 10000""",
+                        (t,),
+                    )
+                    for r in cur.fetchall() or []:
+                        form = str((r[0] if isinstance(r, (tuple, list)) else r["form"]) or "").strip()
+                        fdate = str((r[1] if isinstance(r, (tuple, list)) else r["date"]) or "").strip()
+                        accession = str((r[2] if isinstance(r, (tuple, list)) else r["accession"]) or "").strip()
+                        doc_url = str((r[3] if isinstance(r, (tuple, list)) else r["doc_url"]) or "").strip()
+                        pth = str((r[4] if isinstance(r, (tuple, list)) else r["path"]) or "").strip()
+                        fp = safe_resolve_filing_path(pth)
+                        cpath = _canonical_filing_path(pth)
+                        filings.append(
+                            {
+                                "form": form or "-",
+                                "date": fdate or "-",
+                                "accession": accession or "-",
+                                "doc_url": doc_url,
+                                "path": cpath,
+                                "file_name": (Path(cpath).name if cpath else (Path(pth).name if pth else "")),
+                                "has_local": "1" if filing_path_available(pth) else "0",
+                            }
+                        )
+            except Exception:
+                pass
+            finally:
+                con_pg.close()
 
     filing_form_counts: dict[str, int] = {}
     for r in filings:
@@ -1048,18 +1725,20 @@ def company_detail(ticker: str) -> dict[str, object]:
 
     similar_companies = _similar_companies_for(
         t,
-        industry=str(p.get("industry") or "Unknown").strip() or "Unknown",
+        industry=str(p.get("industry") or p.get("sector") or "Unknown").strip() or "Unknown",
         market_cap=str(mcap or "-"),
         profiles=profiles,
         names=names,
         existing_competitors=competitors,
         limit=8,
     )
+    manual_supply_links = list_manual_supply_chain_links(t)
+    supply_chain = _supply_chain_for_ticker(t, profiles=profiles, names=names, manual_links=manual_supply_links)
     return {
         "ticker": t,
         "name": str(p.get("name") or names.get(t) or t).strip(),
         "country": str(p.get("country") or "-").strip() or "-",
-        "industry": str(p.get("industry") or "Unknown").strip() or "Unknown",
+        "industry": str(p.get("industry") or p.get("sector") or "Unknown").strip() or "Unknown",
         "market_cap": str(mcap or "-").strip() or "-",
         "current_price": _live_price(t),
         "moat_keys": moats,
@@ -1067,6 +1746,7 @@ def company_detail(ticker: str) -> dict[str, object]:
         "moat_options": [{"key": k, "label": v} for k, v in MOAT_OPTIONS],
         "competitors": competitors,
         "similar_companies": similar_companies,
+        "supply_chain": supply_chain,
         "notes": notes,
         "system_logs": system_logs,
         "tasks": tasks,

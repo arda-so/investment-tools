@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  cat <<'USAGE'
+Usage: ./bin/open_cloud_app
+
+Starts an authenticated Cloud Run local proxy and opens the app in your browser.
+
+Defaults:
+  APP_SERVICE=investor-tools-app
+  PROJECT_ID=onyx-terminal-487613
+  REGION=europe-west1
+  CLOUD_PROXY_PORT=8081
+
+Override with env vars, for example:
+  CLOUD_PROXY_PORT=8090 ./bin/open_cloud_app
+USAGE
+  exit 0
+fi
+
+command -v gcloud >/dev/null 2>&1 || { echo "missing command: gcloud" >&2; exit 1; }
+command -v open >/dev/null 2>&1 || { echo "missing command: open" >&2; exit 1; }
+command -v lsof >/dev/null 2>&1 || { echo "missing command: lsof" >&2; exit 1; }
+
+APP_SERVICE="${APP_SERVICE:-investor-tools-app}"
+PROJECT_ID="${PROJECT_ID:-onyx-terminal-487613}"
+REGION="${REGION:-europe-west1}"
+PORT="${CLOUD_PROXY_PORT:-8081}"
+
+# Auto-pick a free port so this behaves like one-click local open.
+if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
+  START_PORT="$PORT"
+  for CAND in $(seq "$START_PORT" $((START_PORT + 30))); do
+    if ! lsof -ti tcp:"$CAND" >/dev/null 2>&1; then
+      PORT="$CAND"
+      break
+    fi
+  done
+fi
+
+if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
+  echo "Could not find a free proxy port in range ${CLOUD_PROXY_PORT:-8081}..$(( ${CLOUD_PROXY_PORT:-8081} + 30 ))." >&2
+  exit 1
+fi
+
+LOG_DIR="$ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/cloud_proxy_${APP_SERVICE}_${PORT}.log"
+
+nohup gcloud run services proxy "$APP_SERVICE" \
+  --region "$REGION" \
+  --project "$PROJECT_ID" \
+  --port "$PORT" \
+  >"$LOG_FILE" 2>&1 &
+PID=$!
+
+sleep 2
+if ! ps -p "$PID" >/dev/null 2>&1; then
+  echo "Failed to start cloud proxy. Check log: $LOG_FILE" >&2
+  exit 1
+fi
+
+URL="http://127.0.0.1:${PORT}"
+open "$URL"
+
+echo "Cloud proxy started: PID=$PID"
+echo "Open URL: $URL"
+echo "Log file: $LOG_FILE"
+echo "Stop proxy: kill -9 $PID"

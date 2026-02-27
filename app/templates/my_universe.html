@@ -501,6 +501,7 @@
                   <input id="bqTicker" class="ticker js-ticker-input" list="tickerHints" placeholder="Ticker">
                   <button type="button" id="bqAdd" class="u-btn">Add</button>
                   <button type="button" id="bqRemove" class="u-btn">Remove</button>
+                  <button type="button" id="bqSeed" class="u-btn">Seed</button>
                 </form>
                 <div class="u-dropzone edit-only block" data-drop-target="bluechips">Drop ticker here to move</div>
               </div>
@@ -729,8 +730,14 @@
     var bqTicker = document.getElementById('bqTicker');
     var bqAdd = document.getElementById('bqAdd');
     var bqRemove = document.getElementById('bqRemove');
+    var bqSeed = document.getElementById('bqSeed');
     bindTickerAction(bqAdd, bqTicker, '/my_universe/bluechips/add', {reason:''});
     bindTickerAction(bqRemove, bqTicker, '/my_universe/bluechips/remove', {});
+    if(bqSeed){
+      bqSeed.addEventListener('click', function(){
+        postKV('/my_universe/bluechips/seed', {}, function(){ window.location.reload(); });
+      });
+    }
 
     var cqForm = document.getElementById('cashQuickForm');
     var cqAction = document.getElementById('cqAction');

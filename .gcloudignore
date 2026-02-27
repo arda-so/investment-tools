@@ -1,0 +1,33 @@
+# Keep Cloud Build context small and deterministic.
+.gcloudignore
+.git
+.gitignore
+
+# Reuse local ignore rules.
+#!include:.dockerignore
+#!include:.gitignore
+
+# Large/generated runtime artifacts.
+.venv-memory/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+backups/
+logs/
+reports/
+outputs/
+filings/
+filing_docs/
+frontend/node_modules/
+
+# Local data and DB files.
+data/
+onyx_brain.db
+
+# Misc local notes and temp files.
+SESSION_*.md
+Notes/
+tmp_*

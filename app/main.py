@@ -16,6 +16,7 @@ from app.routers.dashboard import router as dashboard_router
 from app.routers.observability import router as observability_router
 from app.routers.organizer import router as organizer_router
 from app.routers.reports import router as reports_router
+from app.routers.supply_chain import router as supply_chain_router
 from app.services.ai_orchestrator import ensure_ai_schema
 from app.services.ai_job_queue_service import ensure_ai_job_queue_schema, queue_backend
 from app.services.app_knowledge_service import ensure_app_knowledge_map
@@ -26,6 +27,7 @@ from app.services.portfolio_memory_service import ensure_portfolio_memory_schema
 from app.services.postgres_core_service import ensure_postgres_core_schema, guard_core_backend_cutover, enforce_strict_postgres_ready, strict_postgres_mode, core_backend, pg_connect
 from app.services.sec_ingest_pipeline_service import ensure_sec_ingest_schema
 from app.services.ai_insight_service import ensure_ai_insight_schema
+from app.services.supply_chain_service import ensure_supply_chain_schema
 from app.services.dashboard_service import home_snapshot
 
 
@@ -118,6 +120,7 @@ def create_app() -> FastAPI:
     enforce_strict_postgres_ready()
     ensure_sec_ingest_schema()
     ensure_ai_insight_schema()
+    ensure_supply_chain_schema()
     # Phase 3.1: event infrastructure
     from app.services.events_service import ensure_events_schema
     ensure_events_schema()
@@ -125,6 +128,9 @@ def create_app() -> FastAPI:
     ensure_poller_schema()
     from app.services.earnings_transcript_service import ensure_earnings_analysis_schema
     ensure_earnings_analysis_schema()
+    # Phase 3.5: multi-agent debate schema
+    from app.services.debate_service import ensure_debate_schema
+    ensure_debate_schema()
 
     refresh_stop = threading.Event()
     app.state.market_refresh_stop = refresh_stop
@@ -221,7 +227,7 @@ def create_app() -> FastAPI:
             refresh_stop.set()
         except Exception:
             pass
-        for attr in ("market_refresh_thread", "outcome_measurement_thread", "sec_poll_thread"):
+        for attr in ("market_refresh_thread", "outcome_measurement_thread", "sec_poll_thread", "form4_poll_thread"):
             th = getattr(app.state, attr, None)
             if th is not None:
                 try:
@@ -235,6 +241,7 @@ def create_app() -> FastAPI:
     app.include_router(observability_router)
     app.include_router(company_file_router)
     app.include_router(ai_router)
+    app.include_router(supply_chain_router)
 
     return app
 

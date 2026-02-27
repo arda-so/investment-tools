@@ -3,9 +3,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-from pathlib import Path
 
+from app.core import cloud_files
 from app.core.config import ROOT
+from app.services.portfolio_state_service import read_portfolio_rows_state, read_watchlist_rows_state
 
 
 REPORTS_DIR = ROOT / "reports"
@@ -80,9 +81,10 @@ def _display_title(name: str, kind: str) -> str:
 
 def _load_read_state() -> dict[str, str]:
     try:
-        if not READ_STATE_PATH.exists():
+        raw_txt = cloud_files.read_text("data/reports_read_state.json")
+        if not raw_txt:
             return {}
-        obj = json.loads(READ_STATE_PATH.read_text(encoding="utf-8", errors="ignore"))
+        obj = json.loads(raw_txt)
         if not isinstance(obj, dict):
             return {}
         out: dict[str, str] = {}
@@ -97,8 +99,7 @@ def _load_read_state() -> dict[str, str]:
 
 
 def _write_read_state(data: dict[str, str]) -> None:
-    READ_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    READ_STATE_PATH.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
+    cloud_files.write_text("data/reports_read_state.json", json.dumps(data, ensure_ascii=True, indent=2))
 
 
 def mark_report_read(name: str) -> None:
@@ -127,31 +128,22 @@ def mark_reports_read(names: list[str]) -> int:
 def _portfolio_watchlist_tickers() -> tuple[set[str], set[str]]:
     pset: set[str] = set()
     wset: set[str] = set()
-    p = ROOT / "data" / "portfolio.csv"
-    if p.exists():
-        for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            parts = [x.strip().upper() for x in ln.split(",")]
-            t = re.sub(r"[^A-Z0-9.\-]", "", parts[0] if parts else "")
-            if t:
-                pset.add(t)
-    w = ROOT / "data" / "my_watchlist.txt"
-    if w.exists():
-        for ln in w.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = ln.strip()
-            if not s or s.startswith("#"):
-                continue
-            parts = [x.strip().upper() for x in s.split(",")]
-            t = re.sub(r"[^A-Z0-9.\-]", "", parts[0] if parts else "")
-            if t:
-                wset.add(t)
+    for r in read_portfolio_rows_state():
+        t = re.sub(r"[^A-Z0-9.\-]", "", str(r.get("ticker") or "").strip().upper())
+        if t:
+            pset.add(t)
+    for r in read_watchlist_rows_state():
+        t = re.sub(r"[^A-Z0-9.\-]", "", str(r.get("ticker") or "").strip().upper())
+        if t:
+            wset.add(t)
     return pset, wset
 
 
 def _read_report_text(name: str, max_chars: int = 220_000) -> str:
-    p = REPORTS_DIR / str(name or "").strip()
-    if not p.exists() or not p.is_file():
+    n = str(name or "").strip()
+    if not n:
         return ""
-    txt = p.read_text(encoding="utf-8", errors="ignore")
+    txt = cloud_files.read_text(f"reports/{n}")
     return txt[:max_chars]
 
 
@@ -234,37 +226,28 @@ def _score_report(name: str, kind: str, modified: str, pset: set[str], wset: set
 
 
 def list_reports(limit: int = 300) -> list[dict[str, str]]:
-    if not REPORTS_DIR.exists():
-        return []
     read_state = _load_read_state()
     pset, wset = _portfolio_watchlist_tickers()
     out: list[dict[str, str]] = []
-    files = [
-        p
-        for p in REPORTS_DIR.iterdir()
-        if p.is_file()
-        and p.suffix.lower() in {".md", ".txt", ".json", ".html"}
-        and not p.name.startswith(".")
-    ]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for p in files[: max(1, min(2000, int(limit)))]:
-        st = p.stat()
-        kind = _kind_for_name(p.name)
+    files = cloud_files.list_files("reports", suffixes={".md", ".txt", ".json", ".html"})
+    for f in files[: max(1, min(2000, int(limit)))]:
+        kind = _kind_for_name(f.name)
+        modified = f.modified.strftime("%Y-%m-%d %H:%M:%S")
         score, reason, hits = _score_report(
-            name=p.name,
+            name=f.name,
             kind=kind,
-            modified=dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            modified=modified,
             pset=pset,
             wset=wset,
         )
         out.append(
             {
-                "name": p.name,
+                "name": f.name,
                 "kind": kind,
-                "title": _display_title(p.name, kind),
-                "size_kb": f"{st.st_size/1024.0:.1f}",
-                "modified": dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                "unread": "1" if not read_state.get(p.name) else "0",
+                "title": _display_title(f.name, kind),
+                "size_kb": f"{float(f.size)/1024.0:.1f}",
+                "modified": modified,
+                "unread": "1" if not read_state.get(f.name) else "0",
                 "priority_score": str(score),
                 "priority_reason": reason,
                 "ticker_hits": ", ".join(hits),
@@ -437,11 +420,10 @@ def read_report_file(name: str, max_chars: int = 500_000) -> tuple[str, str]:
         return "", "Report name is required."
     if "/" in n or "\\" in n or n.startswith("."):
         return "", "Invalid report name."
-    p = REPORTS_DIR / n
-    if not p.exists() or not p.is_file():
+    if not cloud_files.exists(f"reports/{n}"):
         return "", "Report not found."
     try:
-        txt = p.read_text(encoding="utf-8", errors="ignore")
+        txt = cloud_files.read_text(f"reports/{n}")
     except Exception as e:
         return "", f"Could not read report: {str(e)[:120]}"
     if len(txt) > max_chars:

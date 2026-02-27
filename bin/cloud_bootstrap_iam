@@ -33,6 +33,7 @@ roles=(
   "roles/artifactregistry.reader"
   "roles/logging.logWriter"
   "roles/monitoring.metricWriter"
+  "roles/storage.objectAdmin"
 )
 
 for role in "${roles[@]}"; do

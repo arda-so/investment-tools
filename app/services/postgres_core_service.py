@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -284,11 +285,16 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
                 accession TEXT NOT NULL DEFAULT '',
                 doc_url TEXT NOT NULL DEFAULT '',
                 path TEXT NOT NULL DEFAULT '',
-                downloaded_at TEXT NOT NULL DEFAULT ''
+                downloaded_at TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT ''
             )
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_filings_core_ticker_date ON filings_core(ticker, date DESC)")
+        # Migration: add content column to existing tables that don't have it yet
+        cur.execute("""
+            ALTER TABLE filings_core ADD COLUMN IF NOT EXISTS content TEXT NOT NULL DEFAULT ''
+        """)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS report_facts_core (
@@ -521,6 +527,22 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_core_name ON companies_core(name)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS universe_registry_core (
+                ticker TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                cik TEXT NOT NULL DEFAULT '',
+                exchange TEXT NOT NULL DEFAULT '',
+                is_us_listed BOOLEAN NOT NULL DEFAULT FALSE,
+                is_otc BOOLEAN NOT NULL DEFAULT FALSE,
+                source TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_universe_registry_core_exchange ON universe_registry_core(exchange)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_universe_registry_core_us ON universe_registry_core(is_us_listed)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS company_lists_core (
@@ -1171,6 +1193,7 @@ def sync_core_from_sqlite() -> dict[str, Any]:
         "memory_compact_core": 0,
         "company_profile_cache_core": 0,
         "companies_core": 0,
+        "universe_registry_core": 0,
         "company_lists_core": 0,
         "company_list_items_core": 0,
         "company_moat_tags_core": 0,
@@ -1207,8 +1230,9 @@ def sync_core_from_sqlite() -> dict[str, Any]:
     }
     try:
         cp = con_pg.cursor()
-        for r in con_sq.execute("SELECT * FROM action_proposals").fetchall():
-            cp.execute(
+        if _sqlite_table_exists(con_sq, "action_proposals"):
+            for r in con_sq.execute("SELECT * FROM action_proposals").fetchall():
+                cp.execute(
                 """
                 INSERT INTO action_proposals_core
                 (id, created_at, updated_at, status, kind, ticker, title, thesis_json, citations_json, insights_json, reasoning_json,
@@ -1250,11 +1274,12 @@ def sync_core_from_sqlite() -> dict[str, Any]:
                     str(r["rejected_at"] or ""),
                     str(r["executed_at"] or ""),
                 ),
-            )
-            counts["action_proposals_core"] += 1
+                )
+                counts["action_proposals_core"] += 1
 
-        for r in con_sq.execute("SELECT * FROM portfolio_transactions").fetchall():
-            cp.execute(
+        if _sqlite_table_exists(con_sq, "portfolio_transactions"):
+            for r in con_sq.execute("SELECT * FROM portfolio_transactions").fetchall():
+                cp.execute(
                 """
                 INSERT INTO portfolio_transactions_core (id, created_at, ticker, action, shares, price, note, source, meta_json)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
@@ -1273,11 +1298,12 @@ def sync_core_from_sqlite() -> dict[str, Any]:
                     str(r["source"] or ""),
                     json.dumps(json.loads(str(r["meta_json"] or "{}")), ensure_ascii=True),
                 ),
-            )
-            counts["portfolio_transactions_core"] += 1
+                )
+                counts["portfolio_transactions_core"] += 1
 
-        for r in con_sq.execute("SELECT * FROM watchlist_thesis").fetchall():
-            cp.execute(
+        if _sqlite_table_exists(con_sq, "watchlist_thesis"):
+            for r in con_sq.execute("SELECT * FROM watchlist_thesis").fetchall():
+                cp.execute(
                 """
                 INSERT INTO watchlist_thesis_core
                 (ticker, thesis, thesis_summary, pick_method, triggers, invalidation, conviction_rating, time_horizon, invalidation_criteria, strategy_tag, pattern_learnable, status, created_at, updated_at)
@@ -1303,22 +1329,24 @@ def sync_core_from_sqlite() -> dict[str, Any]:
                     str(r["created_at"] or ""),
                     str(r["updated_at"] or ""),
                 ),
-            )
-            counts["watchlist_thesis_core"] += 1
+                )
+                counts["watchlist_thesis_core"] += 1
 
-        for r in con_sq.execute("SELECT key, answer, created_at, updated_at FROM investor_style_memory").fetchall():
-            cp.execute(
+        if _sqlite_table_exists(con_sq, "investor_style_memory"):
+            for r in con_sq.execute("SELECT key, answer, created_at, updated_at FROM investor_style_memory").fetchall():
+                cp.execute(
                 """
                 INSERT INTO investor_style_memory_core(key, answer, created_at, updated_at)
                 VALUES (%s,%s,%s,%s)
                 ON CONFLICT(key) DO UPDATE SET answer=EXCLUDED.answer, updated_at=EXCLUDED.updated_at
                 """,
                 (str(r["key"] or ""), str(r["answer"] or ""), str(r["created_at"] or ""), str(r["updated_at"] or "")),
-            )
-            counts["investor_style_memory_core"] += 1
+                )
+                counts["investor_style_memory_core"] += 1
 
-        for r in con_sq.execute("SELECT id, ticker, form, date, accession, doc_url, path, downloaded_at FROM filings").fetchall():
-            cp.execute(
+        if _sqlite_table_exists(con_sq, "filings"):
+            for r in con_sq.execute("SELECT id, ticker, form, date, accession, doc_url, path, downloaded_at FROM filings").fetchall():
+                cp.execute(
                 """
                 INSERT INTO filings_core(id, ticker, form, date, accession, doc_url, path, downloaded_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
@@ -1336,13 +1364,14 @@ def sync_core_from_sqlite() -> dict[str, Any]:
                     str(r["path"] or ""),
                     str(r["downloaded_at"] or ""),
                 ),
-            )
-            counts["filings_core"] += 1
+                )
+                counts["filings_core"] += 1
 
-        for r in con_sq.execute(
-            "SELECT id, report_name, report_kind, report_modified, fact_date, ticker, fact_text, importance, source, fact_hash, created_at FROM report_facts"
-        ).fetchall():
-            cp.execute(
+        if _sqlite_table_exists(con_sq, "report_facts"):
+            for r in con_sq.execute(
+                "SELECT id, report_name, report_kind, report_modified, fact_date, ticker, fact_text, importance, source, fact_hash, created_at FROM report_facts"
+            ).fetchall():
+                cp.execute(
                 """
                 INSERT INTO report_facts_core
                 (id, report_name, report_kind, report_modified, fact_date, ticker, fact_text, importance, source, fact_hash, created_at)
@@ -1365,8 +1394,8 @@ def sync_core_from_sqlite() -> dict[str, Any]:
                     str(r["fact_hash"] or ""),
                     str(r["created_at"] or ""),
                 ),
-            )
-            counts["report_facts_core"] += 1
+                )
+                counts["report_facts_core"] += 1
 
         if _sqlite_table_exists(con_sq, "todos"):
             for r in con_sq.execute(
@@ -1550,6 +1579,32 @@ def sync_core_from_sqlite() -> dict[str, Any]:
                     ),
                 )
                 counts["companies_core"] += 1
+
+        if _sqlite_table_exists(con_sq, "universe_registry"):
+            for r in con_sq.execute(
+                "SELECT ticker, name, cik, exchange, is_us_listed, is_otc, source, updated_at FROM universe_registry"
+            ).fetchall():
+                cp.execute(
+                    """
+                    INSERT INTO universe_registry_core(ticker, name, cik, exchange, is_us_listed, is_otc, source, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                      name=EXCLUDED.name, cik=EXCLUDED.cik, exchange=EXCLUDED.exchange,
+                      is_us_listed=EXCLUDED.is_us_listed, is_otc=EXCLUDED.is_otc,
+                      source=EXCLUDED.source, updated_at=EXCLUDED.updated_at
+                    """,
+                    (
+                        str(r["ticker"] or "").upper(),
+                        str(r["name"] or ""),
+                        str(r["cik"] or ""),
+                        str(r["exchange"] or ""),
+                        bool(int(r["is_us_listed"] or 0)),
+                        bool(int(r["is_otc"] or 0)),
+                        str(r["source"] or ""),
+                        str(r["updated_at"] or ""),
+                    ),
+                )
+                counts["universe_registry_core"] += 1
 
         if _sqlite_table_exists(con_sq, "company_lists"):
             for r in con_sq.execute("SELECT id, name, created_at, updated_at FROM company_lists").fetchall():
@@ -2345,6 +2400,7 @@ def verify_core_counts() -> dict[str, Any]:
             ("memory_compact", "memory_compact_core"),
             ("company_profile_cache", "company_profile_cache_core"),
             ("companies", "companies_core"),
+            ("universe_registry", "universe_registry_core"),
             ("company_lists", "company_lists_core"),
             ("company_list_items", "company_list_items_core"),
             ("company_moat_tags", "company_moat_tags_core"),
@@ -2419,6 +2475,7 @@ def verify_postgres_core_ready() -> dict[str, Any]:
         "company_reminders_core",
         "company_profile_cache_core",
         "companies_core",
+        "universe_registry_core",
         "company_lists_core",
         "company_list_items_core",
         "company_moat_tags_core",
@@ -2514,9 +2571,25 @@ def enforce_strict_postgres_ready() -> dict[str, Any]:
         return {"ok": True, "strict": False, "enforced": False, "reason": "strict_disabled"}
     if core_backend() != "postgres":
         raise RuntimeError("strict_postgres_requires_core_db_backend_postgres")
-    v = verify_postgres_core_ready()
-    if not bool(v.get("ok")):
-        raise RuntimeError("strict_postgres_verify_failed:" + str(v.get("error") or "unknown"))
+
+    is_cloud = _is_non_dev_env() or str(os.getenv("APP_ENV", "")).strip().lower() == "cloud"
+    try:
+        max_wait = float(os.getenv("STRICT_POSTGRES_READY_MAX_WAIT_SEC", "45" if is_cloud else "5"))
+    except Exception:
+        max_wait = 45.0 if is_cloud else 5.0
+    try:
+        sleep_sec = float(os.getenv("STRICT_POSTGRES_READY_RETRY_SEC", "2"))
+    except Exception:
+        sleep_sec = 2.0
+    deadline = time.time() + max(0.0, max_wait)
+    v: dict[str, Any] = {"ok": False, "error": "not_checked"}
+    while True:
+        v = verify_postgres_core_ready()
+        if bool(v.get("ok")):
+            break
+        if time.time() >= deadline:
+            raise RuntimeError("strict_postgres_verify_failed:" + str(v.get("error") or "unknown"))
+        time.sleep(max(0.2, sleep_sec))
     return {"ok": True, "strict": True, "enforced": True, "reason": "postgres_ready", "verify": v}
 
 
@@ -4587,6 +4660,42 @@ def resolve_action_queue_pg(action_id: int, decision: str) -> bool:
         except Exception:
             pass
         return False
+    finally:
+        con.close()
+
+
+def list_action_log_pg(limit: int = 120) -> list[dict[str, str]]:
+    con = pg_connect()
+    if con is None:
+        return []
+    lim = max(1, min(1000, int(limit or 120)))
+    out: list[dict[str, str]] = []
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT id, created_at, query, intent, status, confidence, payload_json
+            FROM ai_action_log_core
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (lim,),
+        )
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": str((r[0] if isinstance(r, (tuple, list)) else r["id"]) or ""),
+                    "created_at": str((r[1] if isinstance(r, (tuple, list)) else r["created_at"]) or ""),
+                    "query": str((r[2] if isinstance(r, (tuple, list)) else r["query"]) or ""),
+                    "intent": str((r[3] if isinstance(r, (tuple, list)) else r["intent"]) or ""),
+                    "status": str((r[4] if isinstance(r, (tuple, list)) else r["status"]) or ""),
+                    "confidence": str((r[5] if isinstance(r, (tuple, list)) else r["confidence"]) or "0"),
+                    "payload_json": str((r[6] if isinstance(r, (tuple, list)) else r["payload_json"]) or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
     finally:
         con.close()
 

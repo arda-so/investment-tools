@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  cat <<'USAGE'
+Usage: ./bin/run_cloud_app
+
+Quick deploy wrapper for Cloud Run app service.
+Defaults:
+  DEPLOY_WORKER=0
+  PROJECT_ID=onyx-terminal-487613
+  REGION=europe-west1
+  DB_INSTANCE=investor-os-pg
+  SERVICE_ACCOUNT=investor-tools-runtime@onyx-terminal-487613.iam.gserviceaccount.com
+
+Override with environment variables, for example:
+  PROJECT_ID=my-project REGION=us-central1 ./bin/run_cloud_app
+USAGE
+  exit 0
+fi
+
+export DEPLOY_WORKER="${DEPLOY_WORKER:-0}"
+export PROJECT_ID="${PROJECT_ID:-onyx-terminal-487613}"
+export REGION="${REGION:-europe-west1}"
+export DB_INSTANCE="${DB_INSTANCE:-investor-os-pg}"
+export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-investor-tools-runtime@onyx-terminal-487613.iam.gserviceaccount.com}"
+
+echo "run_cloud_app: DEPLOY_WORKER=$DEPLOY_WORKER PROJECT_ID=$PROJECT_ID REGION=$REGION DB_INSTANCE=$DB_INSTANCE"
+exec "$ROOT/bin/deploy_cloud_run.sh"

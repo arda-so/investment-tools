@@ -6,11 +6,14 @@ import json
 import math
 import re
 import sqlite3
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from app.core.config import ROOT
 from app.core.db import core_conn as _conn_core, onyx_conn as _conn_onyx, sqlite_retry
+from app.core import cloud_files
 from app.core.filing_text import resolve_filing_path, read_filing_text
 from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.organizer_service import add_general_note
@@ -18,6 +21,7 @@ from app.services.postgres_core_service import core_backend, pg_connect, strict_
 from app.services.proactive_ai_service import detect_thesis_breaches, ensure_proactive_schema, run_event_driven_monitor
 from app.services.company_intel_service import get_company_intel, maybe_refresh_company_intel_on_filing
 from app.services.mini_statements_service import get_mini_statements
+from app.services.supply_chain_service import ingest_sec_relationship_to_network
 
 try:
     from tools.llm_engine import ask_ai
@@ -734,6 +738,74 @@ def _read_filing_text(path_s: str, form: str = "") -> str:
         return ""
 
 
+def _fetch_url_text(url: str, timeout_sec: int = 20) -> str:
+    u = str(url or "").strip()
+    if not u.lower().startswith(("http://", "https://")):
+        return ""
+    req = urllib.request.Request(
+        u,
+        headers={
+            "User-Agent": "InvestorOS SEC Ingest/1.0 (research@investoros.local)",
+            "Accept": "text/html, text/plain, */*",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=max(5, int(timeout_sec or 20))) as resp:
+            return str(resp.read().decode("utf-8", errors="ignore") or "")
+    except Exception:
+        return ""
+
+
+def _sec_doc_candidates(doc_url: str) -> list[str]:
+    base = str(doc_url or "").strip()
+    if not base:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    # SEC filing index URL often has full-text submission as same accession .txt
+    if base.lower().endswith("-index.html"):
+        out.append(base[:-11] + ".txt")
+    out.append(base)
+    low = base.lower()
+    if low.endswith(".htm"):
+        out.append(base[:-4] + ".txt")
+    if low.endswith(".html"):
+        out.append(base[:-5] + ".txt")
+    uniq: list[str] = []
+    for u in out:
+        if u and u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
+
+
+def _load_or_fetch_filing_text(
+    *,
+    ticker: str,
+    form: str,
+    path_s: str,
+    doc_url: str,
+    filing_id: int,
+) -> tuple[str, str]:
+    txt = _read_filing_text(path_s, form=form)
+    if txt:
+        return txt, str(path_s or "")
+    for cand in _sec_doc_candidates(doc_url):
+        raw = _fetch_url_text(cand, timeout_sec=20)
+        if not raw or len(raw) < 300:
+            continue
+        parsed = _extract_primary_doc_from_submission(raw, form=form) or raw
+        if len(parsed) < 300:
+            continue
+        # Persist fetched text so future passes don't refetch.
+        safe_id = re.sub(r"[^A-Za-z0-9\-]", "", str(filing_id or 0))
+        rel_path = f"filing_docs/{ticker}_{form}_{safe_id}_fetched.txt"
+        if cloud_files.write_text(rel_path, parsed):
+            return parsed, rel_path
+        return parsed, str(path_s or "")
+    return "", str(path_s or "")
+
+
 def _scope_tickers() -> set[str]:
     out: set[str] = set()
     p = ROOT / "data" / "portfolio.csv"
@@ -1068,7 +1140,34 @@ def _process_one_filing(
     form = str(row["form"] or "").strip().upper()
     filing_date = str(row["date"] or "").strip()
     fpath = str(row["path"] or "").strip()
-    txt = _read_filing_text(fpath, form=form)
+    doc_url = str(row.get("doc_url") or "").strip() if isinstance(row, dict) else ""
+    txt, fetched_path = _load_or_fetch_filing_text(
+        ticker=ticker,
+        form=form,
+        path_s=fpath,
+        doc_url=doc_url,
+        filing_id=filing_id,
+    )
+    if fetched_path and fetched_path != fpath:
+        fpath = fetched_path
+        if core_backend() == "postgres":
+            con_fix = pg_connect()
+            if con_fix is not None:
+                try:
+                    cur_fix = con_fix.cursor()
+                    # Update path and back-fill content so Cloud Run can read it without GCS
+                    cur_fix.execute(
+                        "UPDATE filings_core SET path=%s, content=CASE WHEN content='' THEN %s ELSE content END WHERE id=%s",
+                        (fpath, str(txt or ""), filing_id),
+                    )
+                    con_fix.commit()
+                except Exception:
+                    try:
+                        con_fix.rollback()
+                    except Exception:
+                        pass
+                finally:
+                    con_fix.close()
     if filing_id <= 0 or not ticker or not txt:
         return {"chunks": 0, "entities": 0, "relationships": 0}
 
@@ -1194,6 +1293,43 @@ def _process_one_filing(
                     _link(con_onyx, company_id, tid, rel_type, cite, ev, conf=conf_rc)
             rel_rows += 1
 
+        # Auto-wire SEC extraction output into Supply Chain Mapper graph tables.
+        # Mapping:
+        # - SUPPLIER_TO: ticker supplies target => (ticker -> target) supplies
+        # - CUSTOMER_OF: ticker is customer of target => (target -> ticker) supplies
+        # - COMPETES_WITH: kept as non-directional partnership proxy
+        try:
+            conf_100 = max(1, min(100, int(round(conf_rc * 100.0))))
+            if rel_type == "SUPPLIER_TO":
+                ingest_sec_relationship_to_network(
+                    source_ticker=ticker,
+                    target_ticker=target,
+                    relationship_type="supplies",
+                    evidence_text=ev,
+                    source_url=cite,
+                    confidence_score=conf_100,
+                )
+            elif rel_type == "CUSTOMER_OF":
+                ingest_sec_relationship_to_network(
+                    source_ticker=target,
+                    target_ticker=ticker,
+                    relationship_type="supplies",
+                    evidence_text=ev,
+                    source_url=cite,
+                    confidence_score=conf_100,
+                )
+            elif rel_type == "COMPETES_WITH":
+                ingest_sec_relationship_to_network(
+                    source_ticker=ticker,
+                    target_ticker=target,
+                    relationship_type="partners_with",
+                    evidence_text=ev,
+                    source_url=cite,
+                    confidence_score=max(40, min(conf_100, 85)),
+                )
+        except Exception:
+            pass
+
     competitor_mda = _recent_competitor_mda(ticker=ticker, limit=6)
     try:
         maybe_refresh_company_intel_on_filing(ticker=ticker, form=form, filing_date=filing_date, max_stale_days=14)
@@ -1284,13 +1420,17 @@ def _process_one_filing(
     return {"chunks": chunk_rows, "entities": entity_rows, "relationships": rel_rows}
 
 
-def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
+def process_new_filings_pipeline(
+    filing_ids: list[int],
+    *,
+    scope_override: set[str] | None = None,
+) -> dict[str, Any]:
     ensure_sec_ingest_schema()
     ids = sorted({int(x) for x in list(filing_ids or []) if int(x) > 0})
     if not ids:
         return {"ok": True, "processed": 0, "chunks": 0, "entities": 0, "relationships": 0, "monitor": {}}
 
-    scope = _scope_tickers()
+    scope = set(scope_override or set()) or _scope_tickers()
     blue_chip_tickers = _blue_chip_set()
     con_core = None if core_backend() == "postgres" else _conn_core()
     con_onyx = None if core_backend() == "postgres" else _conn_onyx()
@@ -1308,7 +1448,7 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
                     marks_pg = ",".join("%s" for _ in ids)
                     cur = con_pg.cursor()
                     cur.execute(
-                        f"""SELECT id, ticker, form, path, date
+                        f"""SELECT id, ticker, form, path, date, doc_url
                             FROM filings_core
                             WHERE id IN ({marks_pg})
                             ORDER BY id ASC""",
@@ -1321,6 +1461,7 @@ def process_new_filings_pipeline(filing_ids: list[int]) -> dict[str, Any]:
                             "form": str(r[2] or ""),
                             "path": str(r[3] or ""),
                             "date": str(r[4] or ""),
+                            "doc_url": str(r[5] or ""),
                         }
                         for r in (cur.fetchall() or [])
                     ]
@@ -1408,7 +1549,7 @@ def ingest_sec_facts_for_ticker(
             pass
     if not ids:
         return {"ok": True, "selected": 0, "processed": 0, "chunks": 0, "entities": 0, "relationships": 0}
-    out = process_new_filings_pipeline(ids)
+    out = process_new_filings_pipeline(ids, scope_override={tk})
     out["selected"] = len(ids)
     out["ticker"] = tk
     return out

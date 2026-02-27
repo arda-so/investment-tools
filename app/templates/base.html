@@ -209,6 +209,8 @@
     .topbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
     .title{font-weight:800;letter-spacing:.01em;}
     .btn { border:1px solid var(--border2); background:var(--panel2); color:var(--text); border-radius:8px; padding:6px 10px; text-decoration:none; font-size:12px; font-weight:700; cursor:pointer; }
+    .btn-ghost-sm { border:none; background:transparent; color:var(--text2,#8a9baa); padding:2px 5px; font-size:12px; line-height:1; border-radius:4px; cursor:pointer; }
+    .btn-ghost-sm:hover { background:var(--panel2,#edf2f6); color:var(--text,#2f4358); }
     input, textarea, select { width:100%; box-sizing:border-box; border:1px solid #c8d3dd; border-radius:8px; background:#edf2f6; color:#2f4358; padding:8px; }
     button { border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:8px; padding:8px 10px; font-weight:700; cursor:pointer; }
     table { width:100%; border-collapse:collapse; }
@@ -283,32 +285,30 @@
       width:22px; height:22px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center;
       font-size:12px; margin-right:8px; margin-top:4px; background:#e2e8f0; color:#334155;
     }
-    .md p{margin:0 0 8px 0;}
+    .md p{margin:0 0 10px 0;}
     .md p:last-child{margin-bottom:0;}
-    .md ul,.md ol{margin:6px 0 8px 18px; padding:0;}
-    .md li{margin:3px 0;}
-    .md h1,.md h2,.md h3{margin:8px 0 6px 0; font-size:16px; line-height:1.3;}
+    .md ul,.md ol{margin:8px 0 12px 18px; padding:0;}
+    .md li{margin:4px 0;}
+    .md h1,.md h2,.md h3{margin:12px 0 8px 0; font-size:16px; line-height:1.35;}
+    .num-pos{color:#15803d; font-weight:700;}
+    .num-neg{color:#b91c1c; font-weight:700;}
     .msg-meta{
       margin-top:8px; font-size:11px; color:#64748b;
     }
-    .msg-status{margin-top:8px; font-size:10px; color:#9aa7b8; display:flex; gap:8px; align-items:center;}
-    .msg-status .status-link{
-      color:#8aa0b8; cursor:pointer; border:1px solid #d7e1eb; background:#fff; padding:0;
-      font-size:11px; width:18px; height:18px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center;
+    .msg-status{margin-top:8px; font-size:11px; color:#64748b;}
+    .msg-audit{margin-top:8px; border:1px solid #d4deea; border-radius:10px; background:#f8fafc; overflow:hidden;}
+    .msg-audit summary{
+      list-style:none; cursor:pointer; padding:8px 10px; font-size:11px; font-weight:700; color:#334155;
+      display:flex; align-items:center; gap:8px;
     }
-    .msg-status .status-link:hover{color:#5f7892; border-color:#c8d6e4;}
-    .msg-logs{
-      margin-top:6px; border:1px solid #d7dee8; border-radius:10px; background:#f8fafc; padding:8px;
-      font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.45; color:#334155;
-    }
-    .traces{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;}
-    .trace-chip{
-      border:1px solid #d5deea; background:#fff; color:#475569; border-radius:999px; padding:2px 8px; font-size:10px;
-      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    .msg-audit summary::-webkit-details-marker{display:none;}
+    .msg-terminal{
+      margin:0; padding:10px 12px; background:#0f172a; color:#cbd5e1;
+      border-top:1px solid #1e293b; font-size:11px; line-height:1.55;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap;
     }
     .ai-foot{
       border-top:1px solid #e2e8f0; padding:10px 12px; background:rgba(255,255,255,.82);
-      backdrop-filter: blur(8px);
     }
     .ai-chips-row{
       display:flex; gap:8px; overflow-x:auto; white-space:nowrap; padding-bottom:8px;
@@ -319,21 +319,35 @@
       border-radius:999px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer;
       flex:0 0 auto;
     }
-    .ai-input-wrap{position:relative;}
+    .ai-input-wrap{
+      display:flex;
+      align-items:flex-end;
+      gap:8px;
+      border:1px solid #d8e2ed;
+      border-radius:16px;
+      background:#ffffff;
+      color:#1f2f46;
+      min-height:52px;
+      padding:6px 8px;
+      box-shadow:0 4px 10px rgba(15,23,42,.06);
+    }
     .ai-input-wrap.drop-active{
-      border-radius:14px;
       box-shadow:0 0 0 3px rgba(59,130,246,.18) inset;
       background:rgba(239,246,255,.65);
     }
-    .ai-input-tools{display:flex; gap:8px; margin-top:8px; align-items:center;}
+    .ai-input-actions-left,.ai-input-actions-right{
+      display:flex; align-items:center; gap:6px; flex:0 0 auto;
+    }
     .ai-upload-btn{
-      border:1px solid #d2ddea; background:#fff; color:#334155;
-      border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; cursor:pointer;
+      border:1px solid transparent; background:transparent; color:#334155;
+      border-radius:10px; padding:6px 8px; font-size:14px; font-weight:700; cursor:pointer;
     }
+    .ai-upload-btn:hover{ background:#f1f5f9; border-color:#d2ddea; }
     .ai-voice-btn{
-      border:1px solid #d2ddea; background:#fff; color:#334155;
-      border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; cursor:pointer;
+      border:1px solid transparent; background:transparent; color:#334155;
+      border-radius:10px; padding:6px 8px; font-size:14px; font-weight:700; cursor:pointer;
     }
+    .ai-voice-btn:hover{ background:#f1f5f9; border-color:#d2ddea; }
     .ai-voice-btn.listening{
       border-color:#ef4444; color:#b91c1c; background:#fff1f2;
     }
@@ -361,88 +375,32 @@
     }
     #aiCmdInput{
       width:100%;
+      flex:1 1 auto;
       box-sizing:border-box;
-      border:1px solid #d8e2ed;
-      border-radius:999px;
-      background:#ffffff;
+      border:none;
+      border-radius:10px;
+      background:transparent;
       color:#1f2f46;
-      padding:13px 110px 13px 16px;
+      padding:10px 6px;
       height:52px;
       font-size:15px;
-      box-shadow:0 10px 24px rgba(15,23,42,.08);
     }
     #aiCmdInput:focus{
       outline:none;
-      border-color:#89a8c7;
-      box-shadow:0 0 0 3px rgba(59,130,246,.12);
+      box-shadow:none;
     }
     .ai-meta{font-size:11px;color:#64748b;}
-    .ai-phase2{
-      margin-top:8px;
-      border:1px solid #dbe4ee;
-      border-radius:12px;
-      background:#f8fafc;
-      padding:8px;
-      display:grid;
-      gap:6px;
-    }
-    .ai-phase2-top{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:8px;
-      flex-wrap:wrap;
-    }
-    .ai-phase2-title{
-      font-size:11px;
-      font-weight:800;
-      color:#334155;
-      letter-spacing:.03em;
-      text-transform:uppercase;
-    }
-    .ai-phase2-status{
-      font-size:11px;
-      color:#334155;
-      font-weight:700;
-    }
-    .ai-phase2-grid{
-      display:grid;
-      grid-template-columns:1fr 1fr;
-      gap:6px;
-    }
-    .ai-phase2-grid input{
-      height:32px;
-      font-size:12px;
-      padding:6px 10px;
-      border-radius:9px;
-      background:#fff;
-    }
-    .ai-phase2-run{
-      border:1px solid #d2ddea;
-      background:#fff;
-      color:#1f2f46;
-      border-radius:9px;
-      font-size:12px;
-      font-weight:800;
-      padding:6px 10px;
-      cursor:pointer;
-    }
-    .ai-phase2-run[disabled]{ opacity:.65; cursor:not-allowed; }
-    .ai-phase2-progress{
-      font-size:11px;
-      color:#475569;
-      line-height:1.3;
-      min-height:14px;
-    }
-    @media (max-width:780px){
-      .ai-phase2-grid{ grid-template-columns:1fr; }
-    }
     .ai-chip{display:inline-block;border:1px solid #d2ddea;background:#f7fbff;color:#304a62;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;}
     .ai-rich-card{
       margin-top:8px; border:1px solid #dbe3ee; border-radius:10px; background:#f8fafc; padding:10px;
     }
     .ai-rich-title{font-size:12px; font-weight:800; color:#334155; margin-bottom:6px;}
     .ai-rich-body{font-size:13px; color:#334155; line-height:1.5;}
+    .ai-rich-actions{margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;}
+    .ai-rich-btn{
+      border:1px solid #c7d6e6; background:#ffffff; color:#0f172a;
+      border-radius:8px; padding:5px 9px; font-size:12px; font-weight:700; text-decoration:none;
+    }
     .ai-toast-wrap{
       position:fixed; right:14px; top:14px; z-index:10005; display:flex; flex-direction:column; gap:8px; max-width:360px;
     }
@@ -477,10 +435,7 @@
     .task-main{font-size:13px; color:#0f172a; line-height:1.35;}
     .task-main p{margin:0;}
     .task-due{font-size:11px; color:#64748b; margin-top:2px;}
-    #aiSendBtn{
-      position:absolute; right:6px; top:50%; transform:translateY(-50%);
-      height:38px; min-width:78px; border-radius:999px; font-size:12px; padding:0 14px;
-    }
+    #aiSendBtn{height:38px; min-width:72px; border-radius:999px; font-size:12px; padding:0 12px; flex:0 0 auto;}
     .ai-open {
       position:fixed;
       right:14px;
@@ -635,19 +590,21 @@
         </div>
         <form id="aiCmdForm">
           <div class="ai-input-wrap">
-            <input id="aiCmdInput" placeholder="Ask Investor OS..." autocomplete="off" autofocus>
-            <button id="aiSendBtn" type="submit">Send</button>
-          </div>
-          <div class="ai-input-tools">
-            <button id="aiImageBtn" class="ai-upload-btn" type="button">Upload Image</button>
+            <div class="ai-input-actions-left">
+              <button id="aiImageBtn" class="ai-upload-btn" type="button" aria-label="Upload Image">📎</button>
+              <button id="aiVoiceBtn" class="ai-voice-btn" type="button" aria-label="Voice Input">🎤</button>
+            </div>
+            <input id="aiCmdInput" placeholder="Ask Investor OS..." autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" autofocus>
             <input id="aiImageInput" type="file" accept="image/png,image/jpeg,image/webp" style="display:none;">
-            <button id="aiVoiceBtn" class="ai-voice-btn" type="button">Mic</button>
-            <select id="aiVoiceRate" class="ai-voice-rate" title="Voice speed">
-              <option value="0.9">0.9x</option>
-              <option value="1.0" selected>1.0x</option>
-              <option value="1.15">1.15x</option>
-              <option value="1.3">1.3x</option>
-            </select>
+            <div class="ai-input-actions-right">
+              <select id="aiVoiceRate" class="ai-voice-rate" title="Voice speed">
+                <option value="0.9">0.9x</option>
+                <option value="1.0" selected>1.0x</option>
+                <option value="1.15">1.15x</option>
+                <option value="1.3">1.3x</option>
+              </select>
+              <button id="aiSendBtn" type="submit">Send</button>
+            </div>
             <div id="aiUploadPill" class="ai-upload-pill">
               <img id="aiUploadThumb" class="ai-upload-thumb" alt="upload preview">
               <span id="aiUploadName"></span>
@@ -656,20 +613,6 @@
           </div>
           <div class="ai-meta" id="aiStateText" style="margin-top:8px;">Idle</div>
           <div class="ai-meta" id="aiInterviewProgress" style="margin-top:4px;display:none;"></div>
-          <div id="aiPhase2Panel" class="ai-phase2">
-            <div class="ai-phase2-top">
-              <div class="ai-phase2-title">Phase 2 Map/Reduce</div>
-              <div id="aiPhase2Status" class="ai-phase2-status">status: --</div>
-            </div>
-            <div class="ai-phase2-grid">
-              <input id="aiPhase2Tickers" placeholder="Tickers (AAPL,MSFT,CRM)">
-              <input id="aiPhase2Question" placeholder="Question (e.g. margin durability next 2q)">
-            </div>
-            <div class="ai-phase2-top">
-              <button id="aiPhase2RunBtn" class="ai-phase2-run" type="button">Run Sector Analysis</button>
-              <div id="aiPhase2Progress" class="ai-phase2-progress"></div>
-            </div>
-          </div>
         </form>
       </div>
     </div>
@@ -704,11 +647,6 @@
       var toastWrap=document.getElementById('aiToastWrap');
       var stateText=document.getElementById('aiStateText');
       var interviewProgressEl=document.getElementById('aiInterviewProgress');
-      var phase2StatusEl=document.getElementById('aiPhase2Status');
-      var phase2TickersEl=document.getElementById('aiPhase2Tickers');
-      var phase2QuestionEl=document.getElementById('aiPhase2Question');
-      var phase2RunBtn=document.getElementById('aiPhase2RunBtn');
-      var phase2ProgressEl=document.getElementById('aiPhase2Progress');
       var threadKey='aiThreadV1';
       var pendingKey='aiPendingV1';
       var prefsKey='aiPrefsV1';
@@ -736,6 +674,7 @@
       var phase2ReducerId='';
       var phase2PollTimer=null;
       var phase2RenderedReducerId='';
+      var maxRenderMessages=40;
       var shell=document.querySelector('.global-shell');
       var globalSearchInput=document.getElementById('globalSearchInput');
       var globalSearchResults=document.getElementById('globalSearchResults');
@@ -748,6 +687,13 @@
         var tag = String(el.tagName || '').toLowerCase();
         if(tag === 'input' || tag === 'textarea' || tag === 'select'){ return true; }
         return !!el.isContentEditable;
+      }
+      function isInputActive(){
+        try{
+          return !!(input && document.activeElement === input);
+        }catch(_e){
+          return false;
+        }
       }
       function setSidebarCollapsed(on){
         if(!shell){ return; }
@@ -1107,12 +1053,41 @@
           clearGlobalSearch();
           return;
         }
+        function fallbackItems(text){
+          var x = String(text || '').trim();
+          var enc = encodeURIComponent(x);
+          var out = [
+            { kind: 'company', title: 'Search companies: ' + x, subtitle: 'Open company search', url: '/company_file?q=' + enc },
+            { kind: 'report', title: 'Search reports: ' + x, subtitle: 'Open reports', url: '/reports?q=' + enc },
+            { kind: 'note', title: 'Search notes/tasks: ' + x, subtitle: 'Open organizer', url: '/organizer?q=' + enc }
+          ];
+          var upper = x.toUpperCase();
+          var tkMatch = upper.match(/\b[A-Z]{1,5}\b/);
+          if (tkMatch && tkMatch[0]) {
+            out.unshift({
+              kind: 'filing',
+              title: tkMatch[0] + ' SEC filings',
+              subtitle: 'Open company SEC filings',
+              url: '/company_file/sec?t=' + encodeURIComponent(tkMatch[0])
+            });
+          }
+          return out;
+        }
         try{
           var res = await fetch('/api/global-search?q=' + encodeURIComponent(query) + '&limit=12', {method:'GET'});
+          if(!res.ok){
+            renderGlobalSearch(fallbackItems(query));
+            return;
+          }
           var data = await res.json();
-          renderGlobalSearch((data && data.results) || []);
+          var rows = (data && data.results) || [];
+          if(!rows.length){
+            renderGlobalSearch(fallbackItems(query));
+            return;
+          }
+          renderGlobalSearch(rows);
         }catch(_e){
-          clearGlobalSearch();
+          renderGlobalSearch(fallbackItems(query));
         }
       }
       function classifyKind(m){
@@ -1128,8 +1103,25 @@
         var traces = Array.isArray(m && m.traces) ? m.traces : [];
         if(st === 'needs_input' || st === 'needs_confirmation' || st === 'needs_clarification'){ return '⚪ Waiting for your input'; }
         if(st === 'error'){ return '⚠ Could not complete'; }
-        if(traces.length){ return '✓ Used ' + traces.length + ' tool step' + (traces.length>1?'s':''); }
+        if(traces.length){ return traces.length + ' steps completed'; }
         return '✓ Completed';
+      }
+      function traceToCommand(t){
+        var cmd = String((t && t.command) || '').trim();
+        if(cmd){ return '> ' + cmd; }
+        var step = String((t && t.step) || '').trim().replace(/\s+/g, '_').toLowerCase();
+        var detail = String((t && t.detail) || '').trim();
+        if(step && detail){ return '> invest_app ' + step + ' -- ' + detail; }
+        if(step){ return '> invest_app ' + step; }
+        if(detail){ return '> ' + detail; }
+        return '> step';
+      }
+      function renderAuditTrail(m, sid, label){
+        var traces = Array.isArray(m && m.traces) ? m.traces : [];
+        if(!traces.length){ return ''; }
+        var lbl = String(label || statusLabel(m));
+        var body = traces.map(traceToCommand).join('\n');
+        return '<details class="msg-audit" id="' + esc(sid) + '"><summary>' + esc(lbl) + '</summary><pre class="msg-terminal">' + esc(body) + '</pre></details>';
       }
       function richCard(m){
         var it = String((m && m.intent) || '').toLowerCase();
@@ -1141,12 +1133,56 @@
         var body = String((m && m.text) || '').split('\n').slice(0,4).join('\n');
         return '<div class="ai-rich-card"><div class="ai-rich-title">' + esc(t) + '</div><div class="ai-rich-body">' + renderMarkdown(body) + '</div></div>';
       }
+      function renderActionCard(m){
+        var it = String((m && m.intent) || '').toLowerCase();
+        var rd = String((m && m.redirect_url) || '').trim();
+        if(it === 'morning_brief'){
+          var txt = String((m && m.text) || '');
+          var pulse = (txt.match(/portfolio pulse:\s*([^\n]+)/i) || [])[1] || '';
+          var mover = (txt.match(/strong mover:\s*([^\n]+)/i) || [])[1] || '';
+          var body = '';
+          if(pulse){ body += '<p><strong>Portfolio Pulse</strong>: ' + esc(pulse) + '</p>'; }
+          if(mover){ body += '<p><strong>Strong Mover</strong>: ' + esc(mover) + '</p>'; }
+          return '<div class="ai-rich-card"><div class="ai-rich-title">Morning Brief</div><div class="ai-rich-body">' + colorizeFinancialMetrics(body) + '</div><div class="ai-rich-actions"><a class="ai-rich-btn" href="/my_universe">Open Portfolio</a></div></div>';
+        }
+        if(it === 'add_note_draft'){
+          var href = rd || '/organizer';
+          return '<div class="ai-rich-card"><div class="ai-rich-title">Document Card</div><div class="ai-rich-body">A new note draft is ready.</div><div class="ai-rich-actions"><a class="ai-rich-btn" href="' + esc(href) + '">Open Note</a></div></div>';
+        }
+        if(it === 'summarize_latest_report' || it === 'summarize_current_report'){
+          var rh = rd || '/reports';
+          return '<div class="ai-rich-card"><div class="ai-rich-title">Report Card</div><div class="ai-rich-body">Analysis completed for the latest report.</div><div class="ai-rich-actions"><a class="ai-rich-btn" href="' + esc(rh) + '">Open Report</a></div></div>';
+        }
+        if(String((m && m.status) || '').toLowerCase() === 'error'){
+          return '<div class="ai-rich-card"><div class="ai-rich-title">Agent Error</div><div class="ai-rich-body">' + esc(String((m && m.text) || 'Could not complete this request.')) + '</div><div class="ai-rich-actions"><button class="ai-rich-btn" type="button" data-msg-action="retry_last">Retry</button></div></div>';
+        }
+        return '';
+      }
+      function renderApprovalControls(m){
+        var st = String((m && m.status) || '').toLowerCase();
+        var tx = String((m && m.text) || '').toLowerCase();
+        var asksSave = tx.indexOf('shall i save') >= 0 || tx.indexOf('save this') >= 0;
+        if(st !== 'needs_confirmation' && !asksSave){ return ''; }
+        return '<div class="rec-controls">' +
+          '<button class="rec-btn" type="button" data-msg-action="approve_save">✓ Save to Company File</button>' +
+          '<button class="rec-btn" type="button" data-msg-action="approve_discard">✗ Discard</button>' +
+          '<button class="rec-btn" type="button" data-msg-action="approve_rewrite">Rewrite</button>' +
+          '</div>';
+      }
+      function colorizeFinancialMetrics(html){
+        var out = String(html || '');
+        out = out.replace(/(^|[>\s(])(\+\d[\d,]*(?:\.\d+)?%)/g, '$1<span class="num-pos">$2</span>');
+        out = out.replace(/(^|[>\s(])(-\d[\d,]*(?:\.\d+)?%)/g, '$1<span class="num-neg">$2</span>');
+        out = out.replace(/(^|[>\s(])(\+\$?\d[\d,]*(?:\.\d+)?)/g, '$1<span class="num-pos">$2</span>');
+        out = out.replace(/(^|[>\s(])(-\$?\d[\d,]*(?:\.\d+)?)/g, '$1<span class="num-neg">$2</span>');
+        return out;
+      }
       function renderMarkdown(text){
         var raw = String(text || '');
         if(window.marked && typeof window.marked.parse === 'function'){
           try{
             var safeRaw = raw.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            return window.marked.parse(safeRaw, {gfm:true, breaks:true, headerIds:false, mangle:false});
+            return colorizeFinancialMetrics(window.marked.parse(safeRaw, {gfm:true, breaks:true, headerIds:false, mangle:false}));
           }catch(_mdErr){}
         }
         var safe = esc(raw);
@@ -1188,7 +1224,7 @@
           out.push('<p>'+s+'</p>');
         });
         closeLists();
-        return out.join('');
+        return colorizeFinancialMetrics(out.join(''));
       }
       function splitTaskLines(text){
         var raw = String(text || '');
@@ -1303,13 +1339,15 @@
       }
       function renderThread(){
         if(!result) return;
-        var html = aiThread.map(function(m, idx){
+        var renderRows = aiThread.slice(-Math.max(1, Number(maxRenderMessages || 40)));
+        var html = renderRows.map(function(m, idx){
           if(m.role==='user'){
             return '<div class=\"msg-row msg-user\"><div class=\"bubble md\"><p>'+esc(m.text)+'</p></div></div>';
           }
           var kind = classifyKind(m);
           var rowClass = 'msg-row msg-ai ' + kind;
           var out = '<div class=\"'+rowClass+'\"><div class=\"msg-avatar\">✨</div><div class=\"bubble md\">'+renderAssistantBody(m);
+          out += renderActionCard(m);
           out += richCard(m);
           if(Array.isArray(m.citations) && m.citations.length){
             out += '<div class=\"msg-meta\">' + m.citations.map(function(c){
@@ -1318,17 +1356,13 @@
               return '<a class=\"ai-chip\" style=\"text-decoration:none;margin-right:6px;\" href=\"' + esc(u) + '\">' + esc(l) + '</a>';
             }).join('') + '</div>';
           }
-          var sid = 'log_' + String(m._id || idx);
-          out += '<div class=\"msg-status\">' + esc(statusLabel(m));
-          out += ' <button class="status-link" type="button" data-log-target="' + esc(sid) + '" aria-label="Show tool details" title="Show details">i</button></div>';
+          var sid = 'audit_' + String(m._id || idx);
           if(Array.isArray(m.traces) && m.traces.length){
-            out += '<div id="' + esc(sid) + '" class="msg-logs" style="display:none;">' +
-              m.traces.map(function(t){
-                var s = String((t && t.step) || '-');
-                var d = String((t && t.detail) || '-');
-                return '<span class=\"trace-chip\">' + esc(s) + ': ' + esc(d) + '</span>';
-              }).join('') + '</div>';
+            out += renderAuditTrail(m, sid, '>_ View ' + String(m.traces.length) + ' Agent Steps');
+          } else {
+            out += '<div class=\"msg-status\">' + esc(statusLabel(m)) + '</div>';
           }
+          out += renderApprovalControls(m);
           if(String(m.intent||'') === 'portfolio_interview' && String(m.status||'') === 'needs_input'){
             out += '<div class="iv-controls">';
             out += '<button class="iv-btn" type="button" data-iv-action="skip">Skip</button>';
@@ -1349,15 +1383,6 @@
         showResult(html);
         showEmpty(!aiThread.length);
         result.scrollTop = result.scrollHeight;
-        result.querySelectorAll('[data-log-target]').forEach(function(btn){
-          btn.addEventListener('click', function(){
-            var id = String(btn.getAttribute('data-log-target') || '');
-            if(!id){ return; }
-            var el = document.getElementById(id);
-            if(!el){ return; }
-            el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
-          });
-        });
         result.querySelectorAll('[data-iv-action]').forEach(function(btn){
           btn.addEventListener('click', function(){
             var a = String(btn.getAttribute('data-iv-action') || '');
@@ -1383,6 +1408,16 @@
             if(a === 'open_now'){ input.value = 'open now'; form.requestSubmit(); return; }
             if(a === 'cancel'){ input.value = 'cancel'; form.requestSubmit(); return; }
             if(a === 'back_chat'){ input.value = 'back to chat'; form.requestSubmit(); return; }
+          });
+        });
+        result.querySelectorAll('[data-msg-action]').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            var a = String(btn.getAttribute('data-msg-action') || '');
+            if(!input || !form){ return; }
+            if(a === 'approve_save'){ input.value = 'yes, save it'; form.requestSubmit(); return; }
+            if(a === 'approve_discard'){ input.value = 'discard'; form.requestSubmit(); return; }
+            if(a === 'approve_rewrite'){ input.value = 'rewrite this more concise and actionable'; form.requestSubmit(); return; }
+            if(a === 'retry_last'){ input.value = pendingQuery || 'retry last request'; form.requestSubmit(); return; }
           });
         });
         result.querySelectorAll('[data-task-complete]').forEach(function(btn){
@@ -1516,19 +1551,7 @@
         if(workerBadgeText){ workerBadgeText.textContent = String(label || 'Worker: --'); }
         workerBadge.title = String(title || 'AI worker health');
       }
-      function setPhase2StatusText(s){
-        if(!phase2StatusEl){ return; }
-        phase2StatusEl.textContent = String(s || 'status: --');
-      }
-      function setPhase2ProgressText(s){
-        if(!phase2ProgressEl){ return; }
-        phase2ProgressEl.textContent = String(s || '');
-      }
-      function setPhase2RunEnabled(on){
-        if(!phase2RunBtn){ return; }
-        phase2RunBtn.disabled = !on;
-      }
-      function pushPhase2ResultToChat(reducerId, messageText){
+      function pushPhase2ResultToChat(reducerId, messageText, traces){
         var rid = String(reducerId || '').trim();
         var msg = String(messageText || '').trim();
         if(!rid || !msg){ return; }
@@ -1541,31 +1564,12 @@
           text: msg,
           ui:{},
           meta:'phase2 map/reduce',
-          traces:[],
+          traces: Array.isArray(traces) ? traces : [],
           citations:[],
           redirect_url:'',
           _id: Date.now() + Math.floor(Math.random()*1000)
         });
         renderThread();
-      }
-      async function pollPhase2Status(){
-        try{
-          var res = await fetch('/ai/phase2/status', {method:'GET'});
-          var data = await res.json();
-          if(!data || !data.ok){
-            setPhase2StatusText('status: unavailable');
-            return;
-          }
-          if(!data.postgres_enabled){
-            setPhase2StatusText('status: sqlite mode');
-            return;
-          }
-          var ready = data.postgres_ready ? 'pg ok' : 'pg down';
-          var vec = data.pgvector_ready ? 'vector ok' : 'vector off';
-          setPhase2StatusText('status: ' + ready + ' · ' + vec);
-        }catch(_e){
-          setPhase2StatusText('status: unavailable');
-        }
       }
       function stopPhase2Poll(){
         try{
@@ -1580,30 +1584,27 @@
             var res = await fetch('/ai/phase2/map-reduce/' + encodeURIComponent(phase2ReducerId), {method:'GET'});
             var data = await res.json();
             if(!data || !data.ok){
-              setPhase2ProgressText('Map/Reduce status unavailable.');
+              showToast('Map/Reduce status unavailable.');
               phase2PollLoop(1600);
               return;
             }
             var st = String(data.reducer_status || '').toLowerCase();
             var cs = data.child_stats || {};
-            setPhase2ProgressText(
-              'Reducer ' + st + ' · children done ' + Number(cs.done || 0) + '/' + Number(data.child_total || 0) +
-              ' · running ' + Number(cs.running || 0) + ' · queued ' + Number(cs.queued || 0)
-            );
+            var progressLabel = 'Reducer ' + st + ' · done ' + Number(cs.done || 0) + '/' + Number(data.child_total || 0);
             if(st === 'done'){
               var doneMsg = String(((data || {}).result || {}).message || '').trim();
               if(!doneMsg){
                 doneMsg = String((((data || {}).report || {}).summary_text) || '').trim();
               }
               if(doneMsg){
-                pushPhase2ResultToChat(phase2ReducerId, doneMsg);
+                pushPhase2ResultToChat(phase2ReducerId, doneMsg, ((data || {}).traces || []));
               }
-              setPhase2RunEnabled(true);
+              showToast(progressLabel);
               stopPhase2Poll();
               return;
             }
             if(st === 'error'){
-              setPhase2RunEnabled(true);
+              showToast('Map/Reduce failed. Check logs.');
               stopPhase2Poll();
               return;
             }
@@ -1625,11 +1626,10 @@
               var msg = String((rs && rs.message) || '').trim();
               if(!msg && rs && typeof rs.summary_text === 'string'){ msg = String(rs.summary_text || '').trim(); }
               if(msg){
-                pushPhase2ResultToChat(jid, msg);
+                pushPhase2ResultToChat(jid, msg, (rs.traces || []));
               }
             }catch(_e){}
-            setPhase2ProgressText('Map/Reduce completed.');
-            setPhase2RunEnabled(true);
+            showToast('Map/Reduce completed.');
             try{ es.close(); }catch(_e){}
             stopPhase2Poll();
           });
@@ -1638,34 +1638,48 @@
           });
         }catch(_e){}
       }
-      async function runPhase2MapReduce(){
-        var tRaw = String((phase2TickersEl && phase2TickersEl.value) || '').trim();
-        var qRaw = String((phase2QuestionEl && phase2QuestionEl.value) || '').trim();
-        if(!tRaw){
-          showToast('Add tickers first. Example: AAPL,MSFT,CRM');
-          return;
+      function _phase2ExtractTickers(prompt){
+        var deny = {THE:1,AND:1,FOR:1,WITH:1,NEXT:1,FROM:1,THAT:1,THIS:1,RUN:1,SECTOR:1,ANALYSIS:1,FOCUS:1,ON:1};
+        var out = [];
+        var seen = {};
+        var found = String(prompt || '').toUpperCase().match(/\b[A-Z]{1,5}\b/g) || [];
+        found.forEach(function(tk){
+          var t = String(tk || '').trim().toUpperCase();
+          if(!t || deny[t] || seen[t]){ return; }
+          seen[t] = true;
+          out.push(t);
+        });
+        return out.slice(0, 25);
+      }
+      function parsePhase2Prompt(prompt){
+        var q = String(prompt || '').trim();
+        if(!q){ return null; }
+        var low = q.toLowerCase();
+        var wants = (
+          low.indexOf('sector analysis') >= 0 ||
+          low.indexOf('map reduce') >= 0 ||
+          low.indexOf('map/reduce') >= 0 ||
+          low.indexOf('deep dive') >= 0
+        );
+        if(!wants){ return null; }
+        var tickers = _phase2ExtractTickers(q);
+        if(!tickers.length){ return null; }
+        return {tickers: tickers, question: q};
+      }
+      async function runPhase2MapReduceFromPrompt(parsed, sessionId){
+        var payload = parsed && typeof parsed === 'object' ? parsed : null;
+        if(!payload || !Array.isArray(payload.tickers) || !payload.tickers.length){
+          return {ok:false, error:'missing_tickers'};
         }
-        if(!qRaw){
-          showToast('Add a sector question first.');
-          return;
-        }
-        var tickers = tRaw.split(/[,\s]+/).map(function(x){ return String(x||'').trim().toUpperCase(); }).filter(Boolean);
-        if(!tickers.length){
-          showToast('No valid tickers detected.');
-          return;
-        }
-        setPhase2RunEnabled(false);
-        setPhase2ProgressText('Queueing map/reduce jobs...');
+        showToast('Queueing sector analysis...');
         try{
-          var sid = '';
-          try{ sid = String(localStorage.getItem(sessionKey) || 'phase2-ui'); }catch(_e){}
           var res = await fetch('/ai/phase2/map-reduce/sector', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body: JSON.stringify({
-              tickers: tickers,
-              question: qRaw,
-              context: {session_id: sid}
+              tickers: payload.tickers,
+              question: payload.question,
+              context: {session_id: String(sessionId || '')}
             })
           });
           var data = await res.json();
@@ -1673,14 +1687,13 @@
             throw new Error((data && data.error) ? String(data.error) : 'map_reduce_enqueue_failed');
           }
           phase2ReducerId = String(data.reducer_job_id || '').trim();
-          setPhase2ProgressText('Reducer queued: ' + phase2ReducerId);
+          showToast('Sector analysis queued: ' + phase2ReducerId);
           phase2PollLoop(300);
           startPhase2ReducerSse(phase2ReducerId);
-          showToast('Phase 2 sector analysis queued.');
+          return {ok:true, reducer_job_id: phase2ReducerId};
         }catch(_e){
-          setPhase2ProgressText('Queue failed. Check worker/app logs.');
-          setPhase2RunEnabled(true);
           showToast('Map/Reduce queue failed.');
+          return {ok:false, error:'enqueue_failed'};
         }
       }
       var proactivePollInFlight = false;
@@ -1691,6 +1704,7 @@
       var workerHealthPollMs = 20000;
       async function pollProactiveBadge(){
         if(document.hidden){ return; }
+        if(isInputActive()){ return; }
         if(proactivePollInFlight){ return; }
         proactivePollInFlight = true;
         try{
@@ -1713,6 +1727,7 @@
       }
       async function pollWorkerHealth(){
         if(document.hidden){ return; }
+        if(isInputActive()){ return; }
         if(workerHealthPollInFlight){ return; }
         workerHealthPollInFlight = true;
         try{
@@ -2059,6 +2074,32 @@
             }
             aiThread.push({role:'user', text:(q || ('[Image] ' + (pendingImageName || 'uploaded image'))), _id: Date.now()});
             renderThread();
+            var naturalPhase2 = parsePhase2Prompt(q);
+            if(naturalPhase2){
+              var sidNatural = String(localStorage.getItem(sessionKey) || 'phase2-chat');
+              var queued = await runPhase2MapReduceFromPrompt(naturalPhase2, sidNatural);
+              if(queued && queued.ok){
+                aiThread.push({
+                  role:'assistant',
+                  intent:'map_reduce_enqueue',
+                  status:'ok',
+                  text:'Sector analysis queued for ' + naturalPhase2.tickers.join(', ') + '. I will post results here when complete.',
+                  ui:{type:'brief_card', title:'Agent Task Queued', items:naturalPhase2.tickers.slice(0,6).map(function(tk){ return {label: tk}; })},
+                  meta:'phase2 map/reduce queued',
+                  traces:[{command:'invest_app map_reduce --tickers ' + naturalPhase2.tickers.join(',') + ' --question "' + String(naturalPhase2.question || '').replace(/"/g, "'") + '"'}],
+                  citations:[],
+                  redirect_url:'',
+                  _id: Date.now() + 1
+                });
+                renderThread();
+                setState('done');
+                awaitingAssistant = false;
+                voiceSubmitting = false;
+                clearUpload();
+                maybeResumeVoiceLoop(200);
+                return;
+              }
+            }
             var res = await fetch('/ai/command/async', {
               method:'POST',
               headers:{'Content-Type':'application/json'},
@@ -2222,16 +2263,24 @@
             clearUpload();
             awaitingAssistant = false;
             voiceSubmitting = false;
-            aiThread.push({role:'assistant', intent:'error', status:'error', text:'Command failed. Please retry.', meta:'error', traces:[], citations:[], redirect_url:'', _id: Date.now()+2});
+            var errText = String((_e && _e.message) || 'unknown_error').replace(/_/g, ' ');
+            aiThread.push({
+              role:'assistant',
+              intent:'error',
+              status:'error',
+              text:'Command failed: ' + errText + '. Click Retry or ask me to run a fallback path.',
+              meta:'error',
+              traces:[],
+              citations:[],
+              redirect_url:'',
+              _id: Date.now()+2
+            });
             renderThread();
             setState('failed');
             maybeResumeVoiceLoop(260);
             return;
           }
         });
-      }
-      if(phase2RunBtn){
-        phase2RunBtn.addEventListener('click', function(){ runPhase2MapReduce(); });
       }
       if(globalSearchInput){
         globalSearchInput.addEventListener('input', function(){
@@ -2285,7 +2334,6 @@
       initSpeechRecognition();
       updateVoiceUi();
       maybeInjectMorningBrief();
-      pollPhase2Status();
       pollProactiveBadge().finally(function(){ scheduleProactivePoll(proactivePollMs); });
       pollWorkerHealth().finally(function(){ scheduleWorkerHealthPoll(workerHealthPollMs); });
       document.addEventListener('visibilitychange', function(){
@@ -2295,7 +2343,6 @@
           stopPhase2Poll();
           return;
         }
-        pollPhase2Status();
         pollProactiveBadge().finally(function(){ scheduleProactivePoll(8000); });
         pollWorkerHealth().finally(function(){ scheduleWorkerHealthPoll(5000); });
         if(phase2ReducerId){ phase2PollLoop(700); }

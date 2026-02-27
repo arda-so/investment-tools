@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yfinance as yf
 
+from app.core import cloud_files
 from app.services.agent_service import ask_agent, memorize_user_note
 from app.core.config import ROOT
 from app.core.db import core_conn as _conn
@@ -21,6 +22,7 @@ from app.core.ticker import normalize_ticker, yfinance_symbol
 from app.services.company_lookup_service import company_name_map, market_cap_map
 from app.services.organizer_service import add_general_note, add_task, recall
 from app.services.memory_engine import OnyxMemory
+from app.services.portfolio_state_service import read_portfolio_rows_state, read_watchlist_rows_state
 from app.services.postgres_core_service import (
     company_news_from_report_facts_pg,
     core_backend,
@@ -46,11 +48,11 @@ _HTTP_HEADERS = {
 
 
 def _executive_signal_summary() -> dict[str, object]:
-    p = ROOT / "reports" / "executive_signal_latest.json"
-    if not p.exists():
+    raw = cloud_files.read_text("reports/executive_signal_latest.json")
+    if not raw:
         return {"generated_at": "", "items": []}
     try:
-        obj = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+        obj = json.loads(raw)
         items = obj.get("items") if isinstance(obj, dict) else []
         if not isinstance(items, list):
             items = []
@@ -248,9 +250,10 @@ def _filing_stats_map(tickers: list[str]) -> dict[str, dict[str, str | int]]:
 
 def _sec_sync_state_map() -> dict[str, dict[str, str]]:
     try:
-        if not _SEC_SYNC_STATE_PATH.exists():
+        raw = cloud_files.read_text("data/sec_sync_state.json")
+        if not raw:
             return {}
-        obj = json.loads(_SEC_SYNC_STATE_PATH.read_text(encoding="utf-8", errors="ignore"))
+        obj = json.loads(raw)
         if not isinstance(obj, dict):
             return {}
         out: dict[str, dict[str, str]] = {}
@@ -270,42 +273,11 @@ def _sec_sync_state_map() -> dict[str, dict[str, str]]:
 
 
 def _read_portfolio() -> list[dict[str, str]]:
-    p = ROOT / "data" / "portfolio.csv"
-    if not p.exists():
-        return []
-    rows: list[dict[str, str]] = []
-    for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-        parts = [x.strip() for x in ln.split(",")]
-        if not parts:
-            continue
-        t = _normalize_ticker(parts[0] if len(parts) >= 1 else "")
-        if not t:
-            continue
-        rows.append(
-            {
-                "ticker": t,
-                "shares": parts[1] if len(parts) >= 2 else "",
-                "cost": parts[2] if len(parts) >= 3 else "",
-            }
-        )
-    return rows
+    return read_portfolio_rows_state()
 
 
 def _read_watchlist() -> list[dict[str, str]]:
-    p = ROOT / "data" / "my_watchlist.txt"
-    if not p.exists():
-        return []
-    rows: list[dict[str, str]] = []
-    for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-        s = ln.strip()
-        if not s or s.startswith("#"):
-            continue
-        parts = [x.strip() for x in s.split(",")]
-        t = _normalize_ticker(parts[0] if parts else "")
-        if not t:
-            continue
-        rows.append({"ticker": t})
-    return rows
+    return read_watchlist_rows_state()
 
 
 def _fetch_text(url: str, timeout: int = 8) -> str:
@@ -710,21 +682,13 @@ def _filter_recent_news(items: list[dict[str, str]], max_age_hours: int = 72, *,
     return out
 
 
-def _latest_report_file(prefixes: tuple[str, ...]) -> Path | None:
-    rpt = ROOT / "reports"
-    if not rpt.exists():
-        return None
-    cands: list[Path] = []
-    for p in rpt.iterdir():
-        if not p.is_file():
-            continue
-        n = p.name.lower()
+def _latest_report_name(prefixes: tuple[str, ...]) -> str:
+    cands = cloud_files.list_files("reports", suffixes={".md", ".txt", ".json", ".html"})
+    for f in cands:
+        n = str(f.name or "").lower()
         if any(n.startswith(x.lower()) for x in prefixes):
-            cands.append(p)
-    if not cands:
-        return None
-    cands.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    return cands[0]
+            return str(f.name or "")
+    return ""
 
 
 def _report_line_to_bullet(line: str) -> str:
@@ -780,20 +744,19 @@ def _report_line_to_bullet(line: str) -> str:
 
 
 def _report_updates(limit: int = 0) -> list[dict[str, str]]:
-    files: list[tuple[str, Path | None]] = [
-        ("Daily", _latest_report_file(("terminal_daily_brief_", "daily_brief_"))),
-        ("Appendix", _latest_report_file(("terminal_appendix_",))),
-        ("L2", _latest_report_file(("l2_digest_",))),
+    files: list[tuple[str, str]] = [
+        ("Daily", _latest_report_name(("terminal_daily_brief_", "daily_brief_"))),
+        ("Appendix", _latest_report_name(("terminal_appendix_",))),
+        ("L2", _latest_report_name(("l2_digest_",))),
     ]
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     max_items = int(limit or 0)
-    for label, fp in files:
-        if fp is None:
+    for label, name in files:
+        if not name:
             continue
-        try:
-            txt = fp.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        txt = cloud_files.read_text(f"reports/{name}")
+        if not txt:
             continue
         lines = str(txt).splitlines()
         for ln in lines:
@@ -808,7 +771,7 @@ def _report_updates(limit: int = 0) -> list[dict[str, str]]:
                 {
                     "source": label,
                     "title": s,
-                    "link": "/reports/view?name=" + urllib.parse.quote(fp.name),
+                    "link": "/reports/view?name=" + urllib.parse.quote(name),
                 }
             )
         if max_items > 0 and len(out) >= max_items:

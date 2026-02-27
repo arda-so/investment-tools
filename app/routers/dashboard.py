@@ -18,7 +18,7 @@ from app.core.config import CORE_DB_PATH, ROOT
 from app.core.date import parse_datetime_flexible
 from app.core.market import finnhub_key
 from app.core.num import to_float, to_float_clean as _to_float
-from app.core.sqlite_hardening import connect_sqlite
+from app.core.db import get_sqlite_conn
 from app.core.ticker import normalize_ticker, yfinance_symbol
 from app.core.universe_command_parser import parse_universe_command
 from app.core.trade_decision_taxonomy import (
@@ -47,6 +47,7 @@ from app.services.dashboard_service import ask_ai_local, dashboard_snapshot, qui
 from app.services.earnings_transcript_service import list_sec_earnings_releases
 from app.services.organizer_service import list_recent_notes, list_tasks
 from app.services.portfolio_memory_service import (
+    get_cached_morning_brief,
     query_report_facts,
     record_decision,
     record_portfolio_transaction,
@@ -55,6 +56,8 @@ from app.services.portfolio_memory_service import (
 from app.services.reports_service import list_reports
 from app.services.proactive_ai_service import (
     dismiss_action_proposal,
+    dismiss_cascade_alert,
+    dismiss_thesis_breach_alert,
     execute_action_proposal,
     get_ai_accuracy_stats,
     learn_from_rejection,
@@ -78,6 +81,12 @@ from app.services.postgres_core_service import (
     upsert_earnings_calendar_snapshot_pg,
 )
 from app.services.watchlist_service import read_watchlist_rows, write_watchlist_rows
+from app.services.portfolio_state_service import (
+    read_cash_rows_state,
+    read_portfolio_rows_state,
+    write_cash_rows_state,
+    write_portfolio_rows_state,
+)
 
 
 router = APIRouter()
@@ -138,6 +147,12 @@ _SEC_HINT_TOKENS: set[str] = {
     "6k",
     "6-k",
 }
+BLUE_CHIPS_SEED_TICKERS: tuple[str, ...] = (
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "BRK.B", "JPM", "V", "UNH",
+    "XOM", "JNJ", "PG", "AVGO", "MA", "HD", "COST", "KO", "PEP", "ABBV",
+    "BAC", "WMT", "CRM", "ORCL", "CVX", "MRK", "CSCO", "ACN", "LIN", "TMO",
+    "MCD", "NEE",
+)
 
 
 def _search_tokens(raw_query: str) -> tuple[str, list[str], list[str]]:
@@ -361,39 +376,11 @@ def _remove_blue_chip(ticker: str) -> bool:
 
 
 def _read_portfolio_file() -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    if not PORTFOLIO_PATH.exists():
-        return out
-    for ln in PORTFOLIO_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
-        parts = [x.strip() for x in ln.split(",")]
-        if not parts:
-            continue
-        t = _safe_ticker(parts[0] if len(parts) >= 1 else "")
-        if not t:
-            continue
-        out.append(
-            {
-                "ticker": t,
-                "shares": parts[1] if len(parts) >= 2 else "",
-                "cost": parts[2] if len(parts) >= 3 else "",
-                "note": parts[3] if len(parts) >= 4 else "",
-            }
-        )
-    return out
+    return read_portfolio_rows_state()
 
 
 def _write_portfolio_file(rows: list[dict[str, str]]) -> None:
-    PORTFOLIO_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    for r in rows:
-        t = _safe_ticker(r.get("ticker", ""))
-        if not t:
-            continue
-        shares = str(r.get("shares", "")).strip()
-        cost = str(r.get("cost", "")).strip()
-        note = str(r.get("note", "")).replace("\n", " ").strip()
-        lines.append(",".join([t, shares, cost, note]))
-    PORTFOLIO_PATH.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    write_portfolio_rows_state(rows)
 
 
 def _read_watchlist_rows() -> list[dict[str, str]]:
@@ -661,64 +648,32 @@ def _pick_day_pct(live_val: object, fallback_val: object) -> float | None:
 
 
 def _cash_usd_total() -> tuple[float, list[str]]:
-    if not CASH_BAL_PATH.exists():
+    rows = _read_cash_rows()
+    if not rows:
         return 0.0, []
     lines: list[str] = []
     total = 0.0
-    try:
-        with CASH_BAL_PATH.open("r", encoding="utf-8", errors="ignore") as fh:
-            rd = csv.reader(fh)
-            header = next(rd, None)
-            for row in rd:
-                if not row:
-                    continue
-                ccy = str(row[0] if len(row) >= 1 else "").strip().upper()
-                amt = _to_float(row[1] if len(row) >= 2 else "", 0.0)
-                usd = amt
-                if ccy == "EUR":
-                    usd = amt * 1.09
-                elif ccy == "GBP":
-                    usd = amt * 1.27
-                elif ccy in {"USD", ""}:
-                    usd = amt
-                total += usd
-                lines.append(f"{ccy or 'USD'} {amt:,.2f} (USD {usd:,.2f})")
-    except Exception:
-        return 0.0, []
+    for row in rows:
+        ccy = str(row.get("currency") or "").strip().upper()
+        amt = _to_float(row.get("amount"), 0.0)
+        usd = amt
+        if ccy == "EUR":
+            usd = amt * 1.09
+        elif ccy == "GBP":
+            usd = amt * 1.27
+        elif ccy in {"USD", ""}:
+            usd = amt
+        total += usd
+        lines.append(f"{ccy or 'USD'} {amt:,.2f} (USD {usd:,.2f})")
     return total, lines
 
 
 def _read_cash_rows() -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    if not CASH_BAL_PATH.exists():
-        return out
-    try:
-        with CASH_BAL_PATH.open("r", encoding="utf-8", errors="ignore") as fh:
-            rd = csv.reader(fh)
-            _ = next(rd, None)
-            for row in rd:
-                if not row:
-                    continue
-                ccy = str(row[0] if len(row) >= 1 else "").strip().upper()
-                amt = _to_float(row[1] if len(row) >= 2 else "", 0.0)
-                if not ccy:
-                    ccy = "USD"
-                out.append({"currency": ccy, "amount": f"{amt:g}"})
-    except Exception:
-        return []
-    return out
+    return read_cash_rows_state()
 
 
 def _write_cash_rows(rows: list[dict[str, str]]) -> None:
-    CASH_BAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["currency,amount"]
-    for r in rows:
-        ccy = str(r.get("currency") or "USD").strip().upper()
-        amt = _to_float(r.get("amount"), 0.0)
-        if not ccy:
-            ccy = "USD"
-        lines.append(f"{ccy},{amt:g}")
-    CASH_BAL_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_cash_rows_state(rows)
 
 
 def _fmt_price(v: float | None, decimals: int = 2) -> str:
@@ -1406,7 +1361,25 @@ def dashboard_report_panels() -> dict[str, object]:
     appendix_txt = _read_text_file(appendix_path)
     earnings_txt = _read_text_file(earnings_path)
 
-    morning_points = _extract_morning_points(morning_txt, limit=7)
+    morning_points: list[str] = []
+    morning_updated_fallback = "-"
+    # Cloud/Postgres-first source of truth: morning_briefs_core.
+    # File parsing is retained only as fallback for local/offline workflows.
+    try:
+        cached = get_cached_morning_brief()
+        b = [str(x or "").strip() for x in list((cached or {}).get("bullets") or []) if str(x or "").strip()]
+        if b:
+            morning_points = b[:7]
+            asof = str((cached or {}).get("asof") or "").strip()
+            if asof:
+                try:
+                    morning_updated_fallback = dt.datetime.fromisoformat(asof).strftime("%H:%M")
+                except Exception:
+                    morning_updated_fallback = asof[:5] if len(asof) >= 5 else asof
+    except Exception:
+        pass
+    if not morning_points:
+        morning_points = _extract_morning_points(morning_txt, limit=7)
 
     both_rows = _extract_section_table_rows(
         appendix_txt,
@@ -1526,7 +1499,7 @@ def dashboard_report_panels() -> dict[str, object]:
         "morning_source": morning_path.name if morning_path else "-",
         "appendix_source": appendix_path.name if appendix_path else "-",
         "earnings_source": earnings_path.name if earnings_path else (appendix_path.name if appendix_path else "-"),
-        "morning_updated": _ts(morning_path),
+        "morning_updated": (_ts(morning_path) if morning_path else morning_updated_fallback),
         "appendix_updated": _ts(appendix_path),
         "earnings_updated": _ts(earnings_path or appendix_path),
         "earnings_result_source": "Finnhub Earnings Calendar + SEC filing verification",
@@ -1738,7 +1711,7 @@ def _my_companies_metrics(home: dict) -> dict[str, object]:
                 finally:
                     con_pg.close()
         elif not strict_postgres_mode():
-            con = connect_sqlite(str(CORE_DB_PATH), row_factory=True)
+            con = get_sqlite_conn(str(CORE_DB_PATH), row_factory=True)
             try:
                 marks = ",".join("?" for _ in tickers)
                 rows = con.execute(
@@ -2898,6 +2871,18 @@ async def api_agent_reflexion_rollback(request: Request):
     return JSONResponse(out, status_code=200 if bool(out.get("ok")) else 400)
 
 
+@router.post("/api/agent/breach-alerts/{alert_id}/dismiss")
+async def api_dismiss_breach_alert(alert_id: int):
+    ok = dismiss_thesis_breach_alert(alert_id)
+    return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+
+
+@router.post("/api/agent/cascade-alerts/{alert_id}/dismiss")
+async def api_dismiss_cascade_alert(alert_id: int):
+    ok = dismiss_cascade_alert(alert_id)
+    return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+
+
 @router.post("/api/sec/ingest-new-filings")
 async def api_sec_ingest_new_filings(
     request: Request,
@@ -3431,6 +3416,26 @@ def my_universe_bluechips_remove(
     return my_companies_bluechips_remove(ticker=ticker)
 
 
+@router.post("/my_universe/bluechips/seed")
+def my_universe_bluechips_seed():
+    added = 0
+    for tk in BLUE_CHIPS_SEED_TICKERS:
+        ok = _upsert_blue_chip(tk, reason="Seeded large-cap blue chip")
+        if ok:
+            added += 1
+    try:
+        record_decision(
+            action="blue_chip_seed",
+            ticker="",
+            reason=f"Seeded blue chips list ({added} tickers).",
+            confidence=0.98,
+            source="my_universe_seed",
+        )
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "message": f"Blue Chips seeded ({added}).", "added": added})
+
+
 @router.post("/my_universe/cash/upsert")
 def my_universe_cash_upsert(
     currency: str = Form("USD"),
@@ -3670,7 +3675,7 @@ def api_global_search(q: str = "", limit: int = 12):
                 except Exception:
                     pass
             return len(results) - added_before
-        con = connect_sqlite(CORE_DB_PATH)
+        con = get_sqlite_conn(CORE_DB_PATH)
         try:
             for tk in want_tks[:3]:
                 fetched_any = False
@@ -3806,7 +3811,7 @@ def api_global_search(q: str = "", limit: int = 12):
                     finally:
                         con_pg.close()
             else:
-                con = connect_sqlite(CORE_DB_PATH)
+                con = get_sqlite_conn(CORE_DB_PATH)
                 try:
                     rows = con.execute(
                         """

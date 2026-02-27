@@ -341,6 +341,124 @@
       </article>
 
       <article class="canvas-sec">
+        <h3 class="sec-head">Supply Chain Mapper (Picks & Shovels)</h3>
+        {% set scm = detail.supply_chain or {} %}
+        <div class="todo-meta" style="margin-bottom:8px;">
+          Hidden ecosystem around {{ detail.ticker }}{% if scm.total %} • {{ scm.total }} mapped relationship{{ "s" if scm.total != 1 else "" }}{% endif %}
+        </div>
+
+        <div style="display:grid;gap:8px;">
+          <div style="font-size:12px;font-weight:800;color:#1f2937;">Suppliers</div>
+          {% for r in scm.suppliers or [] %}
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+            <div>
+              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+                <a href="/company_file?t={{ (r.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ r.ticker or "-" }}</a>
+                <span class="muted">· {{ r.name or "-" }}</span>
+              </div>
+              <div class="todo-meta">{{ r.industry or "-" }} • {{ r.market_cap or "-" }}</div>
+              {% if r.evidence %}<div class="muted" style="margin-top:3px;">{{ r.evidence }}</div>{% endif %}
+            </div>
+            <div style="display:grid;gap:6px;justify-items:end;">
+              <div class="ticker-chip">Conf {{ "%.0f"|format((r.confidence or 0) * 100) }}%</div>
+              {% if (r.source or "") == "manual" and (r.id or 0) > 0 %}
+              <form method="post" action="/company_file/supply-chain-remove"
+                    hx-post="/company_file/supply-chain-remove" hx-target="#companyDetailRoot" hx-swap="outerHTML">
+                <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+                <input type="hidden" name="row_id" value="{{ r.id }}">
+                <button type="submit" class="btn" style="font-size:11px;padding:2px 8px;">Remove</button>
+              </form>
+              {% endif %}
+            </div>
+          </div>
+          {% else %}
+          <div class="muted">No mapped suppliers yet.</div>
+          {% endfor %}
+        </div>
+
+        <div style="display:grid;gap:8px;margin-top:10px;">
+          <div style="font-size:12px;font-weight:800;color:#1f2937;">Customers</div>
+          {% for r in scm.customers or [] %}
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+            <div>
+              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+                <a href="/company_file?t={{ (r.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ r.ticker or "-" }}</a>
+                <span class="muted">· {{ r.name or "-" }}</span>
+              </div>
+              <div class="todo-meta">{{ r.industry or "-" }} • {{ r.market_cap or "-" }}</div>
+              {% if r.evidence %}<div class="muted" style="margin-top:3px;">{{ r.evidence }}</div>{% endif %}
+            </div>
+            <div style="display:grid;gap:6px;justify-items:end;">
+              <div class="ticker-chip">Conf {{ "%.0f"|format((r.confidence or 0) * 100) }}%</div>
+              {% if (r.source or "") == "manual" and (r.id or 0) > 0 %}
+              <form method="post" action="/company_file/supply-chain-remove"
+                    hx-post="/company_file/supply-chain-remove" hx-target="#companyDetailRoot" hx-swap="outerHTML">
+                <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+                <input type="hidden" name="row_id" value="{{ r.id }}">
+                <button type="submit" class="btn" style="font-size:11px;padding:2px 8px;">Remove</button>
+              </form>
+              {% endif %}
+            </div>
+          </div>
+          {% else %}
+          <div class="muted">No mapped customers yet.</div>
+          {% endfor %}
+        </div>
+
+        <div style="display:grid;gap:8px;margin-top:10px;">
+          <div style="font-size:12px;font-weight:800;color:#1f2937;">Partners</div>
+          {% for r in scm.partners or [] %}
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+            <div>
+              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+                <a href="/company_file?t={{ (r.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ r.ticker or "-" }}</a>
+                <span class="muted">· {{ r.name or "-" }}</span>
+              </div>
+              <div class="todo-meta">{{ r.industry or "-" }} • {{ r.market_cap or "-" }}</div>
+              {% if r.evidence %}<div class="muted" style="margin-top:3px;">{{ r.evidence }}</div>{% endif %}
+            </div>
+            <div style="display:grid;gap:6px;justify-items:end;">
+              <div class="ticker-chip">Conf {{ "%.0f"|format((r.confidence or 0) * 100) }}%</div>
+              {% if (r.source or "") == "manual" and (r.id or 0) > 0 %}
+              <form method="post" action="/company_file/supply-chain-remove"
+                    hx-post="/company_file/supply-chain-remove" hx-target="#companyDetailRoot" hx-swap="outerHTML">
+                <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+                <input type="hidden" name="row_id" value="{{ r.id }}">
+                <button type="submit" class="btn" style="font-size:11px;padding:2px 8px;">Remove</button>
+              </form>
+              {% endif %}
+            </div>
+          </div>
+          {% else %}
+          <div class="muted">No mapped partners yet.</div>
+          {% endfor %}
+        </div>
+
+        <form method="post" action="/company_file/supply-chain-add"
+              hx-post="/company_file/supply-chain-add" hx-target="#companyDetailRoot" hx-swap="outerHTML"
+              style="margin-top:12px;padding:10px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;display:grid;gap:8px;">
+          <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+          <div style="font-size:12px;font-weight:800;color:#1f2937;">Add relationship</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <input name="counterparty_ticker" placeholder="Ticker (e.g. VRT)" required>
+            <input name="counterparty_name" placeholder="Company name (optional)">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <select name="relationship_type">
+              <option value="supplier">Supplier</option>
+              <option value="customer">Customer</option>
+              <option value="partner">Partner</option>
+            </select>
+            <input name="confidence" type="number" min="0" max="1" step="0.05" value="0.70" placeholder="Confidence 0-1">
+          </div>
+          <textarea name="evidence" rows="2" placeholder="Evidence or note (optional)"></textarea>
+          <div>
+            <button type="submit" class="btn">Add Supply Link</button>
+          </div>
+        </form>
+      </article>
+
+      <article class="canvas-sec">
         <h3 class="sec-head">Similar Companies</h3>
         <div class="todo-meta" style="margin-bottom:8px;">Same industry with closest market cap.</div>
         <div style="display:grid;gap:8px;">
@@ -378,6 +496,7 @@
               {% else %}
               <a class="btn" href="/company_file?t={{ detail.ticker|urlencode }}&show_ai=1">Show AI notes</a>
               {% endif %}
+              <button class="btn" id="analyzeNowBtn" onclick="triggerAgentAnalysis('{{ detail.ticker|urlencode }}')" title="Run agent analysis now">Analyze Now</button>
             </div>
           </div>
           {% set calls = detail.earnings_calls or [] %}
@@ -701,6 +820,34 @@
     renderDonuts();
     renderBuybackBars();
   })();
+
+  function triggerAgentAnalysis(ticker) {
+    var btn = document.getElementById('analyzeNowBtn');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+    fetch('/api/agent/analyze', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ticker: decodeURIComponent(ticker)})
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d.ok) {
+        btn.textContent = 'Started ✓';
+        btn.title = d.message || 'Agent analysis started';
+        setTimeout(function(){ btn.textContent = 'Analyze Now'; btn.disabled = false; }, 5000);
+      } else {
+        btn.textContent = 'Error';
+        btn.title = d.error || 'Unknown error';
+        setTimeout(function(){ btn.textContent = 'Analyze Now'; btn.disabled = false; }, 3000);
+      }
+    })
+    .catch(function(){
+      btn.textContent = 'Error';
+      setTimeout(function(){ btn.textContent = 'Analyze Now'; btn.disabled = false; }, 3000);
+    });
+  }
 </script>
 
 <style>

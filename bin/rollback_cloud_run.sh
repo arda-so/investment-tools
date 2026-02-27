@@ -30,16 +30,22 @@ if [ -z "$ROLLBACK_TAG" ]; then
   exit 1
 fi
 
+SA_OPT=""
 if [ -n "$SERVICE_ACCOUNT" ]; then
-  SA_FLAG=(--service-account="$SERVICE_ACCOUNT")
-else
-  SA_FLAG=()
+  SA_OPT="--service-account=$SERVICE_ACCOUNT"
 fi
 
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/app:${ROLLBACK_TAG}"
 SECRETS="POSTGRES_DSN=POSTGRES_DSN:latest"
 if [ "$INCLUDE_GEMINI_SECRET" = "1" ]; then
   SECRETS="${SECRETS},GEMINI_API_KEY=GEMINI_API_KEY:latest"
+fi
+COMMON_ENV="APP_ENV=cloud,APP_PORT=8080,APP_HOST=0.0.0.0,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1"
+if [ -n "${CLOUD_FILES_BUCKET:-}" ]; then
+  COMMON_ENV="${COMMON_ENV},CLOUD_FILES_BUCKET=${CLOUD_FILES_BUCKET}"
+fi
+if [ -n "${CLOUD_FILES_PREFIX:-}" ]; then
+  COMMON_ENV="${COMMON_ENV},CLOUD_FILES_PREFIX=${CLOUD_FILES_PREFIX}"
 fi
 
 echo "Rolling back app to image: $IMAGE"
@@ -48,10 +54,10 @@ gcloud run deploy "$APP_SERVICE" \
   --region="$REGION" \
   --platform=managed \
   --no-allow-unauthenticated \
+  $SA_OPT \
   --add-cloudsql-instances="${PROJECT_ID}:${REGION}:${DB_INSTANCE}" \
-  --set-env-vars="APP_ENV=cloud,APP_PORT=8080,APP_HOST=0.0.0.0,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1" \
-  --set-secrets="$SECRETS" \
-  "${SA_FLAG[@]}"
+  --set-env-vars="${COMMON_ENV}" \
+  --set-secrets="$SECRETS"
 
 if [ "$DEPLOY_WORKER" = "1" ]; then
   echo "Rolling back worker to image: $IMAGE"
@@ -60,11 +66,11 @@ if [ "$DEPLOY_WORKER" = "1" ]; then
     --region="$REGION" \
     --platform=managed \
     --no-allow-unauthenticated \
+    $SA_OPT \
     --command="/app/bin/run_ai_worker" \
     --add-cloudsql-instances="${PROJECT_ID}:${REGION}:${DB_INSTANCE}" \
     --set-env-vars="APP_ENV=cloud,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1" \
-    --set-secrets="$SECRETS" \
-    "${SA_FLAG[@]}"
+    --set-secrets="$SECRETS"
 fi
 
 APP_URL="$(gcloud run services describe "$APP_SERVICE" --region "$REGION" --project "$PROJECT_ID" --format='value(status.url)')"

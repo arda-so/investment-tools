@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
-RUN chmod +x /app/bin/run_v2_app /app/bin/run_ai_worker
+RUN mkdir -p /app/data /app/logs \
+    && chmod +x /app/bin/run_v2_app /app/bin/run_ai_worker /app/bin/run_agent_worker
 
 EXPOSE 8080
 

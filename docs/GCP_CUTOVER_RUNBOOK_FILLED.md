@@ -21,6 +21,23 @@ SERVICE_ACCOUNT="investor-tools-runtime@TODO_YOUR_GCP_PROJECT_ID.iam.gserviceacc
 ./bin/rollback_cloud_run.sh
 ```
 
+## Cloud File Parity (Reports/Filings/Data)
+
+```bash
+export PROJECT_ID="TODO_YOUR_GCP_PROJECT_ID"
+export REGION="europe-west1"
+export FILE_BUCKET="${PROJECT_ID}-runtime-files"
+
+gcloud storage buckets create "gs://${FILE_BUCKET}" --project="${PROJECT_ID}" --location="${REGION}" --uniform-bucket-level-access
+python3 tools/sync_cloud_files.py --bucket "${FILE_BUCKET}" --root .
+
+# Deploy with cloud file envs
+PROJECT_ID="${PROJECT_ID}" REGION="${REGION}" DB_INSTANCE="investor-os-pg" \
+SERVICE_ACCOUNT="investor-tools-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
+CLOUD_FILES_BUCKET="${FILE_BUCKET}" CLOUD_FILES_PREFIX="" INCLUDE_GEMINI_SECRET=0 \
+./bin/deploy_cloud_run.sh
+```
+
 ## 1) Set Variables (edit once)
 
 ```bash

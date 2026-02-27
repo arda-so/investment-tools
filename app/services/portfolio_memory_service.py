@@ -32,6 +32,7 @@ from app.services.postgres_core_service import (
     upsert_investor_style_memory_pg,
     upsert_watchlist_thesis_pg,
 )
+from app.services.portfolio_state_service import read_portfolio_rows_state, read_watchlist_rows_state
 from app.services.app_knowledge_service import retrieve_app_knowledge
 from app.services.reports_service import list_reports, read_report_file
 
@@ -1478,6 +1479,46 @@ def record_decision(
     timestamp: str = "",
     reasoning: str = "",
 ) -> None:
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return
+        try:
+            cur = con_pg.cursor()
+            now = dt.datetime.now().isoformat()
+            ts = str(timestamp or "").strip() or now
+            rs = str(reasoning or "").strip() or str(reason or "").strip()
+            cur.execute(
+                """
+                INSERT INTO decision_log_core
+                    (created_at, timestamp, ticker, action, reason, reasoning, confidence, source, trace_id, quantity, price)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    now,
+                    ts,
+                    str(ticker or "").strip().upper()[:16],
+                    str(action or "").strip().lower()[:64],
+                    str(reason or "")[:2000],
+                    rs[:2000],
+                    float(confidence or 0.0),
+                    str(source or "app")[:64],
+                    str(trace_id or "")[:120],
+                    float(quantity or 0.0),
+                    float(price or 0.0),
+                ),
+            )
+            con_pg.commit()
+        except Exception as exc:
+            print(f"[record_decision_pg] {type(exc).__name__}: {exc}")
+            try:
+                con_pg.rollback()
+            except Exception:
+                pass
+        finally:
+            con_pg.close()
+        return
+
     def _write() -> None:
         con = _conn()
         try:
@@ -1524,6 +1565,22 @@ def upsert_watchlist_thesis(
 ) -> None:
     t = str(ticker or "").strip().upper()[:16]
     if not t:
+        return
+    if core_backend() == "postgres":
+        _ = upsert_watchlist_thesis_pg(
+            ticker=t,
+            thesis=str(thesis or ""),
+            thesis_summary=str((thesis_summary or thesis) or ""),
+            pick_method=str(pick_method or ""),
+            triggers=str(triggers or ""),
+            invalidation=str(invalidation or ""),
+            conviction_rating=int(conviction_rating or 0),
+            time_horizon=str(time_horizon or ""),
+            invalidation_criteria=str((invalidation_criteria or invalidation) or ""),
+            strategy_tag=str(strategy_tag or "CORE"),
+            pattern_learnable=int(pattern_learnable),
+            status=str(status or "active"),
+        )
         return
     now = dt.datetime.now().isoformat()
     con = _conn()
@@ -2541,6 +2598,31 @@ def import_portfolio_history_csv(csv_text: str, source: str = "broker_csv") -> d
 
 
 def get_interview_progress() -> dict[str, Any]:
+    if strict_postgres_mode():
+        con = pg_connect()
+        if con is None:
+            return {"reviewed": 0, "total": 0, "done": 0, "pending": 0}
+        try:
+            cur = con.cursor()
+            cur.execute(
+                """SELECT
+                     SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done_cnt,
+                     SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_cnt,
+                     COUNT(*) AS total_cnt
+                   FROM portfolio_interview_queue_core"""
+            )
+            row = cur.fetchone()
+            done = int((row[0] if row else 0) or 0)
+            pending = int((row[1] if row else 0) or 0)
+            total = int((row[2] if row else 0) or 0)
+            reviewed = done
+            if pending > 0:
+                reviewed = max(done, total - pending)
+            return {"reviewed": reviewed, "total": total, "done": done, "pending": pending}
+        except Exception:
+            return {"reviewed": 0, "total": 0, "done": 0, "pending": 0}
+        finally:
+            con.close()
     con = _conn()
     try:
         row = con.execute(
@@ -2563,6 +2645,38 @@ def get_interview_progress() -> dict[str, Any]:
 
 def get_pending_interview_question() -> dict[str, Any]:
     ensure_portfolio_memory_schema()
+    if strict_postgres_mode():
+        con = pg_connect()
+        if con is None:
+            return {"ok": True, "pending": False, "next": {}}
+        try:
+            cur = con.cursor()
+            cur.execute(
+                """SELECT ticker, step, last_question
+                   FROM portfolio_interview_queue_core
+                   WHERE status='pending'
+                   ORDER BY CASE WHEN ticker LIKE 'PROFILE::%%' THEN 0 ELSE 1 END, id ASC
+                   LIMIT 1"""
+            )
+            row = cur.fetchone()
+            if not row:
+                return {"ok": True, "pending": False, "next": {}}
+            tk = str(row[0] or "").strip().upper()
+            st = int(row[1] or 0)
+            q = str(row[2] or "").strip()
+            return {
+                "ok": True,
+                "pending": True,
+                "next": {
+                    "ticker": tk,
+                    "step": st,
+                    "question": _queue_question_text(tk, st, q),
+                },
+            }
+        except Exception:
+            return {"ok": True, "pending": False, "next": {}}
+        finally:
+            con.close()
     con = _conn()
     try:
         row = con.execute(
@@ -2591,6 +2705,36 @@ def get_pending_interview_question() -> dict[str, Any]:
 def get_missing_profile_questions(limit: int = 3) -> list[dict[str, str]]:
     ensure_portfolio_memory_schema()
     lim = max(1, min(int(limit or 3), 10))
+    if strict_postgres_mode():
+        con = pg_connect()
+        if con is None:
+            return []
+        try:
+            cur = con.cursor()
+            answers: dict[str, str] = {}
+            cur.execute("SELECT key, answer FROM investor_style_memory_core")
+            for row in cur.fetchall() or []:
+                answers[str(row[0] or "").strip()] = str(row[1] or "")
+            overrides: dict[str, str] = {}
+            try:
+                cur.execute("SELECT key, question FROM investor_question_overrides_core")
+                for row in cur.fetchall() or []:
+                    overrides[str(row[0] or "").strip()] = str(row[1] or "")
+            except Exception:
+                pass
+            out: list[dict[str, str]] = []
+            for key, default_question in PROFILE_QUESTIONS:
+                question = str(overrides.get(key) or default_question)
+                if str(answers.get(key) or "").strip():
+                    continue
+                out.append({"key": key, "question": question})
+                if len(out) >= lim:
+                    break
+            return out
+        except Exception:
+            return []
+        finally:
+            con.close()
     con = _conn()
     try:
         out: list[dict[str, str]] = []
@@ -2664,16 +2808,10 @@ def _earnings_relevant_hits(today: dt.date | None = None) -> list[dict[str, str]
 
 
 def _read_portfolio_tickers_file() -> set[str]:
-    p = ROOT / "data" / "portfolio.csv"
     out: set[str] = set()
-    if not p.exists():
-        return out
     try:
-        for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            parts = [x.strip() for x in str(ln or "").split(",")]
-            if not parts:
-                continue
-            tk = _safe_ticker(parts[0] if len(parts) >= 1 else "")
+        for r in read_portfolio_rows_state():
+            tk = _safe_ticker(str(r.get("ticker") or ""))
             if tk:
                 out.add(tk)
     except Exception:
@@ -2682,17 +2820,10 @@ def _read_portfolio_tickers_file() -> set[str]:
 
 
 def _read_watchlist_tickers_file() -> set[str]:
-    p = ROOT / "data" / "my_watchlist.txt"
     out: set[str] = set()
-    if not p.exists():
-        return out
     try:
-        for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = str(ln or "").strip()
-            if not s or s.startswith("#"):
-                continue
-            parts = [x.strip() for x in s.split(",")]
-            tk = _safe_ticker(parts[0] if parts else "")
+        for r in read_watchlist_rows_state():
+            tk = _safe_ticker(str(r.get("ticker") or ""))
             if tk:
                 out.add(tk)
     except Exception:
@@ -3166,29 +3297,55 @@ def get_morning_brief(limit_holdings: int = 5) -> dict[str, Any]:
             bullets.append(f"{tag}: {tk} is {dp:+.2f}% today.")
 
     if top_tickers:
-        marks = ",".join("?" for _ in top_tickers)
-        con = _conn()
-        try:
-            rows = con.execute(
-                f"""SELECT ticker, title, summary, created_at
-                    FROM intel_feed
-                    WHERE ticker IN ({marks})
-                    ORDER BY id DESC
-                    LIMIT 20""",
-                tuple(top_tickers),
-            ).fetchall()
-        except Exception:
-            rows = []
-        finally:
-            con.close()
+        rows: list[Any] = []
+        if core_backend() == "postgres":
+            con_pg = pg_connect()
+            if con_pg is not None:
+                try:
+                    marks = ",".join("%s" for _ in top_tickers)
+                    cur = con_pg.cursor()
+                    cur.execute(
+                        f"""SELECT ticker, title, summary, created_at
+                            FROM intel_feed_core
+                            WHERE ticker IN ({marks})
+                            ORDER BY id DESC
+                            LIMIT 20""",
+                        tuple(top_tickers),
+                    )
+                    rows = list(cur.fetchall() or [])
+                except Exception:
+                    rows = []
+                finally:
+                    con_pg.close()
+        else:
+            marks = ",".join("?" for _ in top_tickers)
+            con = _conn()
+            try:
+                rows = con.execute(
+                    f"""SELECT ticker, title, summary, created_at
+                        FROM intel_feed
+                        WHERE ticker IN ({marks})
+                        ORDER BY id DESC
+                        LIMIT 20""",
+                    tuple(top_tickers),
+                ).fetchall()
+            except Exception:
+                rows = []
+            finally:
+                con.close()
         seen: set[str] = set()
         for r in rows:
-            tk = str(r["ticker"] or "").strip().upper()
+            if isinstance(r, (tuple, list)):
+                tk = str((r[0] if len(r) > 0 else "") or "").strip().upper()
+                title = str((r[1] if len(r) > 1 else "") or "").strip()
+                summ = str((r[2] if len(r) > 2 else "") or "").strip()
+            else:
+                tk = str(r["ticker"] or "").strip().upper()
+                title = str(r["title"] or "").strip()
+                summ = str(r["summary"] or "").strip()
             if not tk or tk in seen:
                 continue
             seen.add(tk)
-            title = str(r["title"] or "").strip()
-            summ = str(r["summary"] or "").strip()
             line = title or summ
             if line:
                 bullets.append(f"News ({tk}): {line[:120]}")
@@ -3218,6 +3375,43 @@ def save_morning_brief_snapshot(limit_holdings: int = 5, source: str = "schedule
     payload = json.dumps(brief, ensure_ascii=False)
     src = str(source or "scheduler").strip()[:40] or "scheduler"
 
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute(
+                    "SELECT id FROM morning_briefs_core WHERE brief_day=%s LIMIT 1",
+                    (day,),
+                )
+                row = cur.fetchone()
+                if row:
+                    bid = int((row[0] if isinstance(row, (tuple, list)) else row["id"]) or 0)
+                    cur.execute(
+                        """UPDATE morning_briefs_core
+                           SET created_at=%s, source=%s, brief_json=%s::jsonb
+                           WHERE id=%s""",
+                        (now, src, payload, bid),
+                    )
+                else:
+                    cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM morning_briefs_core")
+                    nxt = cur.fetchone()
+                    bid = int((nxt[0] if isinstance(nxt, (tuple, list)) else nxt[0]) or 1)
+                    cur.execute(
+                        """INSERT INTO morning_briefs_core (id, brief_day, created_at, source, brief_json)
+                           VALUES (%s, %s, %s, %s, %s::jsonb)""",
+                        (bid, day, now, src, payload),
+                    )
+                con_pg.commit()
+            except Exception:
+                try:
+                    con_pg.rollback()
+                except Exception:
+                    pass
+            finally:
+                con_pg.close()
+        return brief
+
     def _write() -> bool:
         con = _conn()
         try:
@@ -3242,6 +3436,38 @@ def save_morning_brief_snapshot(limit_holdings: int = 5, source: str = "schedule
 def get_cached_morning_brief(day: str | None = None) -> dict[str, Any]:
     ensure_portfolio_memory_schema()
     target_day = str(day or dt.date.today().isoformat()).strip()
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return {}
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """SELECT brief_json
+                   FROM morning_briefs_core
+                   WHERE brief_day = %s
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                (target_day,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            raw = row[0] if isinstance(row, (tuple, list)) else row["brief_json"]
+            if isinstance(raw, dict):
+                return raw
+            if isinstance(raw, str):
+                raw_s = raw.strip()
+                if not raw_s:
+                    return {}
+                obj = json.loads(raw_s)
+                return obj if isinstance(obj, dict) else {}
+            return {}
+        except Exception:
+            return {}
+        finally:
+            con_pg.close()
+
     con = _conn()
     try:
         row = con.execute(

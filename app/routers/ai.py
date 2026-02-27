@@ -5,7 +5,9 @@ import concurrent.futures as cf
 import datetime as dt
 import json
 import re
+import threading
 import time
+import traceback
 
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import StreamingResponse
@@ -70,6 +72,7 @@ from app.services.user_preferences_service import (
     upsert_user_preference,
 )
 from tools.llm_engine import ask_ai_vision, get_ai_runtime_metrics
+from tools.sync_us_listed_universe import sync_universe as sync_us_listed_universe_now
 from app.services.memory_engine import OnyxMemory
 
 
@@ -85,6 +88,47 @@ _OPERATOR_GUARDRAILS: list[tuple[str, str]] = [
     ("engineering.validate_after_change", "Run compile and health checks after changes before declaring done."),
     ("engineering.async_preferred", "Prefer async queue/SSE for deep AI analysis to keep UI responsive."),
 ]
+_SYNC_UNIVERSE_LOCK = threading.Lock()
+_SYNC_UNIVERSE_STATE: dict = {
+    "running": False,
+    "started_at": "",
+    "finished_at": "",
+    "last_error": "",
+    "last_result": None,
+    "run_count": 0,
+}
+
+
+def _sync_universe_worker() -> None:
+    started_at = dt.datetime.now().isoformat()
+    with _SYNC_UNIVERSE_LOCK:
+        _SYNC_UNIVERSE_STATE["running"] = True
+        _SYNC_UNIVERSE_STATE["started_at"] = started_at
+        _SYNC_UNIVERSE_STATE["finished_at"] = ""
+        _SYNC_UNIVERSE_STATE["last_error"] = ""
+    try:
+        result = sync_us_listed_universe_now()
+        with _SYNC_UNIVERSE_LOCK:
+            _SYNC_UNIVERSE_STATE["last_result"] = result
+            _SYNC_UNIVERSE_STATE["finished_at"] = dt.datetime.now().isoformat()
+            _SYNC_UNIVERSE_STATE["run_count"] = int(_SYNC_UNIVERSE_STATE.get("run_count") or 0) + 1
+    except Exception:
+        with _SYNC_UNIVERSE_LOCK:
+            _SYNC_UNIVERSE_STATE["last_error"] = traceback.format_exc(limit=6)
+            _SYNC_UNIVERSE_STATE["finished_at"] = dt.datetime.now().isoformat()
+            _SYNC_UNIVERSE_STATE["run_count"] = int(_SYNC_UNIVERSE_STATE.get("run_count") or 0) + 1
+    finally:
+        with _SYNC_UNIVERSE_LOCK:
+            _SYNC_UNIVERSE_STATE["running"] = False
+
+
+def _sync_universe_start() -> bool:
+    with _SYNC_UNIVERSE_LOCK:
+        if bool(_SYNC_UNIVERSE_STATE.get("running")):
+            return False
+    t = threading.Thread(target=_sync_universe_worker, name="sync-universe-worker", daemon=True)
+    t.start()
+    return True
 
 
 @router.get("/ai/runtime/metrics")
@@ -936,7 +980,16 @@ def import_portfolio_history(payload: dict = Body(default={})):
 
 @router.get("/ai/proactive")
 def ai_proactive(name: str = Query(default="Arda")):
-    return get_proactive_gap_prompt(user_name=name)
+    try:
+        return get_proactive_gap_prompt(user_name=name)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "proactive_gap_unavailable",
+            "detail": str(exc),
+            "prompt": "",
+            "suggested_actions": [],
+        }
 
 
 @router.get("/ai/proactive/audit")
@@ -1010,6 +1063,37 @@ def ai_migration_bootstrap():
 @router.post("/ai/migration/sync-core")
 def ai_migration_sync_core():
     return sync_core_from_sqlite()
+
+
+@router.post("/ai/migration/sync-universe")
+def ai_migration_sync_universe(background: int = Query(default=1)):
+    if int(background or 0) == 0:
+        return sync_us_listed_universe_now()
+    started = _sync_universe_start()
+    with _SYNC_UNIVERSE_LOCK:
+        return {
+            "ok": True,
+            "started": bool(started),
+            "running": bool(_SYNC_UNIVERSE_STATE.get("running")),
+            "started_at": str(_SYNC_UNIVERSE_STATE.get("started_at") or ""),
+            "finished_at": str(_SYNC_UNIVERSE_STATE.get("finished_at") or ""),
+            "last_error": str(_SYNC_UNIVERSE_STATE.get("last_error") or ""),
+            "run_count": int(_SYNC_UNIVERSE_STATE.get("run_count") or 0),
+        }
+
+
+@router.get("/ai/migration/sync-universe/status")
+def ai_migration_sync_universe_status():
+    with _SYNC_UNIVERSE_LOCK:
+        return {
+            "ok": True,
+            "running": bool(_SYNC_UNIVERSE_STATE.get("running")),
+            "started_at": str(_SYNC_UNIVERSE_STATE.get("started_at") or ""),
+            "finished_at": str(_SYNC_UNIVERSE_STATE.get("finished_at") or ""),
+            "last_error": str(_SYNC_UNIVERSE_STATE.get("last_error") or ""),
+            "last_result": _SYNC_UNIVERSE_STATE.get("last_result"),
+            "run_count": int(_SYNC_UNIVERSE_STATE.get("run_count") or 0),
+        }
 
 
 @router.get("/ai/migration/verify-core")

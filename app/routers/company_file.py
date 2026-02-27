@@ -9,11 +9,14 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, JSONResponse
 
+from app.core import cloud_files
+from app.core.filing_text import normalize_filing_rel_path, read_filing_text_any
 from app.core.http import is_hx_request
 from app.services.company_file_service import (
     add_company_note,
@@ -26,8 +29,10 @@ from app.services.company_file_service import (
     list_filters,
     moat_filters,
     remove_competitor,
+    remove_supply_chain_link,
     save_company_moats,
     safe_resolve_filing_path,
+    add_supply_chain_link,
     toggle_company_reminder,
     toggle_company_task,
     update_competitor,
@@ -47,11 +52,25 @@ from app.services.mini_statements_service import refresh_mini_statements, fetch_
 from app.services.company_intel_service import refresh_company_intel
 from app.services.earnings_transcript_service import refresh_earnings_transcripts_from_sec
 from app.services.sec_ingest_pipeline_service import ingest_sec_facts_for_ticker
+from app.services.sec_edgar_poller_service import poll_ticker, poll_and_ingest_tickers
 
 
 router = APIRouter()
 _SYNC_LOCK = threading.Lock()
 _SEC_SYNC_STATE: dict[str, dict[str, str]] = {}
+
+
+def _parse_ticker_list(raw: str) -> list[str]:
+    parts = re.split(r"[\s,;]+", str(raw or "").upper())
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        tk = re.sub(r"[^A-Z0-9.\-]", "", p).strip()
+        if not tk or tk in seen:
+            continue
+        seen.add(tk)
+        out.append(tk)
+    return out
 
 
 def _parse_show_ai_flag(raw: object) -> bool | None:
@@ -153,6 +172,175 @@ def _back_to_ticker(ticker: str, msg: str = "") -> RedirectResponse:
     return RedirectResponse(url=url, status_code=303)
 
 
+def _derive_sec_primary_doc_url(doc_url: str, accession: str, file_name: str) -> str:
+    u = str(doc_url or "").strip()
+    acc = re.sub(r"[^0-9]", "", str(accession or ""))
+    fn = str(file_name or "").strip()
+    if not u or not acc or not fn or "/" in fn:
+        return ""
+    try:
+        pu = urllib.parse.urlsplit(u)
+        m = re.search(r"(/Archives/edgar/data/\d+)/", str(pu.path or ""), flags=re.IGNORECASE)
+        if not m:
+            return ""
+        base = m.group(1).rstrip("/")
+        new_path = f"{base}/{acc}/{fn}"
+        return urllib.parse.urlunsplit((pu.scheme or "https", pu.netloc, new_path, "", ""))
+    except Exception:
+        return ""
+
+
+def _is_synthetic_cached_name(file_name: str, ticker: str) -> bool:
+    fn = str(file_name or "").strip()
+    tk = str(ticker or "").strip().upper()
+    if not fn:
+        return True
+    up = fn.upper()
+    if tk and up.startswith(f"{tk}_"):
+        return True
+    return bool(re.match(r"^[A-Z0-9.\-]+_(10-K|10-Q|8-K|20-F|6-K|DEF ?14A)_[0-9\-]+\.TXT$", up))
+
+
+def _fetch_sec_primary_from_index(doc_url: str, desired_form: str = "") -> str:
+    u = str(doc_url or "").strip()
+    if not u.lower().startswith(("http://", "https://")):
+        return ""
+    if not u.lower().endswith("-index.html"):
+        return ""
+    try:
+        req = urllib.request.Request(
+            u,
+            headers={
+                "User-Agent": "InvestorOS SEC Open/1.0 (research@investoros.local)",
+                "Accept": "text/html, */*",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    block = raw
+    m = re.search(r"(?is)Document Format Files.*?<table.*?</table>", raw)
+    if m:
+        block = m.group(0)
+    def _sec_ix_doc_target(u_full: str) -> str:
+        try:
+            pu = urllib.parse.urlsplit(str(u_full or ""))
+            q = urllib.parse.parse_qs(str(pu.query or ""))
+            d = str((q.get("doc") or [""])[0] or "").strip()
+            if not d:
+                return ""
+            return urllib.parse.urljoin("https://www.sec.gov", d)
+        except Exception:
+            return ""
+
+    form_norm = re.sub(r"\s+", "", str(desired_form or "").upper())
+    rows = re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", block)
+    if form_norm and rows:
+        for row in rows:
+            cells = re.findall(r"(?is)<td[^>]*>(.*?)</td>", row)
+            if len(cells) < 4:
+                continue
+            type_text = re.sub(r"(?is)<[^>]+>", " ", str(cells[3] or ""))
+            type_norm = re.sub(r"\s+", "", type_text).upper()
+            if type_norm != form_norm:
+                continue
+            doc_cell = str(cells[2] or "")
+            for href in re.findall(r'(?is)href="([^"]+)"', doc_cell):
+                h = str(href or "").strip()
+                if not h or h.lower().startswith("javascript:"):
+                    continue
+                abs_u = urllib.parse.urljoin(u, h)
+                low = abs_u.lower()
+                if "ix?doc=" in low:
+                    tgt = _sec_ix_doc_target(abs_u)
+                    if tgt:
+                        return tgt
+                    continue
+                if low.endswith((".htm", ".html", ".xhtml", ".txt", ".xml")):
+                    return abs_u
+    for href in re.findall(r'(?is)href="([^"]+)"', block):
+        h = str(href or "").strip()
+        if not h or h.lower().startswith("javascript:"):
+            continue
+        abs_u = urllib.parse.urljoin(u, h)
+        low = abs_u.lower()
+        if "ix?doc=" in low:
+            tgt = _sec_ix_doc_target(abs_u)
+            if tgt:
+                return tgt
+            continue
+        if low.endswith((".htm", ".html", ".xhtml", ".txt", ".xml")):
+            return abs_u
+    return ""
+
+
+def _apply_sec_open_links(detail: dict, ticker: str, prefer_sec_direct_open: bool) -> None:
+    tk = urllib.parse.quote(str(ticker or "").strip().upper())
+    groups = list(detail.get("filing_groups") or [])
+    for g in groups:
+        rows = list(g.get("rows") or [])
+        for r in rows:
+            pth = str(r.get("path") or "").strip()
+            doc_url = str(r.get("doc_url") or "").strip()
+            file_name = str(r.get("file_name") or "").strip()
+            accession = str(r.get("accession") or "").strip()
+            if prefer_sec_direct_open and doc_url:
+                r["open_href"] = (
+                    "/company_file/sec-open?doc="
+                    + urllib.parse.quote(doc_url, safe="")
+                    + "&t="
+                    + tk
+                    + "&acc="
+                    + urllib.parse.quote(accession, safe="")
+                    + "&fn="
+                    + urllib.parse.quote(file_name, safe="")
+                    + "&form="
+                    + urllib.parse.quote(str(r.get("form") or ""), safe="")
+                )
+                r["open_external"] = "0"
+                r["open_label"] = "Open"
+            elif pth:
+                r["open_href"] = (
+                    "/filing?path="
+                    + urllib.parse.quote(pth, safe="")
+                    + "&doc="
+                    + urllib.parse.quote(doc_url, safe="")
+                    + "&t="
+                    + tk
+                    + "&mode=original"
+                )
+                r["open_external"] = "0"
+                r["open_label"] = "Open"
+            elif doc_url:
+                r["open_href"] = doc_url
+                r["open_external"] = "1"
+                r["open_label"] = "Open SEC"
+            else:
+                r["open_href"] = ""
+                r["open_external"] = "0"
+                r["open_label"] = "N/A"
+
+
+@router.get("/company_file/sec-open")
+def company_sec_open(doc: str = "", t: str = "", acc: str = "", fn: str = "", form: str = ""):
+    doc_url = str(doc or "").strip()
+    if not doc_url.lower().startswith(("http://", "https://")):
+        return _back_to_ticker(str(t or ""), "SEC document URL is missing.")
+    ticker = str(t or "").strip().upper()
+    file_name = str(fn or "").strip()
+    target = ""
+    if file_name and not _is_synthetic_cached_name(file_name, ticker):
+        target = _derive_sec_primary_doc_url(doc_url, str(acc or "").strip(), file_name)
+    if not target:
+        target = _fetch_sec_primary_from_index(doc_url, desired_form=form)
+    if not target:
+        target = doc_url
+    return RedirectResponse(url=target, status_code=302)
+
+
 def _sync_python_bin() -> str:
     root = Path(__file__).resolve().parents[2]
     venv_py = root / ".venv-memory" / "bin" / "python"
@@ -168,26 +356,20 @@ def _sync_ticker_worker(ticker: str) -> None:
     t = str(ticker or "").strip().upper()
     if not t:
         return
-    root = Path(__file__).resolve().parents[2]
-    py = _sync_python_bin()
-    steps = [
-        [py, "research_agent.py", "init"],
-        [py, "research_agent.py", "watch", t],
-        [py, "research_agent.py", "update", "--ticker", t, "--full"],
-    ]
-    ok = True
-    msg = "SEC filing sync complete."
-    log_dir = root / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"v2_company_sec_sync_{t}.log"
-    with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n=== {dt.datetime.now().isoformat()} sync {t} ===\n")
-        for step in steps:
-            success, err = _run_step_with_retries(step, root=root, fh=fh, timeout=1800, retries=3)
-            if not success:
-                ok = False
-                msg = f"Sync failed at step: {' '.join(step[1:3])} | {err[:160]}"
-                break
+    ok = False
+    msg = "SEC filing sync failed."
+    try:
+        out = poll_ticker(t, is_held=True)
+        ok = bool(out.get("ok"))
+        if ok:
+            msg = (
+                f"SEC filing sync complete. new_filings={int(out.get('new_filings') or 0)} "
+                f"events={int(out.get('events_created') or 0)}"
+            )
+        else:
+            msg = f"SEC filing sync failed: {str(out.get('error') or 'unknown_error')[:180]}"
+    except Exception as exc:
+        msg = f"SEC filing sync failed: {type(exc).__name__}: {str(exc)[:150]}"
     with _SYNC_LOCK:
         _SEC_SYNC_STATE[t] = {
             "running": "0",
@@ -200,26 +382,55 @@ def _sync_ticker_worker(ticker: str) -> None:
 
 def _sync_my_companies_worker() -> None:
     key = "MY_COMPANIES_BATCH"
-    root = Path(__file__).resolve().parents[2]
-    py = _sync_python_bin()
-    step = [py, "tools/sec_sync_my_companies.py", "--days", "7", "--full-empty-limit", "6"]
-    ok = True
-    msg = "My companies SEC sync complete."
-    log_dir = root / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "v2_sec_sync_my_companies.log"
-    with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n=== {dt.datetime.now().isoformat()} sync my companies ===\n")
-        success, err = _run_step_with_retries(step, root=root, fh=fh, timeout=7200, retries=2)
-        if not success:
-            ok = False
-            msg = f"My companies SEC sync failed: {err[:180]}"
+    ok = False
+    msg = "My companies SEC sync failed."
+    try:
+        out = poll_and_ingest_tickers()
+        ok = bool(out.get("ok"))
+        if ok:
+            msg = (
+                f"My companies SEC sync complete. checked={int(out.get('tickers_checked') or 0)} "
+                f"new_filings={int(out.get('new_filings') or 0)} events={int(out.get('events_created') or 0)}"
+            )
+        else:
+            msg = f"My companies SEC sync failed: {str(out.get('error') or 'unknown_error')[:180]}"
+    except Exception as exc:
+        msg = f"My companies SEC sync failed: {type(exc).__name__}: {str(exc)[:150]}"
     with _SYNC_LOCK:
         _SEC_SYNC_STATE[key] = {
             "running": "0",
             "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "result": "ok" if ok else "failed",
             "message": msg,
+        }
+
+
+def _sync_ticker_list_worker(tickers: list[str]) -> None:
+    key = "SEC_LIST_BATCH"
+    done = 0
+    ok_count = 0
+    fail_count = 0
+    for tk in list(tickers or []):
+        _sync_ticker_worker(tk)
+        done += 1
+        st = (_SEC_SYNC_STATE.get(tk) or {}).get("result") or ""
+        if str(st) == "ok":
+            ok_count += 1
+        else:
+            fail_count += 1
+        with _SYNC_LOCK:
+            _SEC_SYNC_STATE[key] = {
+                "running": "1",
+                "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "running",
+                "message": f"Processed {done}/{len(tickers)} tickers (ok={ok_count}, failed={fail_count})",
+            }
+    with _SYNC_LOCK:
+        _SEC_SYNC_STATE[key] = {
+            "running": "0",
+            "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "ok" if fail_count == 0 else "partial",
+            "message": f"Batch complete. total={len(tickers)} ok={ok_count} failed={fail_count}",
         }
 
 
@@ -307,6 +518,8 @@ def company_sec_page(request: Request, t: str = "", msg: str = "", form: str = "
             total += len(rows)
         detail["filing_groups"] = groups
         detail["filings"] = [r for g in groups for r in g.get("rows", [])]
+    prefer_sec_direct_open = str(os.getenv("APP_ENV") or "").strip().lower() == "cloud"
+    _apply_sec_open_links(detail, ticker, prefer_sec_direct_open)
     with _SYNC_LOCK:
         state_file = load_sec_sync_state()
         current = _SEC_SYNC_STATE.get(ticker) or state_file.get(ticker) or {}
@@ -329,10 +542,30 @@ def company_sec_page(request: Request, t: str = "", msg: str = "", form: str = "
 
 
 @router.post("/company_file/sec-sync")
-def company_sec_sync(ticker: str = Form("")):
+def company_sec_sync(ticker: str = Form(""), background: int = Form(1)):
     t = str(ticker or "").strip().upper()
     if not t:
         return RedirectResponse(url="/company_file?msg=" + urllib.parse.quote("Ticker is required."), status_code=303)
+    run_inline = int(background or 0) == 0
+    if run_inline and str(os.getenv("APP_ENV") or "").strip().lower() == "cloud":
+        run_inline = False
+    if run_inline:
+        with _SYNC_LOCK:
+            _SEC_SYNC_STATE[t] = {
+                "running": "1",
+                "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "running",
+                "message": "Sync started...",
+            }
+            set_ticker_sync_state(t, _SEC_SYNC_STATE[t])
+        _sync_ticker_worker(t)
+        with _SYNC_LOCK:
+            current = _SEC_SYNC_STATE.get(t) or {}
+        final_msg = str(current.get("message") or "SEC sync finished.")
+        return RedirectResponse(
+            url="/company_file/sec?t=" + urllib.parse.quote(t) + "&msg=" + urllib.parse.quote(final_msg),
+            status_code=303,
+        )
     start = False
     with _SYNC_LOCK:
         state_file = load_sec_sync_state()
@@ -359,8 +592,29 @@ def company_sec_sync(ticker: str = Form("")):
 
 
 @router.post("/company_file/sec-sync-my")
-def company_sec_sync_my(return_to: str = ""):
+def company_sec_sync_my(return_to: str = "", background: int = Form(1)):
     key = "MY_COMPANIES_BATCH"
+    run_inline = int(background or 0) == 0
+    if run_inline and str(os.getenv("APP_ENV") or "").strip().lower() == "cloud":
+        run_inline = False
+    if run_inline:
+        with _SYNC_LOCK:
+            _SEC_SYNC_STATE[key] = {
+                "running": "1",
+                "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "running",
+                "message": "Batch sync started...",
+            }
+        _sync_my_companies_worker()
+        with _SYNC_LOCK:
+            current = _SEC_SYNC_STATE.get(key) or {}
+        msg = str(current.get("message") or "Portfolio + watchlist SEC sync finished.")
+        rt = str(return_to or "").strip().lower()
+        base = "/my_universe?tab=all"
+        if rt in {"my_universe", "/my_universe"}:
+            base = "/my_universe?tab=all"
+        sep = "&" if "?" in base else "?"
+        return RedirectResponse(url=base + sep + "msg=" + urllib.parse.quote(msg), status_code=303)
     start = False
     with _SYNC_LOCK:
         st = _SEC_SYNC_STATE.get(key, {"running": "0"})
@@ -384,6 +638,81 @@ def company_sec_sync_my(return_to: str = ""):
         base = "/my_universe?tab=all"
     sep = "&" if "?" in base else "?"
     return RedirectResponse(url=base + sep + "msg=" + urllib.parse.quote(msg), status_code=303)
+
+
+@router.get("/company_file/sec-sync-my/status")
+def company_sec_sync_my_status():
+    key = "MY_COMPANIES_BATCH"
+    with _SYNC_LOCK:
+        st = _SEC_SYNC_STATE.get(key) or {}
+    return JSONResponse(
+        {
+            "ok": True,
+            "running": str(st.get("running") or "0") == "1",
+            "last": str(st.get("last") or ""),
+            "result": str(st.get("result") or ""),
+            "message": str(st.get("message") or ""),
+        }
+    )
+
+
+@router.post("/company_file/sec-sync-list")
+def company_sec_sync_list(tickers: str = Form(""), background: int = Form(1)):
+    parsed = _parse_ticker_list(tickers)
+    if not parsed:
+        return JSONResponse({"ok": False, "error": "tickers_required"}, status_code=400)
+    key = "SEC_LIST_BATCH"
+    run_inline = int(background or 0) == 0
+    if run_inline and str(os.getenv("APP_ENV") or "").strip().lower() == "cloud":
+        run_inline = False
+    with _SYNC_LOCK:
+        st = _SEC_SYNC_STATE.get(key, {"running": "0"})
+        if st.get("running") == "1":
+            return JSONResponse({"ok": True, "started": False, "running": True, "message": str(st.get("message") or "Batch already running.")})
+        _SEC_SYNC_STATE[key] = {
+            "running": "1",
+            "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "running",
+            "message": f"Starting batch for {len(parsed)} tickers...",
+        }
+    if run_inline:
+        _sync_ticker_list_worker(parsed)
+        with _SYNC_LOCK:
+            final = dict(_SEC_SYNC_STATE.get(key) or {})
+        return JSONResponse({"ok": True, "started": True, "running": False, "tickers": parsed, "state": final})
+    th = threading.Thread(target=_sync_ticker_list_worker, args=(parsed,), daemon=True)
+    th.start()
+    return JSONResponse({"ok": True, "started": True, "running": True, "tickers": parsed, "message": f"Batch started for {len(parsed)} tickers."})
+
+
+@router.get("/company_file/sec-sync-list/status")
+def company_sec_sync_list_status(tickers: str = ""):
+    key = "SEC_LIST_BATCH"
+    parsed = _parse_ticker_list(tickers)
+    with _SYNC_LOCK:
+        batch = dict(_SEC_SYNC_STATE.get(key) or {})
+    state_file = load_sec_sync_state()
+    items: dict[str, dict[str, str]] = {}
+    for tk in parsed[:200]:
+        cur = (_SEC_SYNC_STATE.get(tk) or state_file.get(tk) or {})
+        items[tk] = {
+            "running": str(cur.get("running") or "0"),
+            "last": str(cur.get("last") or ""),
+            "result": str(cur.get("result") or ""),
+            "message": str(cur.get("message") or ""),
+        }
+    return JSONResponse(
+        {
+            "ok": True,
+            "batch": {
+                "running": str(batch.get("running") or "0") == "1",
+                "last": str(batch.get("last") or ""),
+                "result": str(batch.get("result") or ""),
+                "message": str(batch.get("message") or ""),
+            },
+            "tickers": items,
+        }
+    )
 
 
 @router.post("/company_file/price-metrics-refresh")
@@ -544,9 +873,10 @@ def api_company_financial_deltas(ticker: str = "", years: int = 5):
 
 @router.get("/filing")
 def filing_view(path: str = "", doc: str = "", t: str = "", mode: str = "reader"):
-    p = safe_resolve_filing_path(path)
-    if p is None:
+    rel = normalize_filing_rel_path(path)
+    if not rel:
         return HTMLResponse("<html><body>Filing path not available.</body></html>", status_code=404)
+    p = safe_resolve_filing_path(path)
 
     raw_q = urllib.parse.quote(str(path), safe="")
     doc_s = str(doc or "").strip()
@@ -574,7 +904,7 @@ def filing_view(path: str = "", doc: str = "", t: str = "", mode: str = "reader"
         "pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.35;}</style>"
     )
 
-    ext = p.suffix.lower()
+    ext = (p.suffix.lower() if p is not None else Path(rel).suffix.lower())
     if ext == ".pdf":
         body = (
             "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -586,7 +916,12 @@ def filing_view(path: str = "", doc: str = "", t: str = "", mode: str = "reader"
         )
         return HTMLResponse(body)
 
-    txt = p.read_text(encoding="utf-8", errors="ignore")
+    if p is not None:
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+    else:
+        txt = read_filing_text_any(rel)
+    if not txt:
+        return HTMLResponse("<html><body>Filing content not available.</body></html>", status_code=404)
     mode_norm = str(mode or "original").strip().lower()
     if mode_norm == "reader":
         mode_norm = "original"
@@ -629,11 +964,20 @@ def filing_view(path: str = "", doc: str = "", t: str = "", mode: str = "reader"
 
 @router.get("/filing_raw")
 def filing_raw(path: str = ""):
-    p = safe_resolve_filing_path(path)
-    if p is None:
+    rel = normalize_filing_rel_path(path)
+    if not rel:
         return Response(status_code=404)
-    ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
-    return FileResponse(str(p), media_type=ctype, filename=p.name)
+    p = safe_resolve_filing_path(path)
+    if p is None and not cloud_files.exists(rel):
+        return Response(status_code=404)
+    if p is not None:
+        ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+        return FileResponse(str(p), media_type=ctype, filename=p.name)
+    txt = cloud_files.read_text(rel)
+    if not txt:
+        return Response(status_code=404)
+    ctype = mimetypes.guess_type(rel)[0] or "text/plain; charset=utf-8"
+    return Response(content=txt, media_type=ctype)
 
 
 @router.post("/company_file/ir-email-send")
@@ -773,6 +1117,43 @@ def company_file_competitor_remove(
 ):
     ok = remove_competitor(row_id)
     msg = "Competitor removed." if ok else "Could not remove competitor."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/supply-chain-add")
+def company_file_supply_chain_add(
+    request: Request,
+    ticker: str = Form(""),
+    counterparty_ticker: str = Form(""),
+    counterparty_name: str = Form(""),
+    relationship_type: str = Form("supplier"),
+    evidence: str = Form(""),
+    confidence: float = Form(0.7),
+):
+    ok = add_supply_chain_link(
+        anchor_ticker=ticker,
+        counterparty_ticker=counterparty_ticker,
+        counterparty_name=counterparty_name,
+        relationship_type=relationship_type,
+        evidence=evidence,
+        confidence=confidence,
+    )
+    msg = "Supply chain link added." if ok else "Could not add supply chain link."
+    if is_hx_request(request):
+        return _render_company_detail(request, ticker=ticker, message=msg)
+    return _back_to_ticker(ticker, msg)
+
+
+@router.post("/company_file/supply-chain-remove")
+def company_file_supply_chain_remove(
+    request: Request,
+    ticker: str = Form(""),
+    row_id: int = Form(0),
+):
+    ok = remove_supply_chain_link(row_id=row_id)
+    msg = "Supply chain link removed." if ok else "Could not remove supply chain link."
     if is_hx_request(request):
         return _render_company_detail(request, ticker=ticker, message=msg)
     return _back_to_ticker(ticker, msg)
@@ -946,6 +1327,49 @@ def company_file_reminder_update(
     if is_hx_request(request):
         return _render_company_detail(request, ticker=ticker, message=msg)
     return _back_to_ticker(ticker, msg)
+
+
+@router.post("/api/agent/analyze")
+async def api_agent_analyze(request: Request):
+    """
+    Manually trigger the agent worker to analyse a ticker.
+    Runs in a background thread so the response returns immediately.
+    Body: {"ticker": "AAPL", "form": "10-Q"}  (form is optional)
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    ticker = str(payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return JSONResponse({"ok": False, "error": "ticker_required"}, status_code=400)
+
+    form = str(payload.get("form") or "10-Q").strip().upper()
+
+    def _run():
+        try:
+            import sys
+            from pathlib import Path
+            ROOT = Path(__file__).resolve().parents[2]
+            if str(ROOT) not in sys.path:
+                sys.path.insert(0, str(ROOT))
+            from tools.agent_worker import run as agent_run
+            event = {
+                "type": "manual",
+                "ticker": ticker,
+                "form": form,
+                "accession": "",
+                "filing_path": "",
+                "filing_date": dt.date.today().isoformat(),
+            }
+            agent_run(event, dry_run=False, debate=True)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error("api_agent_analyze background error: %s", exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return JSONResponse({"ok": True, "ticker": ticker, "message": f"Agent analysis started for {ticker}. Results will appear in the Activity notes."})
 
 
 @router.post("/company_file/reminder-delete")

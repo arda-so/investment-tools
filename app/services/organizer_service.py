@@ -5,18 +5,23 @@ import re
 import sqlite3
 from dataclasses import dataclass
 import csv
+import io
 
-from app.core.config import ROOT
+from app.core import cloud_files
 from app.core.db import core_conn as _conn
 from app.core.normalize import normalize_text as _norm
 from app.services.company_lookup_service import company_name_map
 from app.services.postgres_core_service import (
+    approve_investor_note_draft_pg,
     add_investor_note_pg,
     add_todo_pg,
     close_day_pg,
     core_backend,
+    delete_notes_pg,
+    discard_investor_note_draft_pg,
     enqueue_action_pg,
     get_daily_note_pg,
+    list_action_log_pg,
     list_action_queue_pg,
     list_recent_notes_pg,
     list_todos_pg,
@@ -577,6 +582,9 @@ def approve_note_draft(note_id: int) -> bool:
     rid = int(note_id or 0)
     if rid <= 0:
         return False
+    if core_backend() == "postgres":
+        # Draft normalization currently optional in pg path; keep ticker untouched.
+        return approve_investor_note_draft_pg(rid)
     con = _conn()
     try:
         row = con.execute(
@@ -606,6 +614,8 @@ def discard_note_draft(note_id: int) -> bool:
     rid = int(note_id or 0)
     if rid <= 0:
         return False
+    if core_backend() == "postgres":
+        return discard_investor_note_draft_pg(rid)
     con = _conn()
     try:
         cur = con.execute(
@@ -630,6 +640,13 @@ def delete_notes(
     cb = str(created_by or "").strip().lower()
     if cb not in {"", "ai", "human"}:
         cb = ""
+    if core_backend() == "postgres":
+        return delete_notes_pg(
+            ticker=tk,
+            text_contains=txt,
+            created_by=cb,
+            include_company_journal=include_company_journal,
+        )
     out = {"investor_notes": 0, "workspace_journal": 0, "total": 0}
     con = _conn()
     try:
@@ -732,6 +749,8 @@ def list_action_queue(limit: int = 120) -> list[dict[str, str]]:
 
 
 def list_action_log(limit: int = 120) -> list[dict[str, str]]:
+    if core_backend() == "postgres":
+        return list_action_log_pg(limit=limit)
     con = _conn()
     lim = max(1, min(1000, int(limit or 120)))
     out: list[dict[str, str]] = []
@@ -868,37 +887,46 @@ def suggest_ir_emails(ticker: str = "", company: str = "", domain: str = "", lim
         out.append({"email": e, "confidence": confidence, "source": source})
 
     # 1) User-maintained override file (highest trust)
-    p = ROOT / "data" / "ir_contacts.csv"
-    if p.exists():
-        try:
-            with p.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
-                rd = csv.DictReader(fh)
-                for r in rd:
-                    tk = str((r.get("ticker") or "")).strip().upper()
-                    em = str((r.get("email") or "")).strip()
-                    if t and tk != t:
-                        continue
-                    if em:
-                        add(em, "high", "ir_contacts.csv")
-        except Exception:
-            pass
+    try:
+        csv_txt = cloud_files.read_text("data/ir_contacts.csv")
+        if csv_txt:
+            fh = io.StringIO(csv_txt)
+            rd = csv.DictReader(fh)
+            for r in rd:
+                tk = str((r.get("ticker") or "")).strip().upper()
+                em = str((r.get("email") or "")).strip()
+                if t and tk != t:
+                    continue
+                if em:
+                    add(em, "high", "ir_contacts.csv")
+    except Exception:
+        pass
 
     # 2) Extract from existing notes for this ticker (high confidence)
     if t:
-        con = _conn()
-        try:
-            tables = [
-                ("workspace_journal", "note", "ticker = ?"),
-                ("company_reminders", "note", "ticker = ?"),
-                ("investor_notes", "note", "ticker = ?"),
-            ]
-            for tbl, col, where in tables:
-                for r in con.execute(f"SELECT {col} AS txt FROM {tbl} WHERE {where} ORDER BY id DESC LIMIT 300", (t,)).fetchall():
-                    txt = str(r["txt"] or "")
-                    for em in email_re.findall(txt):
-                        add(em, "high", f"{tbl}.{col}")
-        finally:
-            con.close()
+        if core_backend() == "postgres":
+            for n in list_recent_notes_pg(limit=600):
+                tk = str(n.get("ticker") or "").strip().upper()
+                if tk and tk != t:
+                    continue
+                txt = str(n.get("text") or "")
+                for em in email_re.findall(txt):
+                    add(em, "high", "notes")
+        else:
+            con = _conn()
+            try:
+                tables = [
+                    ("workspace_journal", "note", "ticker = ?"),
+                    ("company_reminders", "note", "ticker = ?"),
+                    ("investor_notes", "note", "ticker = ?"),
+                ]
+                for tbl, col, where in tables:
+                    for r in con.execute(f"SELECT {col} AS txt FROM {tbl} WHERE {where} ORDER BY id DESC LIMIT 300", (t,)).fetchall():
+                        txt = str(r["txt"] or "")
+                        for em in email_re.findall(txt):
+                            add(em, "high", f"{tbl}.{col}")
+            finally:
+                con.close()
 
     # 3) If a domain is provided, generate common IR aliases (medium confidence)
     if dm and "." in dm:

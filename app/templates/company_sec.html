@@ -57,11 +57,14 @@
           <td>{{ f.accession }}</td>
           <td>{{ f.file_name }}</td>
           <td style="white-space:nowrap;">
-            {% if f.doc_url %}
-            <a class="btn" href="{{ f.doc_url|e }}" target="_blank" rel="noopener noreferrer">Open</a>
-            {% elif f.has_local == "1" %}
-            <a class="btn" href="/filing?path={{ f.path|urlencode }}&doc={{ f.doc_url|urlencode }}&t={{ detail.ticker|urlencode }}&mode=original">Open</a>
-            {% else %}
+            {% if f.open_href %}
+              {% if f.open_external == "1" %}
+            <a class="btn" href="{{ f.open_href|e }}" target="_blank" rel="noopener noreferrer">{{ f.open_label or "Open" }}</a>
+              {% else %}
+            <a class="btn" href="{{ f.open_href|e }}">{{ f.open_label or "Open" }}</a>
+              {% endif %}
+            {% endif %}
+            {% if (not f.doc_url) and (not f.path) %}
             <span class="muted">N/A</span>
             {% endif %}
           </td>
