@@ -10,28 +10,36 @@
   .ws-main{display:grid;grid-template-rows:auto 1fr auto;min-height:78vh;}
   .ws-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
   .ws-title{font-size:20px;font-weight:800;color:#0f172a;}
-  .ws-feed{overflow:auto;min-height:0;display:grid;gap:8px;padding-right:4px;}
+  .ws-feed{overflow:auto;min-height:0;display:grid;gap:8px;padding-right:4px;align-content:start;}
   .ws-item{border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;}
   .ws-item-error{border-color:#fecaca;background:#fff7f7;}
+  /* Bug 2: thinking/loading state */
+  .ws-item-thinking{border-color:#e0f2fe;background:#f0f9ff;animation:ws-pulse 1.4s ease-in-out infinite;}
+  @keyframes ws-pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
   .ws-item h4{margin:0 0 5px 0;font-size:14px;color:#0f172a;}
   .ws-meta{font-size:11px;color:#64748b;margin-bottom:6px;}
-  .ws-text{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.4;}
+  .ws-text{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.5;}
   .ws-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
   .ws-act{border:1px solid #cbd5e1;background:#f8fafc;color:#0f172a;border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;}
   .ws-act-primary{background:#0f172a;color:#fff;border-color:#0f172a;}
   .ws-status{font-size:11px;color:#64748b;margin-top:6px;}
   .ws-input{margin-top:10px;}
-  .ws-input-wrap{display:flex;align-items:center;gap:8px;border:1px solid #cbd5e1;border-radius:14px;background:#fff;padding:8px 10px;}
+  .ws-input-wrap{display:flex;align-items:center;gap:8px;border:1px solid #cbd5e1;border-radius:14px;background:#fff;padding:8px 10px;transition:border-color .15s;}
+  .ws-input-wrap:focus-within{border-color:#94a3b8;}
   .ws-input-wrap input{flex:1;border:none;outline:none;background:transparent;height:28px;font-size:14px;color:#0f172a;}
-  .ws-icon{border:none;background:transparent;color:#475569;font-size:12px;padding:4px 6px;border-radius:8px;cursor:pointer;}
-  .ws-icon:hover{background:#f1f5f9;}
-  .ws-model{font-size:11px;color:#475569;border:1px solid #e2e8f0;border-radius:8px;padding:3px 6px;background:#f8fafc;}
-  .ws-send{border:1px solid #0f172a;background:#0f172a;color:#fff;border-radius:10px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;}
+  .ws-input-wrap input:disabled{color:#94a3b8;}
+  .ws-model{font-size:11px;color:#475569;border:1px solid #e2e8f0;border-radius:8px;padding:3px 6px;background:#f8fafc;white-space:nowrap;}
+  /* Bug 2: disabled send button */
+  .ws-send{border:1px solid #0f172a;background:#0f172a;color:#fff;border-radius:10px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;min-width:52px;transition:opacity .15s;}
+  .ws-send:disabled{opacity:.4;cursor:not-allowed;}
+  /* Bug 3: hint bar below input */
+  .ws-hint{font-size:11px;color:#475569;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:5px 10px;margin-top:6px;display:none;}
+  .ws-hint.visible{display:block;}
   .ws-right .hint{font-size:12px;color:#475569;line-height:1.4;}
   @media (max-width:1100px){.ws{grid-template-columns:1fr;}.ws-right{order:3;}.ws-side{order:1;}.ws-main{order:2;min-height:65vh;}}
 </style>
 {% endblock %}
-{% block content %}
+{% block body %}
 <div class="ws">
   <aside class="ws-card ws-side">
     <h3>Channels</h3>
@@ -48,12 +56,11 @@
     <div class="ws-feed" id="wsFeed"></div>
     <form class="ws-input" id="wsForm">
       <div class="ws-input-wrap">
-        <button class="ws-icon" id="wsAttach" type="button">Attach</button>
-        <input id="wsText" type="text" placeholder="Ask Investor OS..." autocomplete="off">
-        <button class="ws-icon" id="wsMic" type="button">Mic</button>
-        <span class="ws-model">1.0x</span>
-        <button class="ws-send" type="submit">Send</button>
+        <input id="wsText" type="text" placeholder="Ask Investor OS…" autocomplete="off">
+        <span class="ws-model" id="wsModelBadge">AI</span>
+        <button class="ws-send" id="wsSend" type="submit">Send</button>
       </div>
+      <div class="ws-hint" id="wsHint"></div>
     </form>
   </section>
 
@@ -67,15 +74,37 @@
 
 <script>
 (() => {
-  const channels = Array.from(document.querySelectorAll('.ws-ch'));
-  const feedEl = document.getElementById('wsFeed');
-  const titleEl = document.getElementById('wsTitle');
-  const formEl = document.getElementById('wsForm');
-  const textEl = document.getElementById('wsText');
-  let active = 'all';
+  const channels   = Array.from(document.querySelectorAll('.ws-ch'));
+  const feedEl     = document.getElementById('wsFeed');
+  const titleEl    = document.getElementById('wsTitle');
+  const formEl     = document.getElementById('wsForm');
+  const textEl     = document.getElementById('wsText');
+  const sendBtn    = document.getElementById('wsSend');
+  const hintEl     = document.getElementById('wsHint');
+  let active    = 'all';
   let lastItems = [];
+  let isSending = false;
+  let hintTimer = null;
 
+  // ── helpers ──────────────────────────────────────────────────────────────
   function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  // Bug 4: lightweight markdown → safe HTML (esc() first, then markup — safe for innerHTML)
+  function mdRender(raw) {
+    let s = esc(raw);
+    // bold **text**
+    s = s.replace(/\*\*([^*\n]{1,200})\*\*/g, '<b>$1</b>');
+    // italic *text* (skip if adjacent to another *)
+    s = s.replace(/(?<!\*)\*([^*\n]{1,120})\*(?!\*)/g, '<em>$1</em>');
+    // headings ## text (only at line start)
+    s = s.replace(/^#{1,3}\s+(.+)$/gm, '<span style="font-weight:800">$1</span>');
+    // bullet lines:  - item  or  • item
+    s = s.replace(/^[-•]\s(.+)$/gm, '<span style="display:block;padding-left:14px;position:relative"><span style="position:absolute;left:4px;color:#64748b">•</span>$1</span>');
+    // numbered list: 1. item
+    s = s.replace(/^(\d+)\.\s(.+)$/gm, '<span style="display:block;padding-left:14px;position:relative"><span style="position:absolute;left:0;font-weight:700;color:#64748b">$1.</span>$2</span>');
+    return s;
+  }
+
   function channelLabel(id){
     const btn = channels.find(b => b.dataset.channel === id);
     return btn ? btn.textContent.trim() : `# ${id}`;
@@ -111,6 +140,22 @@
       return `<button class="${cls}" data-item-idx="__ITEMIDX__" data-action-idx="${idx}" type="button">${label}</button>`;
     }).join('')}</div>`;
   }
+
+  // Bug 2: loading state helpers
+  function setLoading(on) {
+    isSending = on;
+    textEl.disabled = on;
+    sendBtn.disabled = on;
+    sendBtn.textContent = on ? '…' : 'Send';
+  }
+  function showHint(msg, ms = 4000) {
+    clearTimeout(hintTimer);
+    hintEl.textContent = msg;
+    hintEl.classList.add('visible');
+    hintTimer = setTimeout(() => hintEl.classList.remove('visible'), ms);
+  }
+
+  // ── render ────────────────────────────────────────────────────────────────
   function render(items){
     lastItems = Array.isArray(items) ? items.slice() : [];
     if(!Array.isArray(items) || !items.length){
@@ -118,32 +163,45 @@
       return;
     }
     feedEl.innerHTML = items.map((it, itemIdx) => {
-      const err = isAssistantMessage(it) && isErrorText(it.text || '');
+      // Bug 2: thinking placeholder (not stored in DB, purely local)
+      if(it._thinking){
+        return `<article class="ws-item ws-item-thinking">
+          <h4>AI Agent</h4>
+          <div class="ws-text" style="color:#64748b">Thinking…</div>
+        </article>`;
+      }
+      const err  = isAssistantMessage(it) && isErrorText(it.text || '');
       const info = err ? `<div class="ws-status">${esc(smartErrorHelp(it.text || ''))}</div>` : '';
+      // Bug 4: markdown rendering for assistant messages only
+      const body = isAssistantMessage(it) ? mdRender(it.text || '') : esc(it.text || '');
       return `<article class="ws-item ${err ? 'ws-item-error' : ''}" data-item-idx="${itemIdx}">
         <h4>${esc(it.title || 'Update')}</h4>
         <div class="ws-meta">${esc(it.meta || '')} ${it.ts ? '· ' + esc(it.ts) : ''}</div>
-        <div class="ws-text">${esc(it.text || '')}</div>
+        <div class="ws-text">${body}</div>
         ${actionHtml(it).replaceAll('__ITEMIDX__', String(itemIdx))}
         ${info}
-      </article>`; }).join('');
+      </article>`;
+    }).join('');
     wireActions();
   }
-  async function sendUserMessage(text){
+
+  // ── network ───────────────────────────────────────────────────────────────
+  async function sendUserMessage(text, channel){
     const fd = new FormData();
-    fd.append('channel', active);
+    fd.append('channel', channel);
     fd.append('text', text);
     const res = await fetch('/dashboard/message', {method:'POST', body:fd});
     return res.json();
   }
+
   async function runAction(btn){
     const itemIdx = Number(btn.dataset.itemIdx || '-1');
-    const actIdx = Number(btn.dataset.actionIdx || '-1');
-    const it = lastItems[itemIdx] || {};
+    const actIdx  = Number(btn.dataset.actionIdx || '-1');
+    const it      = lastItems[itemIdx] || {};
     const actions = withUiActions(it);
-    const action = actions[actIdx] || {};
-    const method = String(action.method || 'GET').toUpperCase();
-    const url = String(action.url || '').trim();
+    const action  = actions[actIdx] || {};
+    const method  = String(action.method || 'GET').toUpperCase();
+    const url     = String(action.url || '').trim();
     if(!url && method !== 'CLIENT') return;
     if(method === 'GET'){ window.location.href = url; return; }
     if(method === 'POST_FORM'){
@@ -174,8 +232,11 @@
         }
         if(!retryPrompt){ retryPrompt = String(textEl.value || '').trim(); }
         if(!retryPrompt){ return; }
-        const data = await sendUserMessage(retryPrompt);
-        if(data && data.reply){ await loadFeed(); }
+        setLoading(true);
+        try{
+          const data = await sendUserMessage(retryPrompt, 'ai-agent');
+          if(data && data.reply){ await loadFeed(); }
+        } finally { setLoading(false); }
         return;
       }
       return;
@@ -184,20 +245,22 @@
     try{
       await fetch(url, {method, headers: {'Accept':'application/json'}});
       await loadFeed();
-    }catch(_e){
-      btn.disabled = false;
-    }
+    }catch(_e){ btn.disabled = false; }
   }
+
   function wireActions(){
     document.querySelectorAll('.ws-act').forEach(btn => {
       btn.onclick = () => runAction(btn);
     });
   }
+
   async function loadFeed(){
     const res = await fetch(`/dashboard/feed?channel=${encodeURIComponent(active)}&limit=50`);
     const data = await res.json();
     render(data.items || []);
   }
+
+  // ── channel switching ─────────────────────────────────────────────────────
   channels.forEach(btn => {
     btn.addEventListener('click', () => {
       channels.forEach(b => b.classList.remove('active'));
@@ -207,34 +270,65 @@
       loadFeed();
     });
   });
+
+  function switchToAiAgent() {
+    const btn = channels.find(b => b.dataset.channel === 'ai-agent');
+    if(btn) btn.click();
+  }
+
+  // ── form submit ───────────────────────────────────────────────────────────
   formEl.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if(isSending) return;
     const text = textEl.value.trim();
     if(!text) return;
-    const data = await sendUserMessage(text);
-    if(data && data.reply){
-      if(active === 'ai-agent'){
-        const mine = {title:'You', text, meta:'user', ts:new Date().toISOString()};
-        const bot = {title:'AI Agent', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
+
+    // Bug 3: typing on a non-AI channel → silently switch to AI Agent + restore text
+    if(active !== 'ai-agent'){
+      switchToAiAgent();
+      textEl.value = text;
+      showHint('Switched to # AI Agent — press Send again to ask your question.');
+      textEl.focus();
+      return;
+    }
+
+    textEl.value = '';
+    setLoading(true);
+
+    // Bug 1: both mine and bot include channel:'ai-agent' so isAssistantMessage() is correct immediately
+    const mine = {channel:'ai-agent', title:'You', text, meta:'user', ts:new Date().toISOString()};
+    // Bug 2: show "Thinking…" placeholder while waiting
+    render([{_thinking:true}, mine, ...lastItems].slice(0, 51));
+
+    try{
+      const data = await sendUserMessage(text, 'ai-agent');
+      if(data && data.reply){
+        // Bug 1: action buttons (Save to Notes / Discard) appear immediately on this reply
+        const bot = {channel:'ai-agent', title:'AI Agent', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
         render([bot, mine, ...lastItems].slice(0, 50));
-      }else{
+      } else {
         await loadFeed();
       }
+    } catch(_e) {
+      const bot = {channel:'ai-agent', title:'AI Agent', text:'Could not reach AI. Check network and try again.', meta:'assistant', ts:new Date().toISOString()};
+      render([bot, mine, ...lastItems].slice(0, 50));
+    } finally {
+      setLoading(false);
     }
-    textEl.value = '';
   });
+
   loadFeed();
   setInterval(loadFeed, 20000);
 
-  // Live right panel
+  // ── live right panel ──────────────────────────────────────────────────────
   async function loadContext(){
     try{
       const res = await fetch('/dashboard/context');
-      const d = await res.json();
-      const el = document.getElementById('wsContext');
+      const d   = await res.json();
+      const el  = document.getElementById('wsContext');
       if(!el) return;
       const statusColor = (d.last_run_status||'').toLowerCase() === 'completed' ? '#16a34a'
-                        : (d.last_run_status||'').toLowerCase() === 'error' ? '#dc2626' : '#64748b';
+                        : (d.last_run_status||'').toLowerCase() === 'error'     ? '#dc2626' : '#64748b';
       let holdingsHtml = '';
       if(Array.isArray(d.holdings) && d.holdings.length){
         holdingsHtml = '<div style="margin-top:10px;font-size:11px;font-weight:700;color:#64748b;letter-spacing:.05em;">HOLDINGS</div>'
