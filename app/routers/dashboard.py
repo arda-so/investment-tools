@@ -2606,7 +2606,13 @@ def dashboard_workspace_message(channel: str = Form("ai-agent"), text: str = For
             }
         )
     reply = str(ask_workspace_ai(prompt) or "").strip() or "No response."
-    add_workspace_message(channel="ai-agent", role="assistant", message=reply[:5000])
+    # Don't persist transport/degraded errors — they're transient and pollute history
+    _is_transient_err = (
+        "transport issue while waiting for analysis result" in reply.lower()
+        or "service temporarily degraded" in reply.lower()
+    )
+    if not _is_transient_err:
+        add_workspace_message(channel="ai-agent", role="assistant", message=reply[:5000])
     return JSONResponse(
         {
             "ok": True,
@@ -2615,6 +2621,13 @@ def dashboard_workspace_message(channel: str = Form("ai-agent"), text: str = For
             "ts": dt.datetime.now().isoformat(),
         }
     )
+
+
+@router.post("/dashboard/ai-agent/clear-history")
+def dashboard_clear_ai_history():
+    from app.services.workspace_feed_service import clear_workspace_channel_history
+    n = clear_workspace_channel_history(channel="ai-agent")
+    return JSONResponse({"ok": True, "deleted": n})
 
 
 @router.post("/dashboard/ai-agent/save-note")

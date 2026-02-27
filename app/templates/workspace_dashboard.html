@@ -19,6 +19,9 @@
   .ws-item h4{margin:0 0 5px 0;font-size:14px;color:#0f172a;}
   .ws-meta{font-size:11px;color:#64748b;margin-bottom:6px;}
   .ws-text{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.5;}
+  /* Chat bubbles: user messages get a subtle tint */
+  .ws-item-user{background:#f8fafc;border-color:#e2e8f0;}
+  .ws-item-ai{background:#fff;}
   .ws-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
   .ws-act{border:1px solid #cbd5e1;background:#f8fafc;color:#0f172a;border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;}
   .ws-act-primary{background:#0f172a;color:#fff;border-color:#0f172a;}
@@ -35,6 +38,8 @@
   /* Bug 3: hint bar below input */
   .ws-hint{font-size:11px;color:#475569;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:5px 10px;margin-top:6px;display:none;}
   .ws-hint.visible{display:block;}
+  .ws-clear-btn{font-size:11px;color:#94a3b8;background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;}
+  .ws-clear-btn:hover{color:#dc2626;}
   .ws-right .hint{font-size:12px;color:#475569;line-height:1.4;}
   @media (max-width:1100px){.ws{grid-template-columns:1fr;}.ws-right{order:3;}.ws-side{order:1;}.ws-main{order:2;min-height:65vh;}}
 </style>
@@ -51,7 +56,10 @@
   <section class="ws-card ws-main">
     <div class="ws-head">
       <div class="ws-title" id="wsTitle"># All</div>
-      <a class="btn" href="/dashboard/classic">Classic Dashboard</a>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <button class="ws-clear-btn" id="wsClearHistory" style="display:none" type="button">Clear history</button>
+        <a class="btn" href="/dashboard/classic">Classic Dashboard</a>
+      </div>
     </div>
     <div class="ws-feed" id="wsFeed"></div>
     <form class="ws-input" id="wsForm">
@@ -74,13 +82,14 @@
 
 <script>
 (() => {
-  const channels   = Array.from(document.querySelectorAll('.ws-ch'));
-  const feedEl     = document.getElementById('wsFeed');
-  const titleEl    = document.getElementById('wsTitle');
-  const formEl     = document.getElementById('wsForm');
-  const textEl     = document.getElementById('wsText');
-  const sendBtn    = document.getElementById('wsSend');
-  const hintEl     = document.getElementById('wsHint');
+  const channels     = Array.from(document.querySelectorAll('.ws-ch'));
+  const feedEl       = document.getElementById('wsFeed');
+  const titleEl      = document.getElementById('wsTitle');
+  const formEl       = document.getElementById('wsForm');
+  const textEl       = document.getElementById('wsText');
+  const sendBtn      = document.getElementById('wsSend');
+  const hintEl       = document.getElementById('wsHint');
+  const clearHistBtn = document.getElementById('wsClearHistory');
   let active    = 'all';
   let lastItems = [];
   let isSending = false;
@@ -88,6 +97,18 @@
 
   // ── helpers ──────────────────────────────────────────────────────────────
   function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  // Human-readable timestamp: "2:53 PM" today, "Feb 27, 2:53 PM" otherwise
+  function fmtTs(raw) {
+    if(!raw) return '';
+    try{
+      const d   = new Date(String(raw));
+      const now = new Date();
+      const time = d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+      if(d.toDateString() === now.toDateString()) return time;
+      return d.toLocaleDateString([], {month:'short', day:'numeric'}) + ', ' + time;
+    }catch(_){ return String(raw).slice(0,16); }
+  }
 
   // Bug 4: lightweight markdown → safe HTML (esc() first, then markup — safe for innerHTML)
   function mdRender(raw) {
@@ -170,13 +191,28 @@
           <div class="ws-text" style="color:#64748b">Thinking…</div>
         </article>`;
       }
-      const err  = isAssistantMessage(it) && isErrorText(it.text || '');
-      const info = err ? `<div class="ws-status">${esc(smartErrorHelp(it.text || ''))}</div>` : '';
+      const isChat = String(it.kind || '') === 'chat_message' || String(it.channel || '') === 'ai-agent';
+      const isUser = isChat && String(it.meta || '').toLowerCase() === 'user';
+      const isAI   = isAssistantMessage(it);
+      const err    = isAI && isErrorText(it.text || '');
+      const info   = err ? `<div class="ws-status">${esc(smartErrorHelp(it.text || ''))}</div>` : '';
+
+      // Meta line: for chat messages show only timestamp (not raw role labels)
+      const metaLine = isChat
+        ? `<span style="color:#94a3b8">${fmtTs(it.ts)}</span>`
+        : `${esc(it.meta || '')}${it.ts ? ' · ' + fmtTs(it.ts) : ''}`;
+
       // Bug 4: markdown rendering for assistant messages only
-      const body = isAssistantMessage(it) ? mdRender(it.text || '') : esc(it.text || '');
-      return `<article class="ws-item ${err ? 'ws-item-error' : ''}" data-item-idx="${itemIdx}">
-        <h4>${esc(it.title || 'Update')}</h4>
-        <div class="ws-meta">${esc(it.meta || '')} ${it.ts ? '· ' + esc(it.ts) : ''}</div>
+      const body = isAI ? mdRender(it.text || '') : esc(it.text || '');
+
+      // Chat items: style user vs AI differently
+      const itemClass = err ? 'ws-item-error' : (isUser ? 'ws-item-user' : (isAI ? 'ws-item-ai' : ''));
+
+      return `<article class="ws-item ${itemClass}" data-item-idx="${itemIdx}">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+          <h4 style="margin:0;font-size:13px;${isUser ? 'color:#475569' : ''}">${esc(it.title || 'Update')}</h4>
+          <div class="ws-meta" style="margin:0">${metaLine}</div>
+        </div>
         <div class="ws-text">${body}</div>
         ${actionHtml(it).replaceAll('__ITEMIDX__', String(itemIdx))}
         ${info}
@@ -261,14 +297,28 @@
   }
 
   // ── channel switching ─────────────────────────────────────────────────────
+  function updateClearBtn() {
+    clearHistBtn.style.display = active === 'ai-agent' ? '' : 'none';
+  }
+
   channels.forEach(btn => {
     btn.addEventListener('click', () => {
       channels.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       active = btn.dataset.channel || 'all';
       titleEl.textContent = channelLabel(active);
+      updateClearBtn();
       loadFeed();
     });
+  });
+
+  clearHistBtn.addEventListener('click', async () => {
+    if(!confirm('Clear all AI Agent chat history? This cannot be undone.')) return;
+    clearHistBtn.disabled = true;
+    try{
+      await fetch('/dashboard/ai-agent/clear-history', {method:'POST', headers:{'Accept':'application/json'}});
+      await loadFeed();
+    } finally { clearHistBtn.disabled = false; }
   });
 
   function switchToAiAgent() {

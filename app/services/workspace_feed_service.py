@@ -51,6 +51,28 @@ def ensure_workspace_schema() -> None:
         con.close()
 
 
+def clear_workspace_channel_history(channel: str = "ai-agent") -> int:
+    """Delete all messages for a channel. Returns number of rows deleted."""
+    ch = str(channel or "ai-agent").strip().lower() or "ai-agent"
+    con = pg_connect()
+    if con is None:
+        return 0
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM workspace_messages_core WHERE channel=%s", (ch,))
+        n = cur.rowcount or 0
+        con.commit()
+        return int(n)
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        con.close()
+
+
 def add_workspace_message(channel: str, role: str, message: str) -> None:
     ch = str(channel or "ai-agent").strip().lower() or "ai-agent"
     rl = str(role or "user").strip().lower() or "user"
