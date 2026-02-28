@@ -9,6 +9,7 @@ export CORE_DB_GUARD_ENFORCE="1"
 export CORE_DB_STRICT_POSTGRES="1"
 export PHASE2_POSTGRES_ENABLED="${PHASE2_POSTGRES_ENABLED:-1}"
 export AI_QUEUE_BACKEND="${AI_QUEUE_BACKEND:-postgres}"
+export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 
 if [ -x "$ROOT/.venv-memory/bin/python" ]; then
   PY="$ROOT/.venv-memory/bin/python"

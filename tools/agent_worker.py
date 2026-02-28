@@ -48,6 +48,7 @@ from app.services.postgres_core_service import (
 from app.services.portfolio_memory_service import get_holdings
 from app.services.proactive_ai_service import (
     analyze_universe_signal_for_portfolio,
+    cleanup_stuck_agent_runs,
     finish_agent_run,
     start_agent_run,
 )
@@ -1705,6 +1706,14 @@ def main() -> None:
     parser = _build_parser()
     args   = parser.parse_args()
     debate = not args.no_debate
+
+    # Clean up any runs left stuck in 'running' from previous crashed workers
+    try:
+        cleaned = cleanup_stuck_agent_runs(stale_minutes=60)
+        if cleaned:
+            print(f"[agent_worker] Cleaned up {cleaned} stuck agent run(s)", file=sys.stderr)
+    except Exception:
+        pass
 
     if args.event_uid:
         print("[agent_worker] --event-uid not yet implemented. Use --ticker --form --accession.", file=sys.stderr)

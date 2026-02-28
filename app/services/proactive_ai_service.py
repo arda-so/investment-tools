@@ -347,6 +347,51 @@ def finish_agent_run(run_uid: str, status: str, output_payload: dict[str, Any] |
     return bool(ok["done"])
 
 
+def cleanup_stuck_agent_runs(stale_minutes: int = 60) -> int:
+    """Mark any agent_runs rows stuck in 'running' state for > stale_minutes as 'error'.
+    Returns count of rows cleaned up. Safe to call on every worker startup."""
+    cutoff = (dt.datetime.now() - dt.timedelta(minutes=int(stale_minutes or 60))).isoformat()
+    now = dt.datetime.now().isoformat()
+    cleaned = 0
+    if core_backend() == "postgres":
+        con_pg = pg_connect()
+        if con_pg is None:
+            return 0
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                """UPDATE agent_runs_core
+                   SET status='error', finished_at=%s, error_text='cleaned_up_stuck_run', updated_at=%s
+                   WHERE status='running' AND started_at < %s""",
+                (now, now, cutoff),
+            )
+            cleaned = cur.rowcount
+            con_pg.commit()
+        except Exception:
+            try:
+                con_pg.rollback()
+            except Exception:
+                pass
+        finally:
+            con_pg.close()
+    else:
+        con = _conn_core()
+        try:
+            cur = con.execute(
+                """UPDATE agent_runs
+                   SET status='error', finished_at=?, error_text='cleaned_up_stuck_run', updated_at=?
+                   WHERE status='running' AND started_at < ?""",
+                (now, now, cutoff),
+            )
+            cleaned = cur.rowcount
+            con.commit()
+        except Exception:
+            pass
+        finally:
+            con.close()
+    return cleaned
+
+
 def _reflexion_pattern_key(event_type: str, detail: dict[str, Any]) -> str:
     ev = str(event_type or "unknown").strip().lower()
     intent = str((detail or {}).get("intent") or "").strip().lower()
