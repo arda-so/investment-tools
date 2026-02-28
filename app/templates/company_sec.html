@@ -17,7 +17,11 @@
   <div class="muted">Ticker: {{ detail.ticker }} | Country: {{ detail.country }} | Industry: {{ detail.industry }} | Market Cap: {{ detail.market_cap }}</div>
   <form method="post" action="/company_file/sec-sync" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <input type="hidden" name="ticker" value="{{ detail.ticker }}">
-    <button type="submit">Sync SEC Filings</button>
+    <button type="submit">Sync SEC Filings (Incremental)</button>
+  </form>
+  <form method="post" action="/company_file/sec-sync-full" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+    <input type="hidden" name="ticker" value="{{ detail.ticker }}">
+    <button type="submit">Full Backfill Sync (One-Time)</button>
     {% if sync_state and sync_state.message %}
     <span class="muted">Status: {{ sync_state.result or "-" }} | {{ sync_state.message }}{% if sync_state.last %} | {{ sync_state.last }}{% endif %}</span>
     {% endif %}
@@ -31,6 +35,7 @@
     <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}&form=10-K" {% if selected_form == "10-K" %}style="border-color:#ff7a59;background:#fff1ec;color:#b5472f;"{% endif %}>10-K</a>
     <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}&form=10-Q" {% if selected_form == "10-Q" %}style="border-color:#ff7a59;background:#fff1ec;color:#b5472f;"{% endif %}>10-Q</a>
     <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}&form=8-K" {% if selected_form == "8-K" %}style="border-color:#ff7a59;background:#fff1ec;color:#b5472f;"{% endif %}>8-K</a>
+    <a class="btn" href="/company_file/sec?t={{ detail.ticker|urlencode }}&form=PROXY" {% if selected_form == "PROXY" %}style="border-color:#ff7a59;background:#fff1ec;color:#b5472f;"{% endif %}>Proxy</a>
     {% if selected_form %}
     <span class="chip">Filter: {{ selected_form }}</span>
     {% endif %}

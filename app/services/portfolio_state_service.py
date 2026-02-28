@@ -63,6 +63,109 @@ def _ensure_state_schema_pg() -> bool:
         con.close()
 
 
+def _read_positions_rows_pg(cur: Any) -> list[dict[str, str]]:
+    cur.execute("SELECT ticker, shares, cost, note FROM portfolio_positions_core ORDER BY ticker ASC")
+    rows = cur.fetchall() or []
+    out = [
+        {
+            "ticker": normalize_ticker(str(r[0] or "")),
+            "shares": f"{_to_float(r[1], 0.0):g}",
+            "cost": f"{_to_float(r[2], 0.0):g}",
+            "note": str(r[3] or ""),
+        }
+        for r in rows
+        if normalize_ticker(str(r[0] or ""))
+    ]
+    return out
+
+
+def _bootstrap_portfolio_positions_pg(cur: Any) -> int:
+    inserted = 0
+    # 1) Preferred source of truth: canonical portfolio.csv (local or GCS-backed cloud_files).
+    for r in _read_local_portfolio_rows():
+        t = normalize_ticker(str(r.get("ticker") or ""))
+        sh = _to_float(r.get("shares"), 0.0)
+        if not t or sh <= 0:
+            continue
+        cur.execute(
+            """
+            INSERT INTO portfolio_positions_core (ticker, shares, cost, note, updated_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (ticker)
+            DO UPDATE SET
+                shares = EXCLUDED.shares,
+                cost = EXCLUDED.cost,
+                note = EXCLUDED.note,
+                updated_at = NOW()
+            """,
+            (t, sh, _to_float(r.get("cost"), 0.0), str(r.get("note") or "")),
+        )
+        inserted += 1
+    if inserted > 0:
+        return inserted
+
+    # 2) Last-resort strict-cloud fallback: infer from transactions only when no canonical file exists.
+    if not strict_postgres_mode():
+        return 0
+    try:
+        cur.execute(
+            """
+            SELECT
+                UPPER(TRIM(COALESCE(ticker, ''))) AS ticker,
+                SUM(
+                    CASE
+                        WHEN LOWER(COALESCE(action, '')) IN ('sell','trim','reduce','exit')
+                            THEN -ABS(COALESCE(shares, 0))
+                        ELSE ABS(COALESCE(shares, 0))
+                    END
+                ) AS net_shares,
+                SUM(
+                    CASE
+                        WHEN LOWER(COALESCE(action, '')) IN ('sell','trim','reduce','exit')
+                            THEN 0
+                        ELSE ABS(COALESCE(shares, 0)) * COALESCE(price, 0)
+                    END
+                ) AS buy_notional,
+                SUM(
+                    CASE
+                        WHEN LOWER(COALESCE(action, '')) IN ('sell','trim','reduce','exit')
+                            THEN 0
+                        ELSE ABS(COALESCE(shares, 0))
+                    END
+                ) AS buy_shares,
+                MAX(COALESCE(note, '')) AS note
+            FROM portfolio_transactions_core
+            WHERE COALESCE(ticker, '') <> ''
+            GROUP BY UPPER(TRIM(COALESCE(ticker, '')))
+            """
+        )
+        for tk, net_shares, buy_notional, buy_shares, note in (cur.fetchall() or []):
+            t = normalize_ticker(str(tk or ""))
+            sh = _to_float(net_shares, 0.0)
+            if not t or sh <= 1e-6:
+                continue
+            b_not = _to_float(buy_notional, 0.0)
+            b_sh = _to_float(buy_shares, 0.0)
+            cost = (b_not / b_sh) if b_sh > 0 else 0.0
+            cur.execute(
+                """
+                INSERT INTO portfolio_positions_core (ticker, shares, cost, note, updated_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (ticker)
+                DO UPDATE SET
+                    shares = EXCLUDED.shares,
+                    cost = EXCLUDED.cost,
+                    note = EXCLUDED.note,
+                    updated_at = NOW()
+                """,
+                (t, sh, cost, str(note or "")),
+            )
+            inserted += 1
+    except Exception:
+        pass
+    return inserted
+
+
 def _read_local_portfolio_rows() -> list[dict[str, str]]:
     txt = cloud_files.read_text("data/portfolio.csv")
     if not txt:
@@ -159,6 +262,10 @@ def _mirror_watchlist_to_file(rows: list[dict[str, str]]) -> None:
 
 
 def read_portfolio_rows_state() -> list[dict[str, str]]:
+    if core_backend() == "postgres" and not strict_postgres_mode():
+        local_rows = _read_local_portfolio_rows()
+        if local_rows:
+            return local_rows
     if core_backend() != "postgres":
         return _read_local_portfolio_rows()
     if not _ensure_state_schema_pg():
@@ -172,18 +279,17 @@ def read_portfolio_rows_state() -> list[dict[str, str]]:
         return _read_local_portfolio_rows()
     try:
         cur = con.cursor()
-        cur.execute("SELECT ticker, shares, cost, note FROM portfolio_positions_core ORDER BY ticker ASC")
-        rows = cur.fetchall() or []
-        out = [
-            {
-                "ticker": normalize_ticker(str(r[0] or "")),
-                "shares": f"{_to_float(r[1], 0.0):g}",
-                "cost": f"{_to_float(r[2], 0.0):g}",
-                "note": str(r[3] or ""),
-            }
-            for r in rows
-            if normalize_ticker(str(r[0] or ""))
-        ]
+        out = _read_positions_rows_pg(cur)
+        if not out:
+            inserted = _bootstrap_portfolio_positions_pg(cur)
+            if inserted > 0:
+                con.commit()
+                out = _read_positions_rows_pg(cur)
+            else:
+                try:
+                    con.rollback()
+                except Exception:
+                    pass
         if out:
             return out
         if strict_postgres_mode():
@@ -244,6 +350,10 @@ def write_portfolio_rows_state(rows: list[dict[str, str]]) -> None:
 
 
 def read_cash_rows_state() -> list[dict[str, str]]:
+    if core_backend() == "postgres" and not strict_postgres_mode():
+        local_rows = _read_local_cash_rows()
+        if local_rows:
+            return local_rows
     if core_backend() != "postgres":
         return _read_local_cash_rows()
     if not _ensure_state_schema_pg():
@@ -260,6 +370,21 @@ def read_cash_rows_state() -> list[dict[str, str]]:
         cur.execute("SELECT currency, amount FROM cash_balances_core ORDER BY currency ASC")
         rows = cur.fetchall() or []
         out = [{"currency": str(r[0] or "USD").upper(), "amount": f"{_to_float(r[1], 0.0):g}"} for r in rows]
+        if not out:
+            for r in _read_local_cash_rows():
+                ccy = str(r.get("currency") or "USD").strip().upper() or "USD"
+                cur.execute(
+                    """
+                    INSERT INTO cash_balances_core (currency, amount, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (currency) DO UPDATE SET amount = EXCLUDED.amount, updated_at = NOW()
+                    """,
+                    (ccy, _to_float(r.get("amount"), 0.0)),
+                )
+            con.commit()
+            cur.execute("SELECT currency, amount FROM cash_balances_core ORDER BY currency ASC")
+            rows = cur.fetchall() or []
+            out = [{"currency": str(r[0] or "USD").upper(), "amount": f"{_to_float(r[1], 0.0):g}"} for r in rows]
         if out:
             return out
         if strict_postgres_mode():
@@ -310,6 +435,10 @@ def write_cash_rows_state(rows: list[dict[str, str]]) -> None:
 
 
 def read_watchlist_rows_state() -> list[dict[str, str]]:
+    if core_backend() == "postgres" and not strict_postgres_mode():
+        local_rows = _read_local_watchlist_rows()
+        if local_rows:
+            return local_rows
     if core_backend() != "postgres":
         return _read_local_watchlist_rows()
     if not _ensure_state_schema_pg():
@@ -331,6 +460,33 @@ def read_watchlist_rows_state() -> list[dict[str, str]]:
             if not tk:
                 continue
             out.append({"ticker": tk, "added_at": str(r[1] or ""), "reason": str(r[2] or "")})
+        if not out:
+            for r in _read_local_watchlist_rows():
+                tk = normalize_ticker(str(r.get("ticker") or ""))
+                if not tk:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO watchlist_core (ticker, added_at, reason, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (ticker)
+                    DO UPDATE SET added_at = EXCLUDED.added_at, reason = EXCLUDED.reason, updated_at = NOW()
+                    """,
+                    (
+                        tk,
+                        str(r.get("added_at") or "").strip() or dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        str(r.get("reason") or ""),
+                    ),
+                )
+            con.commit()
+            cur.execute("SELECT ticker, added_at, reason FROM watchlist_core ORDER BY ticker ASC")
+            rows = cur.fetchall() or []
+            out = []
+            for r in rows:
+                tk = normalize_ticker(str(r[0] or ""))
+                if not tk:
+                    continue
+                out.append({"ticker": tk, "added_at": str(r[1] or ""), "reason": str(r[2] or "")})
         if out:
             return out
         if strict_postgres_mode():

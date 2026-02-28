@@ -12,7 +12,7 @@ from pathlib import Path
 from app.core.config import DATA_DIR, ROOT
 from app.core.db import core_conn as _conn_core
 from app.core.date import parse_datetime_flexible
-from app.core.filing_text import resolve_filing_path, normalize_filing_rel_path, filing_path_available
+from app.core.filing_text import resolve_filing_path, normalize_filing_rel_path, filing_path_available, read_filing_text_any
 from app.core import cloud_files
 from app.core.proposal_text import clean_task_text, is_ai_task_text
 from app.core.ticker import normalize_ticker as _normalize_ticker
@@ -39,6 +39,7 @@ from app.services.price_metrics_service import get_price_metrics
 from app.services.mini_statements_service import get_mini_statements, compute_financial_deltas
 from app.services.company_intel_service import get_company_intel
 from app.services.earnings_transcript_service import (
+    list_earnings_analysis,
     list_earnings_transcripts,
     list_quarterly_result_signals,
     list_sec_earnings_releases,
@@ -1270,6 +1271,230 @@ def list_companies(
     }
 
 
+def _parse_date_token(raw: str) -> dt.date | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return dt.datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+    p = parse_datetime_flexible(
+        s,
+        formats=("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"),
+    )
+    if p is not None:
+        return p.date()
+    return None
+
+
+def _extract_announced_next_earnings_date(text: str, filing_date: str = "") -> str:
+    txt = str(text or "")
+    if not txt:
+        return ""
+    low = txt.lower()
+    if not re.search(r"\b(earnings|financial results|conference call|quarterly results)\b", low):
+        return ""
+    base = _parse_date_token(str(filing_date or "")) or dt.date.today()
+    date_tokens = re.findall(
+        r"\b(?:\d{4}-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\b",
+        txt,
+        flags=re.IGNORECASE,
+    )
+    future: list[dt.date] = []
+    for tok in date_tokens:
+        d = _parse_date_token(tok)
+        if d is None:
+            continue
+        delta = (d - base).days
+        if 0 <= delta <= 500:
+            future.append(d)
+    if not future:
+        return ""
+    return min(future).isoformat()
+
+
+def _beat_miss_from_text(text: str) -> str:
+    low = str(text or "").lower()
+    if not low:
+        return "Unknown"
+    beat_hits = len(re.findall(r"\b(beat|beats|beating|above expectations|ahead of expectations|exceeded|better than expected|surpass)\b", low))
+    miss_hits = len(re.findall(r"\b(miss|missed|below expectations|under expectations|weaker than expected|shortfall)\b", low))
+    if beat_hits > miss_hits and beat_hits > 0:
+        return "Beat"
+    if miss_hits > beat_hits and miss_hits > 0:
+        return "Miss"
+    if beat_hits > 0 and miss_hits > 0:
+        return "Mixed"
+    return "Unknown"
+
+
+def _to_float_maybe(raw: object) -> float | None:
+    s = str(raw or "").strip()
+    if not s or s in {"-", "N/A", "n/a"}:
+        return None
+    s = s.replace(",", "")
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except Exception:
+        return None
+
+
+def _calendar_snapshot_fallback(ticker: str) -> dict[str, str]:
+    tk = _normalize_ticker(ticker)
+    if not tk:
+        return {}
+    con_pg = pg_connect()
+    if con_pg is None:
+        return {}
+    rows: list[tuple] = []
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """
+            SELECT event_date, reported, verdict, event_status, eps_actual, eps_estimate, surprise_txt, result_source
+            FROM earnings_calendar_snapshot_core
+            WHERE symbol=%s
+            ORDER BY event_date DESC
+            LIMIT 60
+            """,
+            (tk,),
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        rows = []
+    finally:
+        try:
+            con_pg.close()
+        except Exception:
+            pass
+    if not rows:
+        return {}
+
+    today = dt.date.today()
+    next_date = ""
+    last_date = ""
+    last_result = "Unknown"
+    source = ""
+    for r in rows:
+        d = str(r[0] or "").strip()[:10]
+        if not d:
+            continue
+        dd = _parse_date_token(d)
+        if dd is None:
+            continue
+        if not next_date and dd >= today:
+            rep = str(r[1] or "").strip()
+            stat = str(r[3] or "").strip().lower()
+            if rep != "1" and stat != "reported":
+                next_date = d
+        if not last_date and dd <= today:
+            last_date = d
+            verdict = str(r[2] or "").strip().lower()
+            if "beat" in verdict:
+                last_result = "Beat"
+            elif "miss" in verdict:
+                last_result = "Miss"
+            elif verdict:
+                last_result = "Mixed"
+            if last_result == "Unknown":
+                act = _to_float_maybe(r[4])
+                est = _to_float_maybe(r[5])
+                if act is not None and est is not None:
+                    if act > est:
+                        last_result = "Beat"
+                    elif act < est:
+                        last_result = "Miss"
+                    else:
+                        last_result = "Mixed"
+            source = str(r[7] or "").strip() or "Earnings calendar snapshot"
+        if next_date and last_date:
+            break
+    return {
+        "next_announced_date": next_date,
+        "last_release_date": last_date,
+        "last_result": last_result,
+        "brief": "",
+        "brief_source": source,
+    }
+
+
+def _build_sec_earnings_brief(
+    *,
+    ticker: str,
+    releases: list[dict[str, object]],
+    quarterly_signals: list[dict[str, object]],
+    analyses: list[dict[str, object]],
+) -> dict[str, str]:
+    rels = [dict(x or {}) for x in (releases or []) if isinstance(x, dict)]
+    rels.sort(key=lambda r: str(r.get("call_date") or ""), reverse=True)
+    latest_release = rels[0] if rels else {}
+    last_release_date = str(latest_release.get("call_date") or "").strip()
+    if not last_release_date and quarterly_signals:
+        last_release_date = str(dict(quarterly_signals[0] or {}).get("date") or "").strip()[:10]
+    if not last_release_date and analyses:
+        last_release_date = str(dict(analyses[0] or {}).get("filing_date") or "").strip()[:10]
+
+    next_date = ""
+    for r in rels[:10]:
+        next_date = _extract_announced_next_earnings_date(
+            str(r.get("excerpt") or ""),
+            filing_date=str(r.get("call_date") or ""),
+        )
+        if not next_date:
+            p = str(r.get("path") or "").strip()
+            if p:
+                try:
+                    txt = read_filing_text_any(p, max_chars=180000) or ""
+                    next_date = _extract_announced_next_earnings_date(
+                        txt,
+                        filing_date=str(r.get("call_date") or ""),
+                    )
+                except Exception:
+                    pass
+        if next_date:
+            break
+
+    lead_text = ""
+    lead_source = ""
+    if latest_release:
+        lead_text = str(latest_release.get("excerpt") or "").strip()
+        lead_source = "SEC earnings release"
+    if not lead_text and analyses:
+        a0 = dict(analyses[0] or {})
+        lead_text = str(a0.get("summary") or "").strip()
+        lead_source = "Earnings analysis"
+    if not lead_text and quarterly_signals:
+        s0 = dict(quarterly_signals[0] or {})
+        lead_text = str(s0.get("text") or "").strip()
+        lead_source = str(s0.get("source") or "SEC facts").strip()
+
+    last_result = _beat_miss_from_text(lead_text)
+    out = {
+        "next_announced_date": next_date,
+        "last_release_date": last_release_date,
+        "last_result": last_result,
+        "brief": lead_text[:240],
+        "brief_source": lead_source[:80],
+    }
+    fb = _calendar_snapshot_fallback(ticker)
+    if fb:
+        if not out.get("next_announced_date"):
+            out["next_announced_date"] = str(fb.get("next_announced_date") or "")
+        if not out.get("last_release_date"):
+            out["last_release_date"] = str(fb.get("last_release_date") or "")
+        if str(out.get("last_result") or "Unknown") == "Unknown":
+            out["last_result"] = str(fb.get("last_result") or "Unknown")
+        if not out.get("brief") and fb.get("brief_source"):
+            out["brief"] = "Derived from earnings calendar snapshot."
+            out["brief_source"] = str(fb.get("brief_source") or "")[:80]
+    return out
+
+
 def company_detail(ticker: str) -> dict[str, object]:
     t = _normalize_ticker(ticker)
     if not t:
@@ -1669,11 +1894,18 @@ def company_detail(ticker: str) -> dict[str, object]:
     deltas = compute_financial_deltas(ticker=t, years=5)
     earnings_calls = list_earnings_transcripts(t, limit=36)
     earnings_releases = list_sec_earnings_releases(t, limit=12, lookback_years=10, max_filings=260)
+    earnings_analysis = list_earnings_analysis(t, limit=8)
     earnings_call_source_counts: dict[str, int] = {}
     for tr in earnings_calls:
         src = str((tr or {}).get("source_type") or "").strip().lower() or "unknown"
         earnings_call_source_counts[src] = int(earnings_call_source_counts.get(src, 0)) + 1
     quarterly_signals = list_quarterly_result_signals(t, limit=10)
+    earnings_sec_brief = _build_sec_earnings_brief(
+        ticker=t,
+        releases=earnings_releases,
+        quarterly_signals=quarterly_signals,
+        analyses=earnings_analysis,
+    )
 
     def _days_old(asof_s: str) -> int | None:
         s = str(asof_s or "").strip()
@@ -1765,6 +1997,8 @@ def company_detail(ticker: str) -> dict[str, object]:
         "data_coverage": data_coverage_meta,
         "earnings_calls": earnings_calls,
         "earnings_releases": earnings_releases,
+        "earnings_analysis": earnings_analysis,
+        "earnings_sec_brief": earnings_sec_brief,
         "earnings_call_source_counts": earnings_call_source_counts,
         "quarterly_signals": quarterly_signals,
         "filings": filings,
@@ -1789,9 +2023,14 @@ def save_company_moats(ticker: str, moat_keys: list[str]) -> bool:
                 (t, mk, now),
             )
         con.commit()
-        return True
     finally:
         con.close()
+    try:
+        from app.services.postgres_core_service import save_company_moats_pg
+        save_company_moats_pg(t, picked)
+    except Exception:
+        pass
+    return True
 
 
 def add_competitor(ticker: str, competitor_ticker: str, competitor_name: str, evidence: str = "") -> bool:
@@ -1811,9 +2050,14 @@ def add_competitor(ticker: str, competitor_ticker: str, competitor_name: str, ev
             (t, ct, name[:160], ev[:1200], now),
         )
         con.commit()
-        return True
     finally:
         con.close()
+    try:
+        from app.services.postgres_core_service import add_company_competitor_pg
+        add_company_competitor_pg(t, ct, name, evidence=ev)
+    except Exception:
+        pass
+    return True
 
 
 def update_competitor(row_id: int, competitor_ticker: str, competitor_name: str, evidence: str = "") -> bool:
@@ -1825,6 +2069,7 @@ def update_competitor(row_id: int, competitor_ticker: str, competitor_name: str,
     ev = str(evidence or "").strip()[:1200]
     now = dt.datetime.now().isoformat()
     con = _conn_core()
+    ok = False
     try:
         cur = con.execute(
             """UPDATE company_sec_competitors
@@ -1833,9 +2078,15 @@ def update_competitor(row_id: int, competitor_ticker: str, competitor_name: str,
             (ct, name, ev, now, rid),
         )
         con.commit()
-        return cur.rowcount > 0
+        ok = cur.rowcount > 0
     finally:
         con.close()
+    try:
+        from app.services.postgres_core_service import update_company_competitor_pg
+        update_company_competitor_pg(rid, competitor_ticker=ct, competitor_name=name, evidence=ev)
+    except Exception:
+        pass
+    return ok
 
 
 def remove_competitor(row_id: int) -> bool:
@@ -1843,12 +2094,19 @@ def remove_competitor(row_id: int) -> bool:
     if rid <= 0:
         return False
     con = _conn_core()
+    ok = False
     try:
         cur = con.execute("DELETE FROM company_sec_competitors WHERE id = ?", (rid,))
         con.commit()
-        return cur.rowcount > 0
+        ok = cur.rowcount > 0
     finally:
         con.close()
+    try:
+        from app.services.postgres_core_service import remove_company_competitor_pg
+        remove_company_competitor_pg(rid)
+    except Exception:
+        pass
+    return ok
 
 
 def add_company_note(

@@ -5,7 +5,7 @@ import re
 import urllib.parse
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from app.core.date import parse_datetime_flexible
 from app.core.proposal_text import clean_task_text, is_ai_task_text, is_system_log_text
 from app.core.ticker_infer import infer_ticker_explicit
@@ -382,6 +382,15 @@ def _ctx(
             "ir_suggestions": ir_suggestions,
         },
     )
+
+
+@router.get("/organizer/notes-export")
+def organizer_notes_export(limit: int = 500, include_system: int = 1):
+    lim = max(1, min(int(limit or 500), 5000))
+    rows = list_recent_notes(limit=lim)
+    if int(include_system or 1) == 0:
+        rows = [r for r in rows if not _is_system_log_note(r)]
+    return JSONResponse({"ok": True, "count": len(rows), "items": rows})
 
 
 def _with_link_ticker(row: dict) -> dict:

@@ -38,6 +38,7 @@
 </div>
 <script>
   (function () {
+    var ENABLE_TEXT_MUTATIONS = false;
     var root = document.getElementById("globalDesk");
     if (!root) return;
     var toggle = document.getElementById("globalDeskToggle");
@@ -179,8 +180,10 @@
       fd.set("text", q);
       fd.set("intent", intent);
       try {
-        // Fast direct path for cash/watchlist/portfolio commands (avoids slow generic desk route).
-        var ccmd = parseDirectCashCommand(q);
+        var explicitApply = /^\s*(?:\/apply|apply)\b/i.test(q);
+        var qEffective = explicitApply ? q.replace(/^\s*(?:\/apply|apply)\s*/i, '') : q;
+        // Direct text mutations are disabled for safety. Use dedicated UI forms/routes.
+        var ccmd = (ENABLE_TEXT_MUTATIONS && explicitApply) ? parseDirectCashCommand(qEffective) : null;
         if(ccmd){
           if(ccmd.mode === 'cash_upsert'){
             if(!ccmd.amount || ccmd.amount <= 0){
@@ -214,7 +217,7 @@
             return;
           }
         }
-        var wcmd = parseDirectWatchlistCommand(q);
+        var wcmd = (ENABLE_TEXT_MUTATIONS && explicitApply) ? parseDirectWatchlistCommand(qEffective) : null;
         if(wcmd && wcmd.mode === 'watchlist_add'){
           var fw1 = new URLSearchParams();
           fw1.set('ticker', wcmd.ticker);
@@ -242,7 +245,7 @@
           refreshSoon();
           return;
         }
-        var pcmd = parseDirectPortfolioCommand(q);
+        var pcmd = (ENABLE_TEXT_MUTATIONS && explicitApply) ? parseDirectPortfolioCommand(qEffective) : null;
         if(pcmd && pcmd.mode === 'portfolio_upsert'){
           if(!pcmd.ticker || !pcmd.shares || !pcmd.cost){
             setOut('Portfolio command needs ticker + shares + average price.');

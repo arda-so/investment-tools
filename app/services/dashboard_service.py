@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import datetime as dt
 from email.utils import parsedate_to_datetime
 import json
@@ -123,7 +124,8 @@ def ask_workspace_ai(question: str) -> str:
             f"Be concise (3-5 sentences max) and factual. Do not guess numbers.\n\n"
             f"User: {q}"
         )
-        reply = _ask_ai(prompt, context="", mode="smart")
+        # Workspace chat defaults to fast lane; deep analysis paths remain explicit elsewhere.
+        reply = _ask_ai(prompt, context="", mode="fast")
         if reply and reply.strip():
             out = reply.strip()
             low = out.lower()
@@ -392,42 +394,51 @@ def _finnhub_company_news(tickers: list[str], limit: int = 12, days_back: int = 
         import certifi  # type: ignore
         import requests  # type: ignore
 
-        for t in ts[:8]:
-            r = requests.get(
-                "https://finnhub.io/api/v1/company-news",
-                params={"symbol": t, "from": date_from, "to": date_to, "token": key},
-                timeout=10,
-                verify=certifi.where(),
-                headers={"Accept": "application/json", "User-Agent": _HTTP_HEADERS.get("User-Agent", "OnyxTerminal/1.0")},
-            )
-            if r.status_code != 200:
-                continue
-            rows = r.json() or []
-            for it in rows[: per_ticker * 2]:
-                title = str((it or {}).get("headline") or "").strip()
-                if not title:
-                    continue
-                key_norm = " ".join((f"{t}: {title}").lower().split())
-                if key_norm in seen:
-                    continue
-                seen.add(key_norm)
-                link = str((it or {}).get("url") or "").strip()
-                src_origin = str((it or {}).get("source") or "").strip()
-                ts_raw = str((it or {}).get("datetime") or "").strip()
-                out.append(
-                    {
+        def _fetch_ticker(t: str) -> list[dict[str, str]]:
+            try:
+                r = requests.get(
+                    "https://finnhub.io/api/v1/company-news",
+                    params={"symbol": t, "from": date_from, "to": date_to, "token": key},
+                    timeout=8,
+                    verify=certifi.where(),
+                    headers={"Accept": "application/json", "User-Agent": _HTTP_HEADERS.get("User-Agent", "OnyxTerminal/1.0")},
+                )
+                if r.status_code != 200:
+                    return []
+                items: list[dict[str, str]] = []
+                for it in (r.json() or [])[:per_ticker * 2]:
+                    title = str((it or {}).get("headline") or "").strip()
+                    if not title:
+                        continue
+                    link = str((it or {}).get("url") or "").strip()
+                    src_origin = str((it or {}).get("source") or "").strip()
+                    ts_raw = str((it or {}).get("datetime") or "").strip()
+                    items.append({
                         "title": f"{t}: {title}",
                         "ticker": t,
                         "link": link,
                         "source": "Finnhub" + (f" ({src_origin})" if src_origin else ""),
                         "published_at": ts_raw,
-                    }
-                )
-                if len(out) >= lim:
-                    return out
+                    })
+                return items
+            except Exception:
+                return []
+
+        # Parallel fetch — all tickers at once instead of sequential
+        with _cf.ThreadPoolExecutor(max_workers=min(8, len(ts[:8]))) as ex:
+            futures = [ex.submit(_fetch_ticker, t) for t in ts[:8]]
+            for fut in _cf.as_completed(futures, timeout=12):
+                try:
+                    for item in (fut.result() or []):
+                        key_norm = " ".join(f"{item.get('title','')}|{item.get('link','')}".lower().split())
+                        if key_norm not in seen:
+                            seen.add(key_norm)
+                            out.append(item)
+                except Exception:
+                    pass
     except Exception:
         return out
-    return out
+    return out[:lim]
 
 
 def _google_news(query: str, limit: int = 6) -> list[dict[str, str]]:
@@ -958,14 +969,45 @@ def home_snapshot() -> dict[str, object]:
 
     news_general: list[dict[str, str]] = []
     news_company: list[dict[str, str]] = []
-    # Primary: Finnhub feeds (fresh market wire).
-    news_general = _finnhub_general_news(limit=16)
-    news_general = _filter_relevant_news(news_general, company_mode=False)
-    news_general = _filter_recent_news(news_general, max_age_hours=96)
-    news_company = _finnhub_company_news(tickers[:10], limit=16, days_back=4)
-    news_company = _filter_relevant_news(news_company, company_mode=True)
-    news_company = _filter_recent_news(news_company, max_age_hours=120, keep_undated_company=True)
-    # Secondary: local SEC/intel feed fallbacks.
+    _news_needs_refresh = True
+    # Fast path: read from Postgres snapshot first (survives container restarts).
+    # Only call Finnhub if data is older than 3 hours.
+    if core_backend() == "postgres":
+        try:
+            pg_general = [dict(x) for x in list_news_wire_snapshot_pg("general", limit=16, max_age_hours=3)]
+            pg_company = [dict(x) for x in list_news_wire_snapshot_pg("company", limit=16, max_age_hours=3)]
+            if pg_general:
+                news_general = pg_general
+            if pg_company:
+                news_company = pg_company
+            _news_needs_refresh = not (news_general and news_company)
+        except Exception:
+            _news_needs_refresh = True
+    # Call Finnhub only when Postgres data is stale or missing.
+    # Both calls run in parallel via ThreadPoolExecutor.
+    if _news_needs_refresh:
+        need_general = not news_general
+        need_company = not news_company
+        with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_g = ex.submit(_finnhub_general_news, 16) if need_general else None
+            fut_c = ex.submit(_finnhub_company_news, tickers[:10], 16, 4) if need_company else None
+            if fut_g:
+                try:
+                    fh_g = _filter_relevant_news(fut_g.result(timeout=12) or [], company_mode=False)
+                    fh_g = _filter_recent_news(fh_g, max_age_hours=96)
+                    if fh_g:
+                        news_general = fh_g
+                except Exception:
+                    pass
+            if fut_c:
+                try:
+                    fh_c = _filter_relevant_news(fut_c.result(timeout=14) or [], company_mode=True)
+                    fh_c = _filter_recent_news(fh_c, max_age_hours=120, keep_undated_company=True)
+                    if fh_c:
+                        news_company = fh_c
+                except Exception:
+                    pass
+    # Local SEC/intel fallbacks if still empty.
     if not news_general:
         news_general = _news_fallback_from_feed(limit=8, include_fast=False)
     if not news_general:
@@ -979,7 +1021,7 @@ def home_snapshot() -> dict[str, object]:
 
     news_general = _dedupe_news(news_general)[:8]
     news_company = _dedupe_news(news_company)[:8]
-    # Persist successful snapshots for durable fallback.
+    # Persist to Postgres so next cold start is instant.
     if news_general and core_backend() == "postgres":
         try:
             upsert_news_wire_snapshot_pg("general", news_general)
@@ -990,7 +1032,7 @@ def home_snapshot() -> dict[str, object]:
             upsert_news_wire_snapshot_pg("company", news_company)
         except Exception:
             pass
-    # Durable fallback from Postgres snapshots if live pulls are empty.
+    # Last-resort Postgres fallback (older than 3h but still valid).
     if not news_general and core_backend() == "postgres":
         try:
             news_general = [dict(x) for x in list_news_wire_snapshot_pg("general", limit=8, max_age_hours=168)]
@@ -1095,3 +1137,85 @@ def portfolio_intelligence_brief(home: dict[str, object], my_metrics: dict[str, 
     return ask_agent(
         "Provide portfolio intelligence brief using concentration, catalysts, and next actions for current holdings."
     )
+
+
+_PROFILE_KEYS = [
+    "investing_style", "time_horizon", "position_sizing", "risk_limits",
+    "strengths", "weaknesses_blindspots", "mistakes_top10", "mistakes_why_happened",
+    "mistakes_avoidability", "mistakes_lessons", "decision_checklist", "sell_discipline",
+]
+
+
+def get_data_integrity_health() -> dict:
+    """Return live counts from Postgres for the dashboard Health tab."""
+    from app.services.postgres_core_service import pg_connect
+    result: dict = {
+        "profile": {"filled": 0, "total": len(_PROFILE_KEYS), "pct": 0, "missing_keys": list(_PROFILE_KEYS)},
+        "interview_queue": {"open": 0, "done": 0},
+        "gap_prompts_30d": {"open": 0, "answered": 0},
+        "agent_runs_7d": {"success": 0, "error": 0, "running": 0},
+    }
+    con = pg_connect()
+    if con is None:
+        return result
+    try:
+        cur = con.cursor()
+
+        # Profile completeness
+        cur.execute(
+            "SELECT key FROM investor_style_memory_core WHERE answer IS NOT NULL AND answer != ''"
+        )
+        filled_keys = {row[0] for row in cur.fetchall()}
+        filled = len([k for k in _PROFILE_KEYS if k in filled_keys])
+        missing = [k for k in _PROFILE_KEYS if k not in filled_keys]
+        total = len(_PROFILE_KEYS)
+        result["profile"] = {
+            "filled": filled,
+            "total": total,
+            "pct": int(filled / total * 100) if total else 0,
+            "missing_keys": missing,
+        }
+
+        # Interview queue
+        cur.execute(
+            "SELECT status, COUNT(*) FROM portfolio_interview_queue_core GROUP BY status"
+        )
+        for status, cnt in cur.fetchall():
+            if status == "pending":
+                result["interview_queue"]["open"] = cnt
+            elif status == "done":
+                result["interview_queue"]["done"] = cnt
+
+        # Gap prompts (last 30 days)
+        cutoff_30d = (dt.datetime.now() - dt.timedelta(days=30)).isoformat()
+        cur.execute(
+            "SELECT status, COUNT(*) FROM daily_operator_gap_prompts_core"
+            " WHERE created_at >= %s GROUP BY status",
+            (cutoff_30d,),
+        )
+        for status, cnt in cur.fetchall():
+            if status == "open":
+                result["gap_prompts_30d"]["open"] = cnt
+            elif status in ("answered", "done"):
+                result["gap_prompts_30d"]["answered"] += cnt
+
+        # Agent runs (last 7 days)
+        cutoff_7d = (dt.datetime.now() - dt.timedelta(days=7)).isoformat()
+        cur.execute(
+            "SELECT status, COUNT(*) FROM agent_runs_core"
+            " WHERE started_at >= %s GROUP BY status",
+            (cutoff_7d,),
+        )
+        for status, cnt in cur.fetchall():
+            if status == "completed":
+                result["agent_runs_7d"]["success"] = cnt
+            elif status == "error":
+                result["agent_runs_7d"]["error"] = cnt
+            elif status == "running":
+                result["agent_runs_7d"]["running"] = cnt
+
+    except Exception:
+        pass
+    finally:
+        con.close()
+    return result

@@ -196,7 +196,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     payload = json.loads(str(row[3] or "{}"))
                 except Exception:
                     payload = {}
-                bullets = payload.get("points") if isinstance(payload, dict) else []
+                bullets = payload.get("bullets") if isinstance(payload, dict) else []
                 if not isinstance(bullets, list):
                     bullets = []
                 text = "\n".join([f"- {str(x)}" for x in bullets[:6]]) or "Morning brief generated."
@@ -321,8 +321,8 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                         "ticker": str(row[1] or "").upper(),
                         "ts": _norm_time(str(row[5] or "")),
                         "actions": [
-                            {"label": "Execute", "method": "POST", "url": f"/dashboard/proposals/{int(row[0] or 0)}/execute"},
-                            {"label": "Reject", "method": "POST", "url": f"/dashboard/proposals/{int(row[0] or 0)}/reject"},
+                            {"label": "Investigate", "method": "POST", "url": f"/dashboard/proposals/{int(row[0] or 0)}/execute"},
+                            {"label": "Dismiss", "method": "POST", "url": f"/dashboard/proposals/{int(row[0] or 0)}/reject"},
                         ],
                     }
                 )

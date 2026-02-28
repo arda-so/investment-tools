@@ -5,6 +5,7 @@ import csv
 import datetime as dt
 import difflib
 import json
+import os
 import re
 import threading
 import time
@@ -43,7 +44,7 @@ from app.services.company_lookup_service import company_name_map as lookup_compa
 from app.services.ai_insight_service import list_ai_meta_suggestions, run_ai_meta_suggestions
 from app.services.company_file_service import add_company_reminder
 from app.services.company_file_service import list_companies
-from app.services.dashboard_service import ask_ai_local, ask_workspace_ai, dashboard_snapshot, quick_capture, portfolio_intelligence_brief
+from app.services.dashboard_service import ask_ai_local, ask_workspace_ai, dashboard_snapshot, quick_capture, portfolio_intelligence_brief, get_data_integrity_health
 from app.services.earnings_transcript_service import list_sec_earnings_releases
 from app.services.organizer_service import list_recent_notes, list_tasks
 from app.services.portfolio_memory_service import (
@@ -1380,8 +1381,16 @@ def dashboard_report_panels() -> dict[str, object]:
                     morning_updated_fallback = asof[:5] if len(asof) >= 5 else asof
     except Exception:
         pass
-    if not morning_points:
-        morning_points = _extract_morning_points(morning_txt, limit=7)
+    # Fallback: if Postgres cache has fewer than 3 bullets (portfolio-only / degraded),
+    # supplement with bullets parsed directly from the morning intelligence file.
+    if len(morning_points) < 3 and morning_txt:
+        file_points = _extract_morning_points(morning_txt, limit=7)
+        seen = {p.lower() for p in morning_points}
+        for fp in file_points:
+            if fp.lower() not in seen:
+                morning_points.append(fp)
+                seen.add(fp.lower())
+        morning_points = morning_points[:7]
 
     both_rows = _extract_section_table_rows(
         appendix_txt,
@@ -1810,6 +1819,7 @@ def _render(
     cascade_alerts = list_cascade_alerts(status="open", limit=10)
     ai_accuracy = get_ai_accuracy_stats(days=90)
     ai_audit_timeline = get_ai_audit_timeline(limit=30)
+    data_integrity = get_data_integrity_health()
     from app.services.earnings_transcript_service import list_earnings_analysis
     earnings_analyses = list_earnings_analysis(limit=10)
     tpl = "components/dashboard_body.html" if _is_hx(request) else "dashboard.html"
@@ -1843,6 +1853,7 @@ def _render(
             "cascade_alerts": cascade_alerts,
             "ai_accuracy": ai_accuracy,
             "ai_audit_timeline": ai_audit_timeline,
+            "data_integrity": data_integrity,
             "earnings_analyses": earnings_analyses,
         },
     )
@@ -1908,11 +1919,56 @@ def _has_remove_intent(text: str) -> bool:
     return False
 
 
+def _looks_like_question(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    if "?" in s:
+        return True
+    return bool(re.match(r"^(what|why|how|when|where|which|can|could|would|should|do|does|did|is|are)\b", s))
+
+
+def _starts_with_command_verb(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    return bool(re.match(r"^(add|set|update|remove|delete|drop|buy|sell|close|fund|allocate|put)\b", s))
+
+
+def _is_mutating_command_mode(mode: str) -> bool:
+    m = str(mode or "").strip().lower()
+    return m in {
+        "cash_upsert",
+        "cash_remove",
+        "watchlist_add",
+        "watchlist_remove",
+        "portfolio_upsert",
+        "portfolio_remove",
+        "bluechips_add",
+        "bluechips_remove",
+    }
+
+
+def _explicit_mutation_request(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    return bool(re.match(r"^(?:/apply|apply)\b", s))
+
+
+def _mutation_guard_enabled() -> bool:
+    v = str(os.getenv("AI_MUTATION_GUARD", "1")).strip().lower()
+    return v not in {"0", "false", "no", "off"}
+
+
+def _allow_text_mutations() -> bool:
+    v = str(os.getenv("ALLOW_TEXT_MUTATIONS", "0")).strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
 def _parse_ai_command(raw: str) -> dict[str, str] | None:
     s = str(raw or "").strip()
     if not s:
         return None
     low = re.sub(r"\s+", " ", s.lower()).strip()
+    if _looks_like_question(low) and not _starts_with_command_verb(low):
+        return None
 
     # Intent-first parsing so similar phrasings still work.
     has_add = _has_add_intent(low)
@@ -2307,12 +2363,26 @@ def _execute_ai_command(cmd: dict[str, str]) -> tuple[bool, str]:
         if amt > 0:
             rows.append({"currency": ccy, "amount": f"{amt:g}"})
         _write_cash_rows(rows)
+        record_decision(
+            action="cash_upsert",
+            ticker=ccy,
+            reason=f"Cash set to {ccy} {amt:,.2f} via Ask AI",
+            confidence=0.9,
+            source="dashboard_ai",
+        )
         return True, f"Cash balance updated: {ccy} {amt:,.2f}."
     if mode == "cash_remove":
         ccy = str(cmd.get("currency") or "USD").strip().upper() or "USD"
         rows = _read_cash_rows()
         rows = [r for r in rows if str(r.get("currency") or "").strip().upper() != ccy]
         _write_cash_rows(rows)
+        record_decision(
+            action="cash_remove",
+            ticker=ccy,
+            reason=f"Cash removed for {ccy} via Ask AI",
+            confidence=0.9,
+            source="dashboard_ai",
+        )
         return True, f"Cash balance removed: {ccy}."
     if mode == "watchlist_add":
         if not ticker:
@@ -2740,6 +2810,20 @@ def dashboard_ask(
     q = str(question or "").strip()
     cmd = _parse_ai_command(q)
     if cmd:
+        if _is_mutating_command_mode(cmd.get("mode", "")) and not _allow_text_mutations():
+            return _render(
+                request,
+                message="Blocked: text-based cash/portfolio/watchlist changes are disabled.",
+                ask_q=q,
+                ask_a="",
+            )
+        if _is_mutating_command_mode(cmd.get("mode", "")) and _mutation_guard_enabled() and not _explicit_mutation_request(q):
+            return _render(
+                request,
+                message="Blocked sensitive change. Use explicit prefix: /apply ... (example: /apply add 10k usd cash).",
+                ask_q=q,
+                ask_a="",
+            )
         ok, msg = _execute_ai_command(cmd)
         suffix = f" Linked: {cmd['ticker']}" if cmd.get("ticker") else ""
         return _render(request, message=(msg + suffix) if ok else msg, ask_q=q, ask_a="")
@@ -2772,6 +2856,20 @@ def dashboard_desk(
         # Intent-based first: execute command if detected regardless of selected mode.
         cmd = _parse_ai_command(payload)
         if cmd:
+            if _is_mutating_command_mode(cmd.get("mode", "")) and not _allow_text_mutations():
+                return _render(
+                    request,
+                    message="Blocked: text-based cash/portfolio/watchlist changes are disabled.",
+                    ask_q=payload,
+                    ask_a="",
+                )
+            if _is_mutating_command_mode(cmd.get("mode", "")) and _mutation_guard_enabled() and not _explicit_mutation_request(payload):
+                return _render(
+                    request,
+                    message="Blocked sensitive change. Use explicit prefix: /apply ... (example: /apply add oxy to watchlist).",
+                    ask_q=payload,
+                    ask_a="",
+                )
             ok, msg = _execute_ai_command(cmd)
             suffix = f" Linked: {cmd['ticker']}" if cmd.get("ticker") else ""
             return _render(request, message=(msg + suffix) if ok else msg, ask_q=payload, ask_a="")
@@ -2935,6 +3033,11 @@ async def api_simulate_macro_shock_batch(request: Request):
     out = simulate_macro_shock_batch(scenarios=scenarios, max_depth=max_depth, top_n=top_n)
     code = 200 if bool(out.get("ok")) else 400
     return JSONResponse(out, status_code=code)
+
+
+@router.get("/api/health/data-integrity")
+async def api_data_integrity_health():
+    return JSONResponse(get_data_integrity_health())
 
 
 @router.get("/api/agent/runs")
@@ -3101,6 +3204,24 @@ def desk_action(
         # Intent-based first: execute command if detected regardless of selected mode.
         cmd = _parse_ai_command(payload)
         if cmd:
+            if _is_mutating_command_mode(cmd.get("mode", "")) and not _allow_text_mutations():
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "mode": cmd["mode"],
+                        "message": "Blocked: text-based cash/portfolio/watchlist changes are disabled.",
+                    },
+                    status_code=400,
+                )
+            if _is_mutating_command_mode(cmd.get("mode", "")) and _mutation_guard_enabled() and not _explicit_mutation_request(payload):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "mode": cmd["mode"],
+                        "message": "Blocked sensitive change. Use explicit prefix: /apply ...",
+                    },
+                    status_code=400,
+                )
             ok, msg = _execute_ai_command(cmd)
             return JSONResponse(
                 {
@@ -3246,6 +3367,7 @@ def my_universe_page(request: Request, msg: str = "", tab: str = "all"):
             }
         )
     p_report, w_report = _universe_reports({**home, "watchlist": watchlist_full}, metrics)
+    timeline_events = _recent_universe_timeline(limit=60)
     return templates.TemplateResponse(
         "my_universe.html",
         {
@@ -3263,6 +3385,7 @@ def my_universe_page(request: Request, msg: str = "", tab: str = "all"):
             "universe_portfolio_report": p_report,
             "universe_watchlist_report": w_report,
             "watchlist_opportunities": _watchlist_opportunities(home, limit=10),
+            "timeline_events": timeline_events,
             "movers_up": snap.get("movers_up", []),
             "movers_down": snap.get("movers_down", []),
             "feed": snap.get("feed", []),
@@ -3313,8 +3436,12 @@ def my_companies_portfolio_upsert(
             next_sh = 0.0
         else:
             next_sh = old_sh - sell_qty
-        reason_key = normalize_sell_reason(trade_reason)
+        raw_reason = str(trade_reason or "").strip()
+        reason_key = normalize_sell_reason(raw_reason)
         reason_label = label_for_sell_reason(reason_key)
+        free_reason = str(note or "").strip()
+        if not free_reason and raw_reason and reason_key == "other":
+            free_reason = raw_reason
         if next_sh > 0:
             kept.append(
                 {
@@ -3330,18 +3457,19 @@ def my_companies_portfolio_upsert(
             action="sell",
             shares=sell_qty,
             price=(c if c > 0 else old_c),
-            note=str(note or "").strip() or ("Sold from portfolio" if next_sh > 0 else "Removed from portfolio"),
+            note=free_reason or ("Sold from portfolio" if next_sh > 0 else "Removed from portfolio"),
             source="my_companies_form",
             meta={
                 "decision_reason": reason_key,
                 "decision_reason_label": reason_label,
+                "decision_reason_raw": raw_reason,
                 "was_existing_position": bool(existing),
             },
         )
         record_decision(
             action=("portfolio_sell" if next_sh > 0 else "portfolio_remove"),
             ticker=t,
-            reason=(str(note or "").strip() or f"Sell ({reason_label})"),
+            reason=(free_reason or f"Sell ({reason_label})"),
             confidence=0.95,
             source="my_companies_form",
         )
@@ -3352,26 +3480,31 @@ def my_companies_portfolio_upsert(
     # legacy remove path for callers that still post shares<=0 without side.
     if sh <= 0:
         removed = existing or {}
-        reason_key = normalize_sell_reason(trade_reason)
+        raw_reason = str(trade_reason or "").strip()
+        reason_key = normalize_sell_reason(raw_reason)
         reason_label = label_for_sell_reason(reason_key)
+        free_reason = str(note or "").strip()
+        if not free_reason and raw_reason and reason_key == "other":
+            free_reason = raw_reason
         _write_portfolio_file(kept)
         record_portfolio_transaction(
             ticker=t,
             action="sell",
             shares=_to_float(removed.get("shares", ""), 0.0),
             price=(c if c > 0 else _to_float(removed.get("cost", ""), 0.0)),
-            note=str(note or "").strip() or "Removed from portfolio",
+            note=free_reason or "Removed from portfolio",
             source="my_companies_form",
             meta={
                 "decision_reason": reason_key,
                 "decision_reason_label": reason_label,
+                "decision_reason_raw": raw_reason,
                 "was_existing_position": bool(existing),
             },
         )
         record_decision(
             action="portfolio_remove",
             ticker=t,
-            reason=(str(note or "").strip() or f"Removed from portfolio ({reason_label})"),
+            reason=(free_reason or f"Removed from portfolio ({reason_label})"),
             confidence=0.95,
             source="my_companies_form",
         )
@@ -3402,7 +3535,8 @@ def my_companies_portfolio_upsert(
             }
         )
         _write_portfolio_file(kept)
-        reason_key = normalize_buy_reason(trade_reason) if trade_reason else "existing_position_add"
+        raw_reason = str(trade_reason or "").strip()
+        reason_key = normalize_buy_reason(raw_reason) if raw_reason else "existing_position_add"
         reason_label = label_for_buy_reason(reason_key)
         record_portfolio_transaction(
             ticker=t,
@@ -3414,6 +3548,7 @@ def my_companies_portfolio_upsert(
             meta={
                 "decision_reason": reason_key,
                 "decision_reason_label": reason_label,
+                "decision_reason_raw": raw_reason,
                 "was_existing_position": True,
             },
         )
@@ -3426,7 +3561,8 @@ def my_companies_portfolio_upsert(
         )
         return JSONResponse({"ok": True, "message": "Portfolio updated (position accumulated)."})
 
-    reason_key = normalize_buy_reason(trade_reason)
+    raw_reason = str(trade_reason or "").strip()
+    reason_key = normalize_buy_reason(raw_reason)
     reason_label = label_for_buy_reason(reason_key)
     belief_key = normalize_buy_belief(buy_belief)
     belief_label = label_for_buy_belief(belief_key)
@@ -3449,6 +3585,7 @@ def my_companies_portfolio_upsert(
         meta={
             "decision_reason": reason_key,
             "decision_reason_label": reason_label,
+            "decision_reason_raw": raw_reason,
             "buy_belief": belief_key,
             "buy_belief_label": belief_label,
             "was_existing_position": False,
@@ -3624,6 +3761,13 @@ def my_universe_cash_upsert(
     if amt > 0:
         rows.append({"currency": ccy, "amount": f"{amt:g}"})
     _write_cash_rows(rows)
+    record_decision(
+        action="cash_upsert",
+        ticker=ccy,
+        reason=f"Cash set to {ccy} {amt:,.2f}",
+        confidence=0.98,
+        source="my_universe_form",
+    )
     return JSONResponse({"ok": True, "message": "Cash balance updated."})
 
 
@@ -3635,7 +3779,78 @@ def my_universe_cash_remove(
     rows = _read_cash_rows()
     rows = [r for r in rows if str(r.get("currency") or "").strip().upper() != ccy]
     _write_cash_rows(rows)
+    record_decision(
+        action="cash_remove",
+        ticker=ccy,
+        reason=f"Cash removed for {ccy}",
+        confidence=0.98,
+        source="my_universe_form",
+    )
     return JSONResponse({"ok": True, "message": "Cash balance removed."})
+
+
+def _recent_universe_timeline(limit: int = 60) -> list[dict[str, str]]:
+    if core_backend() != "postgres":
+        return []
+    con = pg_connect()
+    if con is None:
+        return []
+    events: list[dict[str, str]] = []
+    lim = max(10, min(int(limit or 60), 300))
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT created_at, action, COALESCE(ticker,''), COALESCE(reason,''), COALESCE(source,''), COALESCE(confidence,0)
+              FROM decision_log_core
+             WHERE action LIKE 'portfolio%%'
+                OR action LIKE 'watchlist%%'
+                OR action LIKE 'cash%%'
+                OR action LIKE 'blue_chip%%'
+             ORDER BY created_at DESC
+             LIMIT %s
+            """,
+            (lim,),
+        )
+        for ts, action, ticker, reason, source, conf in (cur.fetchall() or []):
+            events.append(
+                {
+                    "ts": str(ts or ""),
+                    "kind": "decision",
+                    "action": str(action or ""),
+                    "ticker": str(ticker or ""),
+                    "summary": str(reason or ""),
+                    "source": str(source or ""),
+                    "confidence": f"{_to_float(conf, 0.0):.2f}",
+                }
+            )
+        cur.execute(
+            """
+            SELECT created_at, COALESCE(ticker,''), COALESCE(action,''), COALESCE(shares,0), COALESCE(price,0), COALESCE(note,''), COALESCE(source,'')
+              FROM portfolio_transactions_core
+             ORDER BY created_at DESC
+             LIMIT %s
+            """,
+            (lim,),
+        )
+        for ts, ticker, action, shares, price, note, source in (cur.fetchall() or []):
+            events.append(
+                {
+                    "ts": str(ts or ""),
+                    "kind": "trade",
+                    "action": str(action or ""),
+                    "ticker": str(ticker or ""),
+                    "summary": f"{_to_float(shares, 0.0):g} @ {_to_float(price, 0.0):,.2f}" + (f" | {str(note or '')}" if str(note or "").strip() else ""),
+                    "source": str(source or ""),
+                    "confidence": "",
+                }
+            )
+    except Exception:
+        return []
+    finally:
+        con.close()
+    events.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+    return events[:lim]
 
 
 @router.post("/my_universe/command")
@@ -4118,3 +4333,32 @@ def api_global_search(q: str = "", limit: int = 12):
                 for k, _v in sorted(_GLOBAL_SEARCH_CACHE.items(), key=lambda kv: float(kv[1][0]))[:64]:
                     _GLOBAL_SEARCH_CACHE.pop(k, None)
     return JSONResponse({"ok": True, "query": needle, "results": final_results})
+
+
+@router.get("/api/ticker-search")
+def api_ticker_search(q: str = "", limit: int = 10):
+    """
+    Fast ticker autocomplete: returns [{ticker, name, industry}] matched against
+    the full company universe. Used by all add-to-watchlist / add-to-portfolio inputs.
+    """
+    needle = str(q or "").strip()
+    if not needle or len(needle) < 1:
+        return JSONResponse({"ok": True, "results": []})
+    lim = max(4, min(20, int(limit or 10)))
+    try:
+        rows = list_companies(query=needle, page=1, page_size=lim * 2, scope="all", sort="mcap_desc").get("rows") or []
+        out = []
+        seen: set[str] = set()
+        for r in rows:
+            tk = str(getattr(r, "ticker", "") or (r.get("ticker") if isinstance(r, dict) else "") or "").strip().upper()
+            nm = str(getattr(r, "name", "") or (r.get("name") if isinstance(r, dict) else "") or "").strip()
+            ind = str(getattr(r, "industry", "") or (r.get("industry") if isinstance(r, dict) else "") or "").strip()
+            if not tk or tk in seen:
+                continue
+            seen.add(tk)
+            out.append({"ticker": tk, "name": nm or tk, "industry": ind})
+            if len(out) >= lim:
+                break
+        return JSONResponse({"ok": True, "results": out})
+    except Exception:
+        return JSONResponse({"ok": True, "results": []})

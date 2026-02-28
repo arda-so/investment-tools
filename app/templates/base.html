@@ -2058,7 +2058,6 @@
                   var last = aiThread[li];
                   if(!last || last.role!=='assistant' || !last.intent){ continue; }
                   var lint = String(last.intent || '');
-                  if(lint === 'proactive_gap_check'){ continue; }
                   ctx.last_intent = lint;
                   break;
                 }

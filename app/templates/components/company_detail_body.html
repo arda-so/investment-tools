@@ -548,6 +548,19 @@
           {% set rels = detail.earnings_releases or [] %}
           <div style="margin:10px 0;padding:10px;border-radius:10px;background:#f8fafc;">
             <div style="font-size:12px;font-weight:800;color:#334155;margin-bottom:8px;">Earnings Releases (SEC)</div>
+            {% set ebrief = detail.earnings_sec_brief or {} %}
+            <div style="display:grid;gap:6px;margin-bottom:10px;padding:8px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <span class="ticker-chip" style="margin:0;">Next announced: {{ ebrief.next_announced_date or "Not found in recent SEC filings" }}</span>
+                <span class="ticker-chip" style="margin:0;">Last release: {{ ebrief.last_release_date or "-" }}</span>
+                <span class="ticker-chip" style="margin:0;">Last result: {{ ebrief.last_result or "Unknown" }}</span>
+              </div>
+              {% if ebrief.brief %}
+              <div class="muted" style="font-size:12px;">
+                Brief: {{ ebrief.brief }}{% if ebrief.brief_source %} • {{ ebrief.brief_source }}{% endif %}
+              </div>
+              {% endif %}
+            </div>
             <div style="display:grid;gap:8px;">
               {% for tr in rels[:12] %}
               <article class="timeline-item" style="background:#fff;">

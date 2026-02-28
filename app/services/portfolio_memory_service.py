@@ -2217,6 +2217,44 @@ def _queue_question_text(queue_ticker: str, step: int, last_question: str) -> st
     return _interview_question(s, tk)
 
 
+def _pg_sync_interview_row(
+    ticker: str,
+    status: str,
+    step: int,
+    last_question: str,
+    session_id: str,
+    completed_at: str,
+    updated_at: str,
+) -> None:
+    """Upsert a single interview queue row into Postgres so cloud reads stay consistent."""
+    try:
+        con = pg_connect()
+        if con is None:
+            return
+        try:
+            cur = con.cursor()
+            cur.execute(
+                """
+                INSERT INTO portfolio_interview_queue_core
+                    (ticker, status, step, last_question, session_id, completed_at, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ticker) DO UPDATE SET
+                    status       = EXCLUDED.status,
+                    step         = EXCLUDED.step,
+                    last_question= EXCLUDED.last_question,
+                    session_id   = EXCLUDED.session_id,
+                    completed_at = EXCLUDED.completed_at,
+                    updated_at   = EXCLUDED.updated_at
+                """,
+                (ticker, status, step, last_question, session_id, completed_at, updated_at, updated_at),
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
 def start_portfolio_interview(session_id: str = "") -> dict[str, Any]:
     ensure_portfolio_memory_schema()
     holdings = get_holdings(limit=1000)
@@ -2280,6 +2318,21 @@ def start_portfolio_interview(session_id: str = "") -> dict[str, Any]:
                 )
             queued += 1
         con.commit()
+        # Sync all pending rows to Postgres so cloud reads stay consistent
+        all_pending = con.execute(
+            """SELECT ticker, status, step, last_question, session_id, completed_at, updated_at
+               FROM portfolio_interview_queue WHERE status='pending'"""
+        ).fetchall()
+        for pr in all_pending:
+            _pg_sync_interview_row(
+                ticker=str(pr["ticker"] or "").strip().upper(),
+                status=str(pr["status"] or "pending"),
+                step=int(pr["step"] or 0),
+                last_question=str(pr["last_question"] or ""),
+                session_id=str(pr["session_id"] or ""),
+                completed_at=str(pr["completed_at"] or ""),
+                updated_at=str(pr["updated_at"] or now),
+            )
         row = con.execute(
             """SELECT ticker, step, last_question FROM portfolio_interview_queue
                WHERE status='pending'
@@ -2410,12 +2463,18 @@ def submit_portfolio_interview_answer(answer: str, ticker: str = "") -> dict[str
                     "override_saved": True,
                 }
             _set_profile_answer(con, pkey, ans)
+            try:
+                from app.services.postgres_core_service import upsert_investor_style_memory_pg
+                upsert_investor_style_memory_pg(pkey, ans)
+            except Exception:
+                pass
             now = dt.datetime.now().isoformat()
             con.execute(
                 "UPDATE portfolio_interview_queue SET status='done', completed_at=?, updated_at=? WHERE id=?",
                 (now, now, qid),
             )
             con.commit()
+            _pg_sync_interview_row(tk, "done", step, "", "", now, now)
             record_decision(
                 ticker="",
                 action="interview_profile",
@@ -2518,6 +2577,8 @@ def submit_portfolio_interview_answer(answer: str, ticker: str = "") -> dict[str
                 "UPDATE portfolio_interview_queue SET status='done', step=3, completed_at=?, updated_at=? WHERE id=?",
                 (now, now, qid),
             )
+            con.commit()
+            _pg_sync_interview_row(tk, "done", 3, "", "", now, now)
         else:
             nstep = step + 1
             nq = _interview_question(nstep, tk)
@@ -2525,7 +2586,8 @@ def submit_portfolio_interview_answer(answer: str, ticker: str = "") -> dict[str
                 "UPDATE portfolio_interview_queue SET step=?, last_question=?, updated_at=? WHERE id=?",
                 (nstep, nq, now, qid),
             )
-        con.commit()
+            con.commit()
+            _pg_sync_interview_row(tk, "pending", nstep, nq, "", "", now)
         nxt = con.execute(
             """SELECT ticker, step, last_question FROM portfolio_interview_queue
                WHERE status='pending'
@@ -3278,6 +3340,105 @@ def inject_runtime_context(context: dict[str, Any] | None, query: str = "") -> d
     return ctx
 
 
+def _extract_morning_intel_bullets(max_bullets: int = 4) -> list[str]:
+    """Pull key market bullets from the latest morning_intelligence or terminal_daily_brief file."""
+    path = _latest_report_path(("morning_intelligence_",))
+    txt = _read_text_file(path)
+    if not txt:
+        path = _latest_report_path(("terminal_daily_brief_",))
+        txt = _read_text_file(path)
+    if not txt:
+        return []
+    bullets: list[str] = []
+    section_num = 0
+    in_section = False
+    for raw in txt.splitlines():
+        line = raw.strip()
+        if line.startswith("## "):
+            m = re.match(r"## (\d+)\.", line)
+            if m:
+                section_num = int(m.group(1))
+                in_section = section_num in {1, 2}
+            else:
+                in_section = False
+            continue
+        if not in_section or not line:
+            continue
+        if section_num == 1:
+            # First meaningful sentence from the overnight summary
+            sentences = re.split(r"(?<=[.!?])\s+", line)
+            for s in sentences[:1]:
+                s = s.strip()
+                if len(s) > 40:
+                    bullets.append(f"Overnight: {s[:200]}")
+                    break
+            in_section = False
+        elif section_num == 2 and line.startswith("- "):
+            clean = re.sub(r"\*\*([^*]+)\*\*", r"\1", line[2:]).strip()
+            if ":" in clean:
+                label, rest = clean.split(":", 1)
+                rest = rest.strip()
+                if len(rest) > 20:
+                    bullets.append(f"{label.strip()[:60]}: {rest[:160]}")
+            elif len(clean) > 30:
+                bullets.append(f"Markets: {clean[:160]}")
+        if len(bullets) >= max_bullets:
+            break
+    return bullets
+
+
+def _synthesize_morning_brief_llm(
+    raw_bullets: list[str],
+    morning_intel_txt: str,
+    top_tickers: list[str],
+) -> list[str]:
+    """Replace assembled bullets with an LLM-prioritized portfolio-aware synthesis."""
+    if not morning_intel_txt or not top_tickers:
+        return raw_bullets
+    if str(os.environ.get("AI_MORNING_BRIEF_SYNTHESIS", "1")).strip() in {"0", "false", "off"}:
+        return raw_bullets
+    try:
+        from tools.llm_engine import ask_ai
+    except Exception:
+        return raw_bullets
+    try:
+        thesis_lines: list[str] = []
+        try:
+            from app.services.postgres_core_service import list_watchlist_thesis_pg
+            theses = list_watchlist_thesis_pg(limit=10) or []
+            for th in theses:
+                tk = str(th.get("ticker") or "").strip().upper()
+                txt = str(th.get("thesis_text") or th.get("thesis") or "").strip()
+                if tk and txt:
+                    thesis_lines.append(f"  {tk}: {txt[:200]}")
+        except Exception:
+            pass
+        thesis_block = "\n".join(thesis_lines) if thesis_lines else "No theses on record."
+        portfolio_data = "\n".join(raw_bullets[:3])
+        prompt = (
+            f"You are a morning intelligence analyst for a concentrated portfolio.\n\n"
+            f"MARKET INTELLIGENCE (today):\n{morning_intel_txt[:3500]}\n\n"
+            f"MY PORTFOLIO: {', '.join(top_tickers)}\n"
+            f"MY INVESTMENT THESES:\n{thesis_block}\n\n"
+            f"PORTFOLIO DATA:\n{portfolio_data}\n\n"
+            f"Generate exactly 5-7 bullet points answering: 'What matters most to me this morning?'\n"
+            f"Rules:\n"
+            f"- Prioritize direct impact on my holdings above all else\n"
+            f"- Include macro shifts only if they affect my sectors\n"
+            f"- Be specific with numbers and names\n"
+            f"- Each bullet max 160 characters\n"
+            f"- Prefix each with: Portfolio:, Macro:, Risk:, Watch:, or Catalyst:\n"
+            f"- Output ONLY the bullet lines, one per line, no numbering or dashes"
+        )
+        result = ask_ai(prompt, context="", mode="fast").strip()
+        lines = [ln.strip() for ln in result.splitlines() if ln.strip() and len(ln.strip()) > 15]
+        if len(lines) >= 3:
+            return lines[:7]
+    except Exception:
+        pass
+    return raw_bullets
+
+
 def get_morning_brief(limit_holdings: int = 5) -> dict[str, Any]:
     ensure_portfolio_memory_schema()
     live = get_live_portfolio_summary()
@@ -3356,6 +3517,10 @@ def get_morning_brief(limit_holdings: int = 5) -> dict[str, Any]:
             if len(bullets) >= 3:
                 break
 
+    # Macro & market context from morning intelligence report
+    macro_bullets = _extract_morning_intel_bullets(max_bullets=4)
+    bullets.extend(macro_bullets)
+
     if not bullets:
         bullets = ["No critical anomalies detected in the latest scan."]
 
@@ -3363,7 +3528,7 @@ def get_morning_brief(limit_holdings: int = 5) -> dict[str, Any]:
         "ok": True,
         "asof": dt.datetime.now().isoformat(timespec="seconds"),
         "top_holdings": top_tickers,
-        "bullets": bullets[:3],
+        "bullets": bullets[:7],
     }
 
 
@@ -3374,6 +3539,19 @@ def save_morning_brief_snapshot(limit_holdings: int = 5, source: str = "schedule
     except Exception:
         pass
     brief = get_morning_brief(limit_holdings=limit_holdings)
+    # LLM synthesis: replace raw bullets with portfolio-aware prioritized brief
+    try:
+        morning_path = _latest_report_path(("morning_intelligence_", "terminal_daily_brief_"))
+        morning_intel_txt = _read_text_file(morning_path)
+        if morning_intel_txt and brief.get("top_holdings") and brief.get("bullets"):
+            synthesized = _synthesize_morning_brief_llm(
+                raw_bullets=brief["bullets"],
+                morning_intel_txt=morning_intel_txt,
+                top_tickers=brief["top_holdings"],
+            )
+            brief["bullets"] = synthesized
+    except Exception:
+        pass
     day = dt.date.today().isoformat()
     now = dt.datetime.now().isoformat(timespec="seconds")
     payload = json.dumps(brief, ensure_ascii=False)

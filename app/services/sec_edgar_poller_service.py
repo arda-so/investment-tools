@@ -34,8 +34,9 @@ from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.events_service import create_event, process_event
 from app.services.postgres_core_service import core_backend, pg_connect
 
-# Material forms to poll (Form 4 excluded — high volume, low signal for background polling)
-POLL_FORMS = ("8-K", "10-Q", "10-K", "6-K", "20-F")
+# Material forms to poll (Form 4 excluded — high volume, low signal for background polling).
+# Include common proxy forms so /company_file/sec?form=PROXY has coverage from the same ingest path.
+POLL_FORMS = ("8-K", "10-Q", "10-K", "6-K", "20-F", "DEF 14A", "DEFA14A", "PRE 14A", "DEF 14C")
 # How many recent filings to check per ticker per poll run
 PER_TICKER_LIMIT = 8
 # Keep DB content as a fast excerpt layer; full text stays on disk/GCS.
@@ -387,6 +388,7 @@ def poll_ticker(
     ticker: str,
     forms: tuple[str, ...] = POLL_FORMS,
     is_held: bool = True,
+    per_ticker_limit: int = PER_TICKER_LIMIT,
 ) -> dict[str, Any]:
     """
     Poll one ticker for new SEC filings.
@@ -400,7 +402,7 @@ def poll_ticker(
         return {"ok": False, "error": "invalid_ticker"}
 
     # Phase 1: fetch metadata only (fast — no markdown download yet)
-    metadata = _fetch_filing_metadata(tk, forms)
+    metadata = _fetch_filing_metadata(tk, forms, limit=max(1, min(500, int(per_ticker_limit or PER_TICKER_LIMIT))))
     if not metadata:
         return {"ok": True, "ticker": tk, "new_filings": 0, "events_created": 0}
 

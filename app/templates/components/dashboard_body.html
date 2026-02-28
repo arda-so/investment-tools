@@ -364,6 +364,7 @@
           <button type="button" class="ai-tab-btn" data-ai-tab="cascade">Cascades</button>
           <button type="button" class="ai-tab-btn" data-ai-tab="accuracy">AI Accuracy</button>
           <button type="button" class="ai-tab-btn" data-ai-tab="audit">Audit Log</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="health">Health</button>
         </div>
 
         <div class="ai-panel" data-ai-panel="insights">
@@ -596,6 +597,52 @@
           {% else %}
           <div class="proposal-empty">No measured outcomes yet — execute proposals to start tracking</div>
           {% endif %}
+        </div>
+
+        {# ── Health panel ── #}
+        <div class="ai-panel" data-ai-panel="health" hidden>
+          {% set di = data_integrity or {} %}
+          {% set prof = di.profile or {} %}
+          {% set iq = di.interview_queue or {} %}
+          {% set gp = di.gap_prompts_30d or {} %}
+          {% set ar = di.agent_runs_7d or {} %}
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+
+            <div class="mini-card">
+              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">INVESTOR PROFILE</div>
+              <div class="big-metric-num {% if (prof.pct or 0) >= 80 %}good{% elif (prof.pct or 0) >= 40 %}mid{% else %}bad{% endif %}" style="font-size:28px">{{ prof.pct or 0 }}%</div>
+              <div class="mini-upd">{{ prof.filled or 0 }} / {{ prof.total or 0 }} keys filled</div>
+              {% if prof.missing_keys %}
+              <div style="font-size:10px;color:#94a3b8;margin-top:4px;">Missing: {{ (prof.missing_keys or []) | join(", ") }}</div>
+              {% endif %}
+            </div>
+
+            <div class="mini-card">
+              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">INTERVIEW QUEUE</div>
+              <div style="font-size:22px;font-weight:700;{% if (iq.open or 0) > 0 %}color:#f59e0b{% else %}color:#22c55e{% endif %}">
+                {{ iq.open or 0 }} open
+              </div>
+              <div class="mini-upd">{{ iq.done or 0 }} done</div>
+            </div>
+
+            <div class="mini-card">
+              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">GAP PROMPTS (30d)</div>
+              <div style="font-size:22px;font-weight:700;{% if (gp.open or 0) > 0 %}color:#f59e0b{% else %}color:#22c55e{% endif %}">
+                {{ gp.open or 0 }} open
+              </div>
+              <div class="mini-upd">{{ gp.answered or 0 }} answered</div>
+            </div>
+
+            <div class="mini-card">
+              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">AGENT RUNS (7d)</div>
+              <div style="font-size:22px;font-weight:700;color:#22c55e">{{ ar.success or 0 }} ok</div>
+              <div class="mini-upd">
+                <span class="{% if (ar.error or 0) > 0 %}bad{% endif %}">{{ ar.error or 0 }} error</span>
+                {% if (ar.running or 0) > 0 %}&nbsp;· <span class="mid">{{ ar.running }} running</span>{% endif %}
+              </div>
+            </div>
+
+          </div>
         </div>
 
         {# ── Audit Log panel ── #}

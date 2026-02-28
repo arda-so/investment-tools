@@ -864,6 +864,12 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_log_core_created ON decision_log_core(created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_log_core_ticker ON decision_log_core(ticker, created_at DESC)")
+        # Ensure runtime inserts can omit id safely on existing deployments.
+        cur.execute("CREATE SEQUENCE IF NOT EXISTS decision_log_core_id_seq")
+        cur.execute(
+            "SELECT setval('decision_log_core_id_seq', COALESCE((SELECT MAX(id) FROM decision_log_core), 0) + 1, false)"
+        )
+        cur.execute("ALTER TABLE decision_log_core ALTER COLUMN id SET DEFAULT nextval('decision_log_core_id_seq')")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS investor_question_overrides_core (
@@ -5186,5 +5192,185 @@ def list_earnings_calendar_snapshot_pg(week_start: str, week_end: str, limit: in
         return out
     except Exception:
         return []
+    finally:
+        con.close()
+
+
+def add_agent_feedback_memory_pg(ticker: str, summary: str) -> None:
+    """Write a user-feedback signal into agent_memory_core so future agent runs see it."""
+    tk = str(ticker or "").strip().upper()
+    msg = str(summary or "").strip()[:600]
+    if not tk or not msg:
+        return
+    con = pg_connect()
+    if con is None:
+        return
+    try:
+        cur = con.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_core (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        import datetime as _dt
+        now = _dt.datetime.now().isoformat()
+        cur.execute(
+            "INSERT INTO agent_memory_core (ticker, summary, updated_at, created_at) "
+            "VALUES (%s, %s, %s, %s)",
+            (tk, msg, now, now),
+        )
+        con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+    finally:
+        con.close()
+
+
+def save_company_moats_pg(ticker: str, moat_keys: list) -> bool:
+    import random as _random
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return False
+    picked = sorted({str(k or "").strip().lower() for k in moat_keys if str(k or "").strip()})
+    now = dt.datetime.now().isoformat()
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM company_moat_tags_core WHERE ticker = %s", (t,))
+        for mk in picked:
+            row_id = _random.randint(1, 2**62)
+            cur.execute(
+                "INSERT INTO company_moat_tags_core(id, ticker, moat_key, updated_at, note)"
+                " VALUES (%s,%s,%s,%s,%s)"
+                " ON CONFLICT(ticker, moat_key) DO UPDATE SET updated_at=EXCLUDED.updated_at",
+                (row_id, t, mk, now, ""),
+            )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def add_company_competitor_pg(
+    ticker: str,
+    competitor_ticker: str,
+    competitor_name: str,
+    source_form: str = "",
+    source_date: str = "",
+    evidence: str = "",
+    confidence: float = 1.0,
+) -> bool:
+    import random as _random
+    t = str(ticker or "").strip().upper()
+    ct = str(competitor_ticker or "").strip().upper()
+    name = str(competitor_name or "").strip()[:160]
+    if not t or (not ct and not name):
+        return False
+    now = dt.datetime.now().isoformat()
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        row_id = _random.randint(1, 2**62)
+        cur.execute(
+            """
+            INSERT INTO company_sec_competitors_core
+              (id, ticker, competitor_ticker, competitor_name, source_form, source_date,
+               source_path, evidence, confidence, status, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(ticker, competitor_ticker) DO NOTHING
+            """,
+            (row_id, t, ct, name,
+             str(source_form or "")[:80], str(source_date or "")[:40],
+             "", str(evidence or "")[:1200], float(confidence or 1.0), "active", now),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def update_company_competitor_pg(
+    comp_id: int,
+    competitor_ticker: str = "",
+    competitor_name: str = "",
+    evidence: str = "",
+) -> bool:
+    rid = int(comp_id or 0)
+    if rid <= 0:
+        return False
+    now = dt.datetime.now().isoformat()
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            UPDATE company_sec_competitors_core
+            SET competitor_ticker=%s, competitor_name=%s, evidence=%s, updated_at=%s
+            WHERE id=%s
+            """,
+            (str(competitor_ticker or "").strip().upper(),
+             str(competitor_name or "").strip()[:160],
+             str(evidence or "").strip()[:1200],
+             now, rid),
+        )
+        con.commit()
+        return cur.rowcount > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def remove_company_competitor_pg(comp_id: int) -> bool:
+    rid = int(comp_id or 0)
+    if rid <= 0:
+        return False
+    now = dt.datetime.now().isoformat()
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE company_sec_competitors_core SET status='removed', updated_at=%s WHERE id=%s",
+            (now, rid),
+        )
+        con.commit()
+        return cur.rowcount > 0
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
     finally:
         con.close()

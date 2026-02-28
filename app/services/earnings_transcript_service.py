@@ -24,7 +24,9 @@ except Exception:
     ask_ai = None  # type: ignore
 
 
-_FORMS = {"8-K", "6-K", "10-Q", "10-K", "20-F", "40-F"}
+# For "earnings release from SEC filings", keep this strict to release-style filings.
+# 10-Q/10-K signals are handled separately via quarterly facts.
+_RELEASE_FORMS = {"8-K", "6-K"}
 _HTTP_TIMEOUT = 20
 
 
@@ -536,7 +538,7 @@ def list_sec_earnings_releases(
             ORDER BY date DESC, id DESC
             LIMIT %s
             """,
-            (tk, list(_FORMS), cutoff, max(20, min(1200, int(max_filings)))),
+            (tk, list(_RELEASE_FORMS), cutoff, max(20, min(1200, int(max_filings)))),
         )
         rows = cur.fetchall() or []
     except Exception:
@@ -577,6 +579,7 @@ def list_sec_earnings_releases(
                 "title": f"{form} Earnings Release",
                 "source_type": "sec_filing",
                 "source_url": (doc_url or f"/filing?path={str(p)}"),
+                "path": str(p),
                 "accession": accession,
                 "excerpt": str(payload.get("excerpt") or ""),
                 "char_count": int(payload.get("char_count") or 0),

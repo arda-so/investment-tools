@@ -300,6 +300,40 @@ def _ensure_agent_memory_table() -> None:
         con.close()
 
 
+def _load_cross_portfolio_memories(current_ticker: str) -> str:
+    """Return the most recent agent memory summary for each OTHER portfolio holding."""
+    try:
+        holdings = get_holdings(limit=20)
+        other_tickers = [
+            str(h.get("ticker") or "").strip().upper()
+            for h in holdings
+            if str(h.get("ticker") or "").strip().upper() not in {"", current_ticker}
+        ]
+        if not other_tickers:
+            return ""
+        con = pg_connect()
+        if con is None:
+            return ""
+        lines = ["\nCROSS-PORTFOLIO CONTEXT (recent analyses of your other holdings):"]
+        try:
+            cur = con.cursor()
+            for tk in other_tickers[:4]:
+                cur.execute(
+                    "SELECT summary, updated_at FROM agent_memory_core "
+                    "WHERE ticker=%s ORDER BY updated_at DESC LIMIT 1",
+                    (tk,),
+                )
+                row = cur.fetchone()
+                if row:
+                    date = str(row[1] or "")[:10]
+                    lines.append(f"  [{tk} · {date}] {str(row[0] or '')[:250]}")
+        finally:
+            con.close()
+        return "\n".join(lines) if len(lines) > 1 else ""
+    except Exception:
+        return ""
+
+
 def _load_agent_memory(ticker: str) -> str:
     """Return the last 3 distilled memories for this ticker."""
     try:
@@ -489,6 +523,10 @@ def _build_investor_context(ticker: str) -> str:
     memory = _load_agent_memory(ticker)
     if memory:
         lines.append(memory)
+    # Inject cross-portfolio context from other holdings
+    cross_memory = _load_cross_portfolio_memories(ticker)
+    if cross_memory:
+        lines.append(cross_memory)
     # Inject macro environment context
     macro = _load_macro_context()
     if macro:
@@ -1156,7 +1194,7 @@ def run_query(
     Returns: {status, report, steps, commands, run_uid}
     """
     from tools.llm_engine import ask_ai as _ask_ai
-    from app.services.postgres_core_service import start_agent_run, finish_agent_run
+    from app.services.proactive_ai_service import start_agent_run, finish_agent_run
 
     query = str(query or "").strip()
     ticker = str(ticker or "").strip().upper()

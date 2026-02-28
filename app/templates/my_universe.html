@@ -71,6 +71,35 @@
   .u-head-actions .qty { min-width:70px; max-width:90px; }
   .u-head-actions .px { min-width:80px; max-width:100px; }
   .u-head-actions .rs { min-width:110px; max-width:160px; }
+
+  /* Ticker autocomplete dropdown */
+  .tkac-wrap { position:relative; display:inline-block; min-width:92px; max-width:180px; }
+  .tkac-wrap input {
+    width:100%; box-sizing:border-box;
+    border:1px solid var(--line); border-radius:10px;
+    height:34px; padding:0 10px; font-size:11px;
+    background:#fff; color:var(--ink);
+  }
+  .tkac-wrap input.tkac-confirmed { border-color:#10b981; background:#f0fdf4; }
+  .tkac-wrap input.tkac-error { border-color:#ef4444; }
+  .tkac-drop {
+    position:absolute; top:calc(100% + 3px); left:0; right:0; z-index:200;
+    background:#fff; border:1px solid var(--line); border-radius:10px;
+    box-shadow:0 8px 24px rgba(15,23,42,.14);
+    max-height:220px; overflow-y:auto; display:none;
+  }
+  .tkac-drop.open { display:block; }
+  .tkac-item {
+    padding:7px 11px; cursor:pointer; font-size:11px;
+    display:flex; align-items:baseline; gap:7px;
+  }
+  .tkac-item:hover, .tkac-item.focused { background:#f1f5f9; }
+  .tkac-item .tkac-sym { font-weight:700; color:var(--ink); min-width:44px; }
+  .tkac-item .tkac-nm { color:var(--muted); font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:120px; }
+  .tkac-item .tkac-ind { color:#94a3b8; font-size:9px; margin-left:auto; white-space:nowrap; }
+  .tkac-empty { padding:7px 11px; font-size:11px; color:var(--muted); }
+  .u-modal .tkac-wrap { min-width:0; max-width:100%; width:100%; }
+  .u-modal .tkac-wrap input { height:36px; font-size:12px; }
   .edit-only{ display:none; }
   #uRoot.edit-mode .edit-only{ display:flex; }
   #uRoot.edit-mode th.edit-only,
@@ -245,6 +274,36 @@
   }
   .u-insight.blue { background:#eef6ff; }
 
+  .u-timeline {
+    margin-top:12px;
+    border:1px solid #dbe4ee;
+    border-radius:12px;
+    background:#fff;
+    overflow:hidden;
+  }
+  .u-timeline table { width:100%; border-collapse:collapse; }
+  .u-timeline th, .u-timeline td { padding:8px 10px; border-bottom:1px solid #edf2f8; font-size:12px; }
+  .u-timeline th { background:#f8fbff; font-size:10px; color:#6b8197; text-transform:uppercase; letter-spacing:.05em; }
+  .u-timeline .kind {
+    display:inline-block;
+    border-radius:999px;
+    padding:2px 8px;
+    font-size:10px;
+    font-weight:800;
+    border:1px solid #d3deed;
+    background:#f4f8ff;
+    color:#365273;
+  }
+  .u-timeline .detail {
+    max-width:420px;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  @media (max-width:980px){
+    .u-timeline .detail { max-width:220px; }
+  }
+
   .u-drawer { margin-top:8px; display:none; gap:8px; }
   .u-drawer.open { display:grid; }
   .u-drawer.positions { grid-template-columns:140px 120px 120px 1fr auto; }
@@ -412,7 +471,10 @@
                   <option value="sell">Sell</option>
                   <option value="exit">Exit</option>
                 </select>
-                <input id="pqTicker" class="ticker js-ticker-input" list="tickerHints" placeholder="Ticker">
+                <div class="tkac-wrap">
+                  <input id="pqTicker" class="ticker tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
+                  <div id="pqDrop" class="tkac-drop"></div>
+                </div>
                 <input id="pqShares" class="qty" placeholder="Shares">
                 <input id="pqPrice" class="px" placeholder="Price">
                 <input id="pqReason" class="rs" placeholder="Reason">
@@ -461,7 +523,10 @@
               <div class="u-head">
                 <h3>Watchlist</h3>
                 <form id="watchlistQuickForm" class="u-head-actions edit-only">
-                  <input id="wqTicker" class="ticker js-ticker-input" list="tickerHints" placeholder="Ticker">
+                  <div class="tkac-wrap">
+                    <input id="wqTicker" class="ticker tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
+                    <div id="wqDrop" class="tkac-drop"></div>
+                  </div>
                   <button type="button" id="wqAdd" class="u-btn">Add</button>
                   <button type="button" id="wqRemove" class="u-btn">Remove</button>
                 </form>
@@ -498,7 +563,10 @@
               <div class="u-head">
                 <h3>Blue Chips</h3>
                 <form id="bluechipsQuickForm" class="u-head-actions edit-only">
-                  <input id="bqTicker" class="ticker js-ticker-input" list="tickerHints" placeholder="Ticker">
+                  <div class="tkac-wrap">
+                    <input id="bqTicker" class="ticker tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
+                    <div id="bqDrop" class="tkac-drop"></div>
+                  </div>
                   <button type="button" id="bqAdd" class="u-btn">Add</button>
                   <button type="button" id="bqRemove" class="u-btn">Remove</button>
                   <button type="button" id="bqSeed" class="u-btn">Seed</button>
@@ -549,11 +617,39 @@
           </div>
         </div>
 
+        <section class="u-card">
+          <div class="u-head">
+            <h3>Change Timeline</h3>
+            <div class="u-note">Archived actions for portfolio, watchlist, and cash.</div>
+          </div>
+          <div class="u-timeline">
+            <table>
+              <thead>
+                <tr><th>Time</th><th>Type</th><th>Action</th><th>Ticker</th><th>Details</th><th>Source</th></tr>
+              </thead>
+              <tbody>
+                {% for e in timeline_events %}
+                <tr>
+                  <td>{{ e.ts or '-' }}</td>
+                  <td><span class="kind">{{ e.kind or '-' }}</span></td>
+                  <td>{{ e.action or '-' }}</td>
+                  <td>{{ e.ticker or '-' }}</td>
+                  <td class="detail" title="{{ e.summary or '-' }}">{{ e.summary or '-' }}</td>
+                  <td>{{ e.source or '-' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" class="u-note">No history yet.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
       </div>
     </main>
   </div>
 </div>
-<datalist id="tickerHints"></datalist>
+<!-- tickerHints datalist removed — replaced by .tkac-wrap autocomplete -->
 <div id="tradeModalBackdrop" class="u-modal-backdrop">
   <div class="u-modal">
     <h4 id="tradeModalTitle">Trade</h4>
@@ -563,7 +659,10 @@
           <option value="buy">Buy</option>
           <option value="sell">Sell</option>
         </select>
-        <input id="tmTicker" class="js-ticker-input" list="tickerHints" placeholder="Ticker">
+        <div class="tkac-wrap" style="grid-column:span 1">
+          <input id="tmTicker" class="tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
+          <div id="tmDrop" class="tkac-drop"></div>
+        </div>
         <input id="tmShares" placeholder="Shares">
         <input id="tmPrice" placeholder="Price">
         <input id="tmReason" style="grid-column:1/-1;" placeholder="Reason (optional)">
@@ -647,76 +746,174 @@
       editBtn.addEventListener('click', function(){ applyEditMode(!root.classList.contains('edit-mode')); });
     }
 
-    var tickerHints = document.getElementById('tickerHints');
-    var tickerInputs = Array.prototype.slice.call(document.querySelectorAll('.js-ticker-input'));
-    var hintTimer = null;
-    function refreshTickerHints(q){
-      if(!tickerHints) return;
-      var needle = String(q || '').trim();
-      if(!needle || needle.length < 1) return;
-      fetch('/api/global-search?q=' + encodeURIComponent(needle) + '&limit=12')
-        .then(function(r){ return r.json(); })
-        .then(function(d){
-          var rs = (d && d.results) ? d.results : [];
-          var seen = {};
-          tickerHints.innerHTML = '';
-          rs.forEach(function(it){
-            var ttl = String((it && it.title) || '');
-            var m = ttl.match(/^([A-Z][A-Z0-9.\-]{0,10})\b/);
-            if(!m) return;
-            var tk = m[1];
-            if(seen[tk]) return;
-            seen[tk] = true;
-            var opt = document.createElement('option');
-            opt.value = tk;
-            tickerHints.appendChild(opt);
-          });
-        }).catch(function(){});
-    }
-    tickerInputs.forEach(function(inp){
-      inp.addEventListener('input', function(){
-        var v = String(inp.value || '');
-        if(hintTimer) clearTimeout(hintTimer);
-        hintTimer = setTimeout(function(){ refreshTickerHints(v); }, 140);
+    // ── Ticker Autocomplete Engine ──────────────────────────────────────────
+    // Each .tkac-input gets a live dropdown from /api/ticker-search.
+    // On selection the confirmed ticker is stored in data-confirmed-ticker.
+    // bindTickerAction reads data-confirmed-ticker, not raw .value, to prevent
+    // adding a company by full name (e.g. "MASTERCARD") instead of its ticker.
+    (function(){
+      var acTimer = null;
+      function buildAC(inp, drop){
+        if(!inp || !drop) return;
+        var focusIdx = -1;
+        function getItems(){ return Array.prototype.slice.call(drop.querySelectorAll('.tkac-item')); }
+        function close(){
+          drop.classList.remove('open');
+          focusIdx = -1;
+        }
+        function confirm(ticker, name){
+          inp.value = ticker;
+          inp.dataset.confirmedTicker = ticker;
+          inp.classList.add('tkac-confirmed');
+          inp.classList.remove('tkac-error');
+          inp.title = name ? ticker + ' · ' + name : ticker;
+          close();
+        }
+        function renderResults(results){
+          drop.innerHTML = '';
+          if(!results || !results.length){
+            var em = document.createElement('div');
+            em.className = 'tkac-empty';
+            em.textContent = 'No matches';
+            drop.appendChild(em);
+          } else {
+            results.forEach(function(r, i){
+              var item = document.createElement('div');
+              item.className = 'tkac-item';
+              item.dataset.ticker = r.ticker;
+              item.dataset.name = r.name || '';
+              var sym = document.createElement('span');
+              sym.className = 'tkac-sym';
+              sym.textContent = r.ticker;
+              var nm = document.createElement('span');
+              nm.className = 'tkac-nm';
+              nm.textContent = r.name || '';
+              var ind = document.createElement('span');
+              ind.className = 'tkac-ind';
+              ind.textContent = r.industry || '';
+              item.appendChild(sym); item.appendChild(nm); item.appendChild(ind);
+              item.addEventListener('mousedown', function(e){
+                e.preventDefault();
+                confirm(r.ticker, r.name || '');
+              });
+              drop.appendChild(item);
+            });
+          }
+          drop.classList.add('open');
+          focusIdx = -1;
+        }
+        function fetchSuggestions(q){
+          if(!q || q.length < 1){ close(); return; }
+          fetch('/api/ticker-search?q=' + encodeURIComponent(q) + '&limit=10')
+            .then(function(r){ return r.json(); })
+            .then(function(d){ renderResults((d && d.results) || []); })
+            .catch(function(){ close(); });
+        }
+        inp.addEventListener('input', function(){
+          var v = String(inp.value || '').trim();
+          // Reset confirmed state when user edits
+          inp.dataset.confirmedTicker = '';
+          inp.classList.remove('tkac-confirmed', 'tkac-error');
+          inp.title = '';
+          if(acTimer) clearTimeout(acTimer);
+          if(!v){ close(); return; }
+          acTimer = setTimeout(function(){ fetchSuggestions(v); }, 150);
+        });
+        inp.addEventListener('focus', function(){
+          var v = String(inp.value || '').trim();
+          if(v && !inp.dataset.confirmedTicker) fetchSuggestions(v);
+        });
+        inp.addEventListener('blur', function(){
+          setTimeout(function(){
+            close();
+            // If user typed something but didn't pick from dropdown, try exact ticker match
+            var v = String(inp.value || '').trim().toUpperCase();
+            if(v && !inp.dataset.confirmedTicker){
+              // Accept exact ticker entry (e.g. "MA" typed directly)
+              inp.dataset.confirmedTicker = v;
+              inp.title = v;
+            }
+          }, 180);
+        });
+        inp.addEventListener('keydown', function(e){
+          var items = getItems();
+          if(e.key === 'ArrowDown'){
+            e.preventDefault();
+            focusIdx = Math.min(focusIdx + 1, items.length - 1);
+            items.forEach(function(it, i){ it.classList.toggle('focused', i === focusIdx); });
+          } else if(e.key === 'ArrowUp'){
+            e.preventDefault();
+            focusIdx = Math.max(focusIdx - 1, 0);
+            items.forEach(function(it, i){ it.classList.toggle('focused', i === focusIdx); });
+          } else if(e.key === 'Enter' || e.key === 'Tab'){
+            if(drop.classList.contains('open') && focusIdx >= 0 && items[focusIdx]){
+              e.preventDefault();
+              var it = items[focusIdx];
+              confirm(it.dataset.ticker, it.dataset.name || '');
+            }
+          } else if(e.key === 'Escape'){
+            close();
+          }
+        });
+      }
+      // Wire up all ticker inputs
+      [
+        ['wqTicker','wqDrop'],
+        ['bqTicker','bqDrop'],
+        ['pqTicker','pqDrop'],
+        ['tmTicker','tmDrop'],
+      ].forEach(function(pair){
+        buildAC(document.getElementById(pair[0]), document.getElementById(pair[1]));
       });
-      inp.addEventListener('focus', function(){
-        var v = String(inp.value || '');
-        refreshTickerHints(v);
-      });
-    });
+    })();
 
-    var pqForm = document.getElementById('portfolioQuickForm');
-    var pqAction = document.getElementById('pqAction');
-    var pqTicker = document.getElementById('pqTicker');
-    var pqShares = document.getElementById('pqShares');
-    var pqPrice = document.getElementById('pqPrice');
-    var pqReason = document.getElementById('pqReason');
+    // ── Portfolio / Watchlist / Bluechip form elements ──────────────────────
+    var pqForm    = document.getElementById('portfolioQuickForm');
+    var pqAction  = document.getElementById('pqAction');
+    var pqTicker  = document.getElementById('pqTicker');
+    var pqShares  = document.getElementById('pqShares');
+    var pqPrice   = document.getElementById('pqPrice');
+    var pqReason  = document.getElementById('pqReason');
+    var wqTicker  = document.getElementById('wqTicker');
+    var wqAdd     = document.getElementById('wqAdd');
+    var wqRemove  = document.getElementById('wqRemove');
+
     function submitPortfolio(side, ticker, shares, price, reason){
       return postKV('/my_universe/portfolio/upsert', {ticker:ticker, side:side, shares:shares, cost:(price||'0'), trade_reason:reason, note:''}, function(){ window.location.reload(); });
     }
+
+    // Read confirmed ticker from data attribute (set by autocomplete on selection)
+    function getConfirmedTicker(input){
+      var confirmed = String((input && input.dataset && input.dataset.confirmedTicker) || '').trim().toUpperCase();
+      if(confirmed) return confirmed;
+      // Fallback: accept if raw value looks like a valid ticker (1-6 uppercase letters/numbers)
+      var raw = String((input && input.value) || '').trim().toUpperCase();
+      if(/^[A-Z][A-Z0-9.\-]{0,9}$/.test(raw)) return raw;
+      return '';
+    }
+
     if(pqForm){
       pqForm.addEventListener('submit', function(e){
         e.preventDefault();
         var a = String((pqAction && pqAction.value) || '');
-        var t = String((pqTicker && pqTicker.value) || '').trim().toUpperCase();
+        var t = getConfirmedTicker(pqTicker);
+        if(!t){ if(pqTicker){ pqTicker.classList.add('tkac-error'); pqTicker.focus(); } return; }
         var sh = String((pqShares && pqShares.value) || '').trim();
         var px = String((pqPrice && pqPrice.value) || '').trim();
         var rs = String((pqReason && pqReason.value) || '').trim();
-        if(a === 'exit'){
-          return submitPortfolio('sell', t, '0', '0', rs);
-        }
+        if(a === 'exit'){ return submitPortfolio('sell', t, '0', '0', rs); }
         return submitPortfolio(a, t, sh, px, rs);
       });
     }
 
-    var wqTicker = document.getElementById('wqTicker');
-    var wqAdd = document.getElementById('wqAdd');
-    var wqRemove = document.getElementById('wqRemove');
     function bindTickerAction(btn, input, url, extra){
       if(!btn) return;
       btn.addEventListener('click', function(){
-        var t = String((input && input.value) || '').trim().toUpperCase();
-        if(!t) return;
+        var t = getConfirmedTicker(input);
+        if(!t){
+          if(input){ input.classList.add('tkac-error'); input.focus(); }
+          return;
+        }
         var payload = {ticker:t};
         if(extra && typeof extra === 'object'){
           Object.keys(extra).forEach(function(k){ payload[k] = extra[k]; });
@@ -901,7 +1098,12 @@
     function openTradeModal(side, ticker){
       if(!tmBackdrop) return;
       if(tmSide) tmSide.value = side || 'buy';
-      if(tmTicker) tmTicker.value = String(ticker || '').toUpperCase();
+      if(tmTicker){
+        var tk = String(ticker || '').toUpperCase();
+        tmTicker.value = tk;
+        tmTicker.dataset.confirmedTicker = tk;  // pre-confirmed from row button
+        if(tk){ tmTicker.classList.add('tkac-confirmed'); }
+      }
       if(tmShares) tmShares.value = '';
       if(tmPrice) tmPrice.value = '';
       if(tmReason) tmReason.value = '';
@@ -920,7 +1122,8 @@
       tmForm.addEventListener('submit', function(e){
         e.preventDefault();
         var side = String((tmSide && tmSide.value) || 'buy');
-        var ticker = String((tmTicker && tmTicker.value) || '').trim().toUpperCase();
+        var ticker = getConfirmedTicker(tmTicker);
+        if(!ticker){ if(tmTicker){ tmTicker.classList.add('tkac-error'); tmTicker.focus(); } return; }
         var shares = String((tmShares && tmShares.value) || '').trim();
         var price = String((tmPrice && tmPrice.value) || '').trim();
         var reason = String((tmReason && tmReason.value) || '').trim();

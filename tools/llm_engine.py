@@ -740,6 +740,70 @@ _AI_TELEMETRY: dict[str, object] = {
     "provider_errors": {},
 }
 _CB_STATE: dict[str, float] = {"until": 0.0, "consecutive_failures": 0.0}
+_AI_RESPONSE_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _cache_enabled() -> bool:
+    return _is_truthy(os.getenv("AI_ENABLE_RESPONSE_CACHE", "1"))
+
+
+def _cache_ttl_sec() -> int:
+    try:
+        return max(5, int(float(os.getenv("AI_CACHE_TTL_SEC", "300"))))
+    except Exception:
+        return 300
+
+
+def _cache_max_entries() -> int:
+    try:
+        return max(16, int(os.getenv("AI_CACHE_MAX_ENTRIES", "256")))
+    except Exception:
+        return 256
+
+
+def _cache_key(prompt: str, context: str, mode: str, json_mode: bool, temperature: Optional[float]) -> str:
+    raw = json.dumps(
+        {
+            "p": str(prompt or ""),
+            "c": str(context or ""),
+            "m": str(mode or ""),
+            "j": bool(json_mode),
+            "t": float(temperature) if temperature is not None else None,
+            "provider": str(_ENGINE.provider or ""),
+            "model": str(_ENGINE._model_for(_ENGINE.provider) or ""),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _cache_get(key: str) -> str | None:
+    if not _cache_enabled():
+        return None
+    now = time.time()
+    ttl = float(_cache_ttl_sec())
+    row = _AI_RESPONSE_CACHE.get(str(key or ""))
+    if not row:
+        return None
+    ts, txt = row
+    if (now - float(ts or 0.0)) > ttl:
+        _AI_RESPONSE_CACHE.pop(str(key or ""), None)
+        return None
+    return str(txt or "")
+
+
+def _cache_put(key: str, value: str) -> None:
+    if not _cache_enabled():
+        return
+    now = time.time()
+    _AI_RESPONSE_CACHE[str(key or "")] = (now, str(value or ""))
+    # Bound in-memory growth by pruning oldest entries.
+    cap = _cache_max_entries()
+    if len(_AI_RESPONSE_CACHE) <= cap:
+        return
+    for k, _v in sorted(_AI_RESPONSE_CACHE.items(), key=lambda kv: float((kv[1] or (0.0, ""))[0]))[: max(1, len(_AI_RESPONSE_CACHE) - cap)]:
+        _AI_RESPONSE_CACHE.pop(k, None)
 
 
 def get_ai_runtime_metrics() -> dict[str, object]:
@@ -757,6 +821,10 @@ def ask_ai(
     now = time.time()
     cb_threshold = max(2, int(float(os.getenv("AI_CB_FAIL_THRESHOLD", "3"))))
     cb_cooldown = max(5, int(float(os.getenv("AI_CB_COOLDOWN_SEC", "60"))))
+    ck = _cache_key(prompt, context, mode, json_mode, temperature)
+    hit = _cache_get(ck)
+    if hit is not None and str(hit).strip():
+        return str(hit)
     if float(_CB_STATE.get("until") or 0.0) > now:
         msg = "Service temporarily degraded. Please retry shortly."
         if json_mode:
@@ -766,6 +834,7 @@ def ask_ai(
     _AI_TELEMETRY["calls"] = int(_AI_TELEMETRY.get("calls") or 0) + 1
     try:
         out = _ENGINE.ask_ai(prompt, context, mode=mode, json_mode=json_mode, temperature=temperature)
+        _cache_put(ck, out)
         dur = (time.time() - start) * 1000.0
         n = int(_AI_TELEMETRY.get("latency_samples") or 0)
         avg = float(_AI_TELEMETRY.get("latency_ms_avg") or 0.0)

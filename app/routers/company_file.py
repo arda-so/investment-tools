@@ -352,18 +352,25 @@ def _sync_python_bin() -> str:
     return "python3"
 
 
-def _sync_ticker_worker(ticker: str) -> None:
+def _sync_ticker_worker(ticker: str, full_backfill: bool = False) -> None:
     t = str(ticker or "").strip().upper()
     if not t:
         return
     ok = False
     msg = "SEC filing sync failed."
     try:
-        out = poll_ticker(t, is_held=True)
+        # Manual sync should backfill much deeper than incremental background poll.
+        # Normal manual sync is deep by default; full_backfill pushes even further.
+        if full_backfill:
+            manual_limit = max(200, min(5000, int(os.getenv("SEC_MANUAL_SYNC_FULL_LIMIT", "3000"))))
+        else:
+            manual_limit = max(20, min(1000, int(os.getenv("SEC_MANUAL_INCREMENTAL_LIMIT", "120"))))
+        out = poll_ticker(t, is_held=True, per_ticker_limit=manual_limit)
         ok = bool(out.get("ok"))
         if ok:
             msg = (
-                f"SEC filing sync complete. new_filings={int(out.get('new_filings') or 0)} "
+                f"SEC filing sync complete ({'full_backfill' if full_backfill else 'incremental'}, limit={manual_limit}). "
+                f"new_filings={int(out.get('new_filings') or 0)} "
                 f"events={int(out.get('events_created') or 0)}"
             )
         else:
@@ -501,10 +508,14 @@ def company_sec_page(request: Request, t: str = "", msg: str = "", form: str = "
         return RedirectResponse(url="/company_file?msg=" + urllib.parse.quote("Company not found."), status_code=303)
     selected_form = str(form or "").strip().upper()
     if selected_form:
+        proxy_forms = {"DEF 14A", "DEFA14A", "DEFA14C", "DEF 14C", "PRE 14A", "PRE 14C", "PREM14A", "PREC14A"}
+        selected_forms = {selected_form}
+        if selected_form == "PROXY":
+            selected_forms = proxy_forms
         groups = []
         total = 0
         for g in list(detail.get("filing_groups") or []):
-            rows = [r for r in list(g.get("rows") or []) if str(r.get("form") or "").strip().upper() == selected_form]
+            rows = [r for r in list(g.get("rows") or []) if str(r.get("form") or "").strip().upper() in selected_forms]
             if not rows:
                 continue
             groups.append(
@@ -558,7 +569,7 @@ def company_sec_sync(ticker: str = Form(""), background: int = Form(1)):
                 "message": "Sync started...",
             }
             set_ticker_sync_state(t, _SEC_SYNC_STATE[t])
-        _sync_ticker_worker(t)
+        _sync_ticker_worker(t, full_backfill=False)
         with _SYNC_LOCK:
             current = _SEC_SYNC_STATE.get(t) or {}
         final_msg = str(current.get("message") or "SEC sync finished.")
@@ -580,9 +591,59 @@ def company_sec_sync(ticker: str = Form(""), background: int = Form(1)):
             set_ticker_sync_state(t, _SEC_SYNC_STATE[t])
             start = True
     if start:
-        th = threading.Thread(target=_sync_ticker_worker, args=(t,), daemon=True)
+        th = threading.Thread(target=_sync_ticker_worker, args=(t, False), daemon=True)
         th.start()
-        msg = "SEC sync started. Refresh this page in ~20-90 seconds."
+        msg = "SEC incremental sync started. Refresh this page in ~20-90 seconds."
+    else:
+        msg = "Sync already running."
+    return RedirectResponse(
+        url="/company_file/sec?t=" + urllib.parse.quote(t) + "&msg=" + urllib.parse.quote(msg),
+        status_code=303,
+    )
+
+
+@router.post("/company_file/sec-sync-full")
+def company_sec_sync_full(ticker: str = Form(""), background: int = Form(1)):
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return RedirectResponse(url="/company_file?msg=" + urllib.parse.quote("Ticker is required."), status_code=303)
+    run_inline = int(background or 0) == 0
+    if run_inline and str(os.getenv("APP_ENV") or "").strip().lower() == "cloud":
+        run_inline = False
+    if run_inline:
+        with _SYNC_LOCK:
+            _SEC_SYNC_STATE[t] = {
+                "running": "1",
+                "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "running",
+                "message": "Full backfill started...",
+            }
+            set_ticker_sync_state(t, _SEC_SYNC_STATE[t])
+        _sync_ticker_worker(t, full_backfill=True)
+        with _SYNC_LOCK:
+            current = _SEC_SYNC_STATE.get(t) or {}
+        final_msg = str(current.get("message") or "SEC full backfill finished.")
+        return RedirectResponse(
+            url="/company_file/sec?t=" + urllib.parse.quote(t) + "&msg=" + urllib.parse.quote(final_msg),
+            status_code=303,
+        )
+    start = False
+    with _SYNC_LOCK:
+        state_file = load_sec_sync_state()
+        st = _SEC_SYNC_STATE.get(t) or state_file.get(t) or {"running": "0", "last": "", "result": "", "message": ""}
+        if st.get("running") != "1":
+            _SEC_SYNC_STATE[t] = {
+                "running": "1",
+                "last": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "running",
+                "message": "Full backfill started...",
+            }
+            set_ticker_sync_state(t, _SEC_SYNC_STATE[t])
+            start = True
+    if start:
+        th = threading.Thread(target=_sync_ticker_worker, args=(t, True), daemon=True)
+        th.start()
+        msg = "SEC full backfill started. Refresh this page in ~1-5 minutes."
     else:
         msg = "Sync already running."
     return RedirectResponse(

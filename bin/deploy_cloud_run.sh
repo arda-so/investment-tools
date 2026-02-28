@@ -32,9 +32,10 @@ if ! gcloud artifacts repositories describe "$REPO" --location="$REGION" --proje
   exit 1
 fi
 gcloud secrets describe POSTGRES_DSN --project="$PROJECT_ID" >/dev/null
-if [ "$INCLUDE_GEMINI_SECRET" = "1" ]; then
-  gcloud secrets describe GEMINI_API_KEY --project="$PROJECT_ID" >/dev/null
-fi
+
+secret_exists() {
+  gcloud secrets describe "$1" --project="$PROJECT_ID" >/dev/null 2>&1
+}
 
 SA_OPT=""
 if [ -n "$SERVICE_ACCOUNT" ]; then
@@ -65,8 +66,20 @@ else
 fi
 
 SECRETS="POSTGRES_DSN=POSTGRES_DSN:latest"
-if [ "$INCLUDE_GEMINI_SECRET" = "1" ]; then
+if [ "$INCLUDE_GEMINI_SECRET" = "1" ] && secret_exists GEMINI_API_KEY; then
   SECRETS="${SECRETS},GEMINI_API_KEY=GEMINI_API_KEY:latest"
+fi
+if secret_exists OPENAI_API_KEY; then
+  SECRETS="${SECRETS},OPENAI_API_KEY=OPENAI_API_KEY:latest"
+fi
+if secret_exists GEMINI_API_KEY; then
+  SECRETS="${SECRETS},GEMINI_API_KEY=GEMINI_API_KEY:latest"
+fi
+if secret_exists ANTHROPIC_API_KEY; then
+  SECRETS="${SECRETS},ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest"
+fi
+if secret_exists GROQ_API_KEY; then
+  SECRETS="${SECRETS},GROQ_API_KEY=GROQ_API_KEY:latest"
 fi
 
 AUTH_FLAG="--no-allow-unauthenticated"
@@ -74,7 +87,7 @@ if [ "$ALLOW_PUBLIC" = "1" ]; then
   AUTH_FLAG="--allow-unauthenticated"
 fi
 
-COMMON_ENV="APP_ENV=cloud,APP_PORT=8080,APP_HOST=0.0.0.0,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1"
+COMMON_ENV="APP_ENV=cloud,APP_PORT=8080,APP_HOST=0.0.0.0,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1,AI_TIMEOUT_SECONDS=${AI_TIMEOUT_SECONDS:-45},AI_MAX_TOKENS=${AI_MAX_TOKENS:-1200},AI_ENABLE_RESPONSE_CACHE=${AI_ENABLE_RESPONSE_CACHE:-1},AI_CACHE_TTL_SEC=${AI_CACHE_TTL_SEC:-300},AI_CACHE_MAX_ENTRIES=${AI_CACHE_MAX_ENTRIES:-256},AI_CHAT_READONLY=${AI_CHAT_READONLY:-1},AI_COMMAND_SYNC_BUDGET_MS=${AI_COMMAND_SYNC_BUDGET_MS:-38000}"
 if [ -n "${CLOUD_FILES_BUCKET:-}" ]; then
   COMMON_ENV="${COMMON_ENV},CLOUD_FILES_BUCKET=${CLOUD_FILES_BUCKET}"
 fi

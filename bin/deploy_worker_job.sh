@@ -259,5 +259,11 @@ deploy_job "investor-daily-job" \
   "/app/bin/run_daily_job" "" \
   "0 18 * * 1-5" "2400s"
 
+# Universe registry refresh: daily (SEC company tickers/exchanges to core tables)
+UNIVERSE_SYNC_SCHEDULE="${UNIVERSE_SYNC_SCHEDULE:-15 3 * * *}"
+deploy_job "investor-universe-sync-job" \
+  "/app/bin/run_universe_sync_job" "" \
+  "${UNIVERSE_SYNC_SCHEDULE}" "1800s"
+
 echo ""
 echo "All jobs deployed."

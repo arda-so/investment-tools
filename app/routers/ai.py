@@ -71,7 +71,7 @@ from app.services.user_preferences_service import (
     summarize_user_preferences,
     upsert_user_preference,
 )
-from tools.llm_engine import ask_ai_vision, get_ai_runtime_metrics
+from tools.llm_engine import ask_ai, ask_ai_vision, get_ai_runtime_metrics
 from tools.sync_us_listed_universe import sync_universe as sync_us_listed_universe_now
 from app.services.memory_engine import OnyxMemory
 
@@ -554,6 +554,94 @@ def _history_block(ctx: dict, limit: int = 30) -> str:
     return "\n".join(out)
 
 
+def _load_chat_summaries() -> str:
+    """Load last 5 LLM-compressed conversation summaries from agent_memory_core."""
+    try:
+        from app.services.postgres_core_service import pg_connect
+        con = pg_connect()
+        if con is None:
+            return ""
+        try:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT summary, updated_at FROM agent_memory_core "
+                "WHERE ticker='__CHAT__' ORDER BY updated_at DESC LIMIT 5",
+            )
+            rows = cur.fetchall() or []
+        finally:
+            con.close()
+        if not rows:
+            return ""
+        lines = ["\nPAST CONVERSATION MEMORY (what we've discussed before):"]
+        for r in reversed(rows):  # oldest first so context reads chronologically
+            date = str(r[1] or "")[:10]
+            lines.append(f"  [{date}] {str(r[0] or '')[:350]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _maybe_summarize_session(session_id: str, history: list[dict]) -> None:
+    """Every 20 messages, compress the session into a persistent memory entry."""
+    try:
+        count = len(history)
+        if count < 20 or count % 20 != 0:
+            return
+        lines: list[str] = []
+        for m in history[-40:]:
+            role = str(m.get("role") or "").strip().lower()
+            text = str(m.get("text") or "").strip()[:400]
+            if role in {"user", "assistant"} and text:
+                lines.append(f"{role.upper()}: {text}")
+        if len(lines) < 4:
+            return
+        transcript = "\n".join(lines)
+        prompt = (
+            "Summarize this investment conversation in 4-6 sentences.\n"
+            "Focus on: tickers discussed, decisions or conclusions reached, "
+            "preferences or rules expressed, open questions left unresolved.\n"
+            "Be specific with names, numbers, and dates where present.\n\n"
+            f"Conversation:\n{transcript}\n\n"
+            "Output ONLY the summary sentences, nothing else."
+        )
+        summary = ask_ai(prompt, context="", mode="fast").strip()
+        if summary and len(summary) > 20:
+            from app.services.postgres_core_service import add_agent_feedback_memory_pg
+            add_agent_feedback_memory_pg(
+                "__CHAT__",
+                f"[Session {session_id[:20]} · {count} msgs] {summary}",
+            )
+    except Exception:
+        pass
+
+
+def _fire_background_learning(q: str, history: list[dict], session_id: str) -> None:
+    """Fire all learning side-effects in a daemon thread after the response is sent."""
+    def _run() -> None:
+        try:
+            learn_preferences_from_text(q, history=history)
+        except Exception:
+            pass
+        try:
+            learn_preferences_from_trajectory(history, latest_user_text=q)
+        except Exception:
+            pass
+        try:
+            learn_compact_memory_from_text(q, source="chat_turn")
+        except Exception:
+            pass
+        try:
+            learn_from_chat_turn(q, source="chat")
+        except Exception:
+            pass
+        try:
+            learn_investor_style_from_answer(q)
+        except Exception:
+            pass
+        _maybe_summarize_session(session_id, history)
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _ai_command_sync(payload: dict) -> dict:
     ensure_user_preferences_schema()
     q = str((payload or {}).get("query") or "").strip()
@@ -590,33 +678,19 @@ def _ai_command_sync(payload: dict) -> dict:
                 }
             )
     ctx["history"] = merged_hist[-80:]
-    if q:
-        # Wrap all learning side-effects — any SQLite-based call will raise
-        # sqlite_forbidden_in_strict_postgres_mode on cloud; must not crash sync path.
-        try:
-            _ = learn_preferences_from_text(q, history=ctx["history"])
-        except Exception:
-            pass
-        try:
-            _ = learn_preferences_from_trajectory(ctx["history"], latest_user_text=q)
-        except Exception:
-            pass
-        try:
-            _ = learn_compact_memory_from_text(q, source="chat_turn")
-        except Exception:
-            pass
-        try:
-            _ = learn_from_chat_turn(q, source="chat")
-        except Exception:
-            pass
-        try:
-            _ = learn_investor_style_from_answer(q)
-        except Exception:
-            pass
+    # Learning side-effects run in background AFTER the response — keeps latency low.
+    # (Preferences written here are read on the NEXT turn, not the current one.)
     try:
         ctx["user_profile"] = _profile_text(ctx)
     except Exception:
         ctx["user_profile"] = ""
+    # Inject long-term conversation memory (compressed summaries of past sessions)
+    try:
+        chat_summaries = _load_chat_summaries()
+        if chat_summaries:
+            ctx["user_profile"] = str(ctx.get("user_profile") or "") + chat_summaries
+    except Exception:
+        pass
     if not str(ctx.get("last_intent") or "").strip():
         for m in reversed(ctx["history"]):
             if str(m.get("role") or "") == "assistant" and str(m.get("intent") or "").strip():
@@ -650,7 +724,10 @@ def _ai_command_sync(payload: dict) -> dict:
     ctx = inject_runtime_context(ctx, query=q)
     image_bytes, mime_type = _parse_image_data_url(image_data_url)
     if image_bytes:
-        profile = _profile_text(ctx)
+        try:
+            profile = _profile_text(ctx)
+        except Exception:
+            profile = ""
         hist = _history_block(ctx, limit=30)
         system = (
             "You are a Senior Investment Strategist and Product Architect.\n"
@@ -784,6 +861,9 @@ def _ai_command_sync(payload: dict) -> dict:
             )
         except Exception:
             pass
+    # Fire all learning side-effects in background after response is built
+    if q:
+        _fire_background_learning(q, list(ctx.get("history") or []), session_id)
     return {
         "status": res.status,
         "intent": res.intent,
@@ -801,6 +881,11 @@ def _ai_command_sync(payload: dict) -> dict:
     }
 
 
+def _wrap_inline(r: dict) -> dict:
+    """Wrap a sync/fast/cached result in the envelope the JS expects: {result: ..., job_id: ''}."""
+    return {"ok": True, "status": "done", "result": r, "job_id": ""}
+
+
 @router.post("/ai/command")
 def ai_command(payload: dict = Body(default={})):  # simple JSON endpoint for command bar
     p = payload if isinstance(payload, dict) else {}
@@ -808,19 +893,19 @@ def ai_command(payload: dict = Body(default={})):  # simple JSON endpoint for co
     if q:
         fast = _fast_trade_history_reply(q)
         if isinstance(fast, dict):
-            return fast
+            return _wrap_inline(fast)
         fast_db = _fast_db_reply(q, context=(p.get("context") if isinstance(p.get("context"), dict) else {}))
         if isinstance(fast_db, dict):
-            return fast_db
+            return _wrap_inline(fast_db)
     cached = get_cached_result(p, ttl_sec=max(15, min(180, int(float(app_env("AI_PROMPT_CACHE_TTL_SEC", "75"))))))
     if isinstance(cached, dict) and cached:
-        return cached
+        return _wrap_inline(cached)
     budget_ms = max(300, int(float(app_env("AI_COMMAND_SYNC_BUDGET_MS", "2500"))))
     ex = cf.ThreadPoolExecutor(max_workers=1)
     try:
         fut = ex.submit(_ai_command_sync, p)
         try:
-            return fut.result(timeout=float(budget_ms) / 1000.0)
+            return _wrap_inline(fut.result(timeout=float(budget_ms) / 1000.0))
         except cf.TimeoutError:
             ensure_ai_job_queue_schema()
             jid = enqueue_job(p)

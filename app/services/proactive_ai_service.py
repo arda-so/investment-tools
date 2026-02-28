@@ -2798,6 +2798,19 @@ def dismiss_action_proposal(proposal_id: int, reason: str = "") -> bool:
                         "updated_at": str(row.get("updated_at") or ""),
                     }
                 )
+                try:
+                    from app.services.postgres_core_service import add_agent_feedback_memory_pg
+                    ticker = str(row.get("ticker") or "").strip().upper()
+                    kind = str(row.get("kind") or "").strip()
+                    title = str(row.get("title") or "").strip()
+                    add_agent_feedback_memory_pg(
+                        ticker,
+                        f"[User feedback] Dismissed {kind} proposal: '{title[:80]}'. "
+                        f"Reason: {str(reason or 'not provided')[:120]}. "
+                        f"Avoid repeating this type without stronger evidence."
+                    )
+                except Exception:
+                    pass
         return changed
     except Exception:
         try:
@@ -3939,12 +3952,32 @@ def dismiss_thesis_breach_alert(alert_id: int) -> bool:
         return False
     try:
         cur = con.cursor()
+        # Read row before updating so we can write feedback memory
+        cur.execute(
+            "SELECT ticker, breach_type, breach_detail FROM thesis_breach_alerts_core WHERE id=%s LIMIT 1",
+            (int(alert_id),),
+        )
+        alert_row = cur.fetchone()
         cur.execute(
             "UPDATE thesis_breach_alerts_core SET status='dismissed' WHERE id=%s AND status='open'",
             (int(alert_id),),
         )
         changed = int(cur.rowcount or 0) > 0
         con.commit()
+        if changed and alert_row:
+            ticker = str(alert_row[0] or "").strip().upper()
+            breach_type = str(alert_row[1] or "").strip()
+            breach_detail = str(alert_row[2] or "").strip()
+            try:
+                from app.services.postgres_core_service import add_agent_feedback_memory_pg
+                add_agent_feedback_memory_pg(
+                    ticker,
+                    f"[User feedback] Dismissed thesis breach: type='{breach_type}', "
+                    f"detail='{breach_detail[:120]}'. "
+                    f"May be false positive — lower sensitivity for similar {breach_type} signals."
+                )
+            except Exception:
+                pass
         return changed
     except Exception:
         try:

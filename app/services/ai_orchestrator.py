@@ -1945,7 +1945,12 @@ _READ_ONLY_TOOLS = {
     "get_position_history",
     "get_watchlist_rationale",
 }
-_HIGH_RISK_TOOLS = {"delete_notes"}
+_HIGH_RISK_TOOLS = {
+    "delete_notes",
+    "backfill_trade_history",   # writes to portfolio_transactions_core
+    "save_thesis",              # writes investment thesis
+    "append_daily_log",         # writes journal
+}
 
 
 def _tool_capability(tool_name: str) -> str:
@@ -1964,6 +1969,11 @@ def _capability_allowed(tool_name: str) -> bool:
         return True
     if mode in {"readonly", "read_only"}:
         return cap == "read"
+    # AI_CHAT_READONLY=1 (default): block high_risk tools from AI chat path.
+    # Protects portfolio_transactions_core from accidental text-triggered writes.
+    chat_readonly = str(app_env("AI_CHAT_READONLY", "1") or "1").strip() not in {"0", "false", "off", "no"}
+    if chat_readonly and cap == "high_risk":
+        return False
     # normal mode: allow read/write, keep high_risk gated.
     return cap in {"read", "write"}
 
@@ -5429,6 +5439,47 @@ def _intent_backfill_trade_history(query: str) -> AICommandResult | None:
     )
 
 
+def _interview_reflect(question: str, answer: str, next_question: str) -> str:
+    """Generate a natural, conversational acknowledgment after an interview answer."""
+    try:
+        if ask_ai is None:
+            raise RuntimeError("ask_ai unavailable")
+        is_short = len(answer.strip().split()) < 20
+        skip_words = {"skipped by user", "skip", "pass", "idk"}
+        is_skipped = answer.strip().lower() in skip_words
+        if is_skipped:
+            # Skipped — just move on warmly
+            if next_question:
+                return f"No problem, we can come back to that. Let's keep going.\n\n{next_question}"
+            return "No problem, we can come back to that."
+        probe_instruction = (
+            "Ask ONE short probing follow-up to get a more complete answer. Do NOT show the next question yet."
+            if is_short
+            else f"Confirm understanding in 2 sentences, then naturally introduce the next question: '{next_question}'"
+        )
+        prompt = (
+            f"You are an intelligent investment advisor conducting a structured portfolio interview.\n\n"
+            f"INTERVIEW QUESTION: {question}\n\n"
+            f"USER'S ANSWER: {answer}\n\n"
+            f"Your task: {probe_instruction}\n\n"
+            f"Rules:\n"
+            f"- Be warm and conversational, like Claude or ChatGPT\n"
+            f"- Reflect back the key point(s) you understood (max 1-2 sentences)\n"
+            f"- Never be robotic or say 'Saved.' or 'Noted.'\n"
+            f"- Keep total response under 80 words\n"
+            f"- If you probe, ask only ONE follow-up question"
+        )
+        reflection = ask_ai(prompt, context="", mode="fast").strip()
+        if reflection and len(reflection) > 10:
+            if not is_short and next_question and next_question not in reflection:
+                return reflection + f"\n\n{next_question}"
+            return reflection
+    except Exception:
+        pass
+    # Fallback: plain next question
+    return next_question
+
+
 def _intent_portfolio_interview(query: str, context: dict | None = None) -> AICommandResult | None:
     q = str(query or "").strip()
     low = _norm(q)
@@ -5499,6 +5550,14 @@ def _intent_portfolio_interview(query: str, context: dict | None = None) -> AICo
         ans = q
         if _norm(q) in {"skip", "pass", "next", "idk", "dont know", "don't know"}:
             ans = "SKIPPED by user."
+        # Capture current question before advancing so reflection can reference it
+        current_q_text = ""
+        try:
+            cur_state = get_pending_interview_question()
+            cur_nxt = cur_state.get("next") if isinstance(cur_state, dict) and isinstance(cur_state.get("next"), dict) else {}
+            current_q_text = str(cur_nxt.get("question") or "").strip()
+        except Exception:
+            pass
         tr = _run_tool("submit_portfolio_interview_answer", {"answer": ans}, query=q)
         data = tr.get("data") if isinstance(tr.get("data"), dict) else {}
         if not tr.get("ok"):
@@ -5511,12 +5570,11 @@ def _intent_portfolio_interview(query: str, context: dict | None = None) -> AICo
                 traces=[{"step": "tool", "detail": "submit_portfolio_interview_answer:error"}],
             )
         nxt = data.get("next") if isinstance(data.get("next"), dict) else {}
-        override_saved = bool(data.get("override_saved"))
         if not nxt:
             return AICommandResult(
                 status="ok",
                 intent="portfolio_interview",
-                message="Interview complete for current queue.",
+                message="That covers everything I needed. Your investment profile is saved — you can view it in My Universe.",
                 confidence=0.95,
                 redirect_url="/my_universe?tab=all",
                 citations=[],
@@ -5524,10 +5582,11 @@ def _intent_portfolio_interview(query: str, context: dict | None = None) -> AICo
             )
         tk = str(nxt.get("ticker") or "").strip().upper()
         qu = str(nxt.get("question") or "").strip()
+        reflection = _interview_reflect(current_q_text, ans, qu)
         return AICommandResult(
             status="needs_input",
             intent="portfolio_interview",
-            message=("Saved. I will use your better question from now on.\n" if override_saved else "") + qu,
+            message=reflection,
             confidence=0.92,
             redirect_url="/my_universe?tab=all",
             citations=[],
@@ -5957,7 +6016,7 @@ def run_ai_command(query: str, context: dict | None = None) -> AICommandResult:
 
     ctx = context or {}
     understanding = _understand_user_turn(q_raw, ctx)
-    if understanding.intent_class == "correction":
+    if understanding.intent_class == "correction" and last_intent != "portfolio_interview":
         _learn_from_correction(q_raw)
 
     pending = str(ctx.get("pending_query") or "").strip()
@@ -6038,7 +6097,7 @@ def run_ai_command(query: str, context: dict | None = None) -> AICommandResult:
         }
     )
 
-    if understanding.intent_class == "correction" and not parsed.action:
+    if understanding.intent_class == "correction" and not parsed.action and last_intent != "portfolio_interview":
         follow_q = "Understood. What should I do instead in one line?"
         res = AICommandResult(
             status="needs_input",
@@ -6198,6 +6257,28 @@ def run_ai_command(query: str, context: dict | None = None) -> AICommandResult:
             "action_confidence_gate",
             query,
             {"action": effective_parsed.action, "confidence": float(understanding.confidence or 0.0)},
+        )
+        _log_action(query, res)
+        return res
+
+    # ── Readonly guard ────────────────────────────────────────────────────────
+    # AI_CHAT_READONLY=1 (default) blocks all portfolio/cash mutations from the
+    # AI chat path. Notes/tasks still allowed. Use the Portfolio page to trade.
+    _PORTFOLIO_MUTATIONS = {"buy", "sell", "trim", "add_position", "update_cash", "execute_trade", "record_portfolio_transaction"}
+    _chat_readonly = str(app_env("AI_CHAT_READONLY", "1") or "1").strip() not in {"0", "false", "off", "no"}
+    if _chat_readonly and effective_parsed.action in _PORTFOLIO_MUTATIONS:
+        res = AICommandResult(
+            status="blocked",
+            intent="readonly_guard",
+            message=(
+                "Portfolio and cash mutations are disabled in AI chat to protect your data. "
+                "Use the Portfolio page to make changes."
+            ),
+            confidence=1.0,
+            citations=[],
+            matched_by="readonly_guard",
+            version=ORCHESTRATOR_VERSION,
+            traces=traces + [{"step": "readonly_guard", "detail": f"blocked:{effective_parsed.action}"}],
         )
         _log_action(query, res)
         return res
