@@ -1207,10 +1207,10 @@ def get_data_integrity_health() -> dict:
             (cutoff_7d,),
         )
         for status, cnt in cur.fetchall():
-            if status == "completed":
-                result["agent_runs_7d"]["success"] = cnt
-            elif status == "error":
-                result["agent_runs_7d"]["error"] = cnt
+            if status in ("ok", "completed", "skipped", "done"):
+                result["agent_runs_7d"]["success"] += cnt
+            elif status in ("error", "failed", "cleaned_up_stuck_run"):
+                result["agent_runs_7d"]["error"] += cnt
             elif status == "running":
                 result["agent_runs_7d"]["running"] = cnt
 

@@ -2223,11 +2223,12 @@ def run_event_driven_monitor(force: bool = False) -> dict[str, Any]:
         trigger_type="forced" if bool(force) else "event_driven",
         input_payload={"force": bool(force)},
     )
-    portfolio, watchlist, bluechips = _read_scope_tickers()
-    scope = set(portfolio) | set(watchlist) | set(bluechips)
-    con = _conn_core() if core_backend() != "postgres" else None
+    con = None
     created = 0
     try:
+        portfolio, watchlist, bluechips = _read_scope_tickers()
+        scope = set(portfolio) | set(watchlist) | set(bluechips)
+        con = _conn_core() if core_backend() != "postgres" else None
         if core_backend() == "postgres":
             con_pg = pg_connect()
             if con_pg is None:
