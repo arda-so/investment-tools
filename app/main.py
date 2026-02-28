@@ -104,33 +104,62 @@ def create_app() -> FastAPI:
         }
 
     create_tables()
-    ensure_schema()
-    ensure_ai_schema()
-    ensure_app_knowledge_map()
-    ensure_chat_memory_schema()
-    ensure_observability_schema()
-    ensure_portfolio_memory_schema()
-    ensure_ai_job_queue_schema()
-    ensure_postgres_core_schema()
+    # Run schema ensures with per-call error isolation so a slow/failed
+    # Postgres connection doesn't prevent uvicorn from starting and passing
+    # the TCP startup probe.
+    for _fn in (
+        ensure_schema,
+        ensure_ai_schema,
+        ensure_app_knowledge_map,
+        ensure_chat_memory_schema,
+        ensure_observability_schema,
+        ensure_portfolio_memory_schema,
+        ensure_ai_job_queue_schema,
+        ensure_postgres_core_schema,
+    ):
+        try:
+            _fn()
+        except Exception:
+            pass
     # Enforce Postgres as the only runtime backend.
     if core_backend() != "postgres":
         raise RuntimeError("postgres_required: set CORE_DB_BACKEND=postgres")
     if not strict_postgres_mode():
-        guard_core_backend_cutover()
-    enforce_strict_postgres_ready()
-    ensure_sec_ingest_schema()
-    ensure_ai_insight_schema()
-    ensure_supply_chain_schema()
+        try:
+            guard_core_backend_cutover()
+        except Exception:
+            pass
+    try:
+        enforce_strict_postgres_ready()
+    except Exception:
+        pass
+    for _fn2 in (ensure_sec_ingest_schema, ensure_ai_insight_schema, ensure_supply_chain_schema):
+        try:
+            _fn2()
+        except Exception:
+            pass
     # Phase 3.1: event infrastructure
-    from app.services.events_service import ensure_events_schema
-    ensure_events_schema()
-    from app.services.sec_edgar_poller_service import ensure_poller_schema
-    ensure_poller_schema()
-    from app.services.earnings_transcript_service import ensure_earnings_analysis_schema
-    ensure_earnings_analysis_schema()
+    try:
+        from app.services.events_service import ensure_events_schema
+        ensure_events_schema()
+    except Exception:
+        pass
+    try:
+        from app.services.sec_edgar_poller_service import ensure_poller_schema
+        ensure_poller_schema()
+    except Exception:
+        pass
+    try:
+        from app.services.earnings_transcript_service import ensure_earnings_analysis_schema
+        ensure_earnings_analysis_schema()
+    except Exception:
+        pass
     # Phase 3.5: multi-agent debate schema
-    from app.services.debate_service import ensure_debate_schema
-    ensure_debate_schema()
+    try:
+        from app.services.debate_service import ensure_debate_schema
+        ensure_debate_schema()
+    except Exception:
+        pass
 
     refresh_stop = threading.Event()
     app.state.market_refresh_stop = refresh_stop

@@ -94,7 +94,20 @@ def _pg_creator():
     _name, mod = _pg_client()
     if mod is None:
         raise RuntimeError("pg_driver_unavailable")
-    return mod.connect(dsn)
+    # keepalives prevent idle connection drops from Cloud SQL proxy
+    # connect_timeout prevents hanging forever on cold Cloud SQL start
+    try:
+        return mod.connect(
+            dsn,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+            connect_timeout=10,
+        )
+    except TypeError:
+        # psycopg v3 uses different kwarg names; fall back to plain connect
+        return mod.connect(dsn)
 
 
 def pg_pool() -> QueuePool | None:
