@@ -3040,6 +3040,13 @@ async def api_data_integrity_health():
     return JSONResponse(get_data_integrity_health())
 
 
+@router.post("/api/agent/runs/cleanup-stuck")
+async def api_cleanup_stuck_agent_runs(stale_minutes: int = 60):
+    from app.services.proactive_ai_service import cleanup_stuck_agent_runs
+    cleaned = cleanup_stuck_agent_runs(stale_minutes=max(5, int(stale_minutes or 60)))
+    return JSONResponse({"ok": True, "cleaned": cleaned})
+
+
 @router.get("/api/agent/runs")
 async def api_agent_runs(limit: int = 20):
     return JSONResponse({"ok": True, "runs": list_recent_agent_runs(limit=max(1, min(200, int(limit or 20))))})
