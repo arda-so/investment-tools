@@ -4,70 +4,106 @@ set -euo pipefail
 ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
 
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  cat <<'USAGE'
-Usage: ./bin/open_cloud_app
-
-Starts an authenticated Cloud Run local proxy and opens the app in your browser.
-
-Defaults:
-  APP_SERVICE=investor-tools-app
-  PROJECT_ID=onyx-terminal-487613
-  REGION=europe-west1
-  CLOUD_PROXY_PORT=8081
-
-Override with env vars, for example:
-  CLOUD_PROXY_PORT=8090 ./bin/open_cloud_app
-USAGE
-  exit 0
-fi
-
-command -v gcloud >/dev/null 2>&1 || { echo "missing command: gcloud" >&2; exit 1; }
-command -v open >/dev/null 2>&1 || { echo "missing command: open" >&2; exit 1; }
-command -v lsof >/dev/null 2>&1 || { echo "missing command: lsof" >&2; exit 1; }
-
-APP_SERVICE="${APP_SERVICE:-investor-tools-app}"
 PROJECT_ID="${PROJECT_ID:-onyx-terminal-487613}"
 REGION="${REGION:-europe-west1}"
-PORT="${CLOUD_PROXY_PORT:-8081}"
+SERVICE="${APP_SERVICE:-investor-tools-app}"
+PORT="${CLOUD_PROXY_PORT:-8088}"
+PATH_SUFFIX="${CLOUD_OPEN_PATH:-/dashboard}"
+NO_OPEN="${NO_OPEN:-0}"
+LOG_FILE="${ROOT}/logs/cloud_proxy_${SERVICE}_${PORT}.log"
 
-# Auto-pick a free port so this behaves like one-click local open.
-if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
-  START_PORT="$PORT"
-  for CAND in $(seq "$START_PORT" $((START_PORT + 30))); do
-    if ! lsof -ti tcp:"$CAND" >/dev/null 2>&1; then
-      PORT="$CAND"
-      break
-    fi
-  done
+usage() {
+  cat <<'USAGE'
+Usage: bin/open_cloud_app [--port N] [--path /route] [--no-open]
+
+Starts a clean Cloud Run local proxy for Investor OS and opens the app URL.
+Defaults:
+  --port 8088
+  --path /dashboard
+
+Environment overrides:
+  PROJECT_ID, REGION, APP_SERVICE, CLOUD_PROXY_PORT, CLOUD_OPEN_PATH
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port)
+      PORT="${2:-}"
+      shift 2
+      ;;
+    --path)
+      PATH_SUFFIX="${2:-}"
+      shift 2
+      ;;
+    --no-open)
+      NO_OPEN="1"
+      shift 1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1"
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [ -z "${PORT}" ]; then
+  echo "Invalid port."
+  exit 2
 fi
 
-if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
-  echo "Could not find a free proxy port in range ${CLOUD_PROXY_PORT:-8081}..$(( ${CLOUD_PROXY_PORT:-8081} + 30 ))." >&2
+mkdir -p "${ROOT}/logs"
+
+# Stop anything already bound to target port (stale proxy/process).
+if lsof -ti "tcp:${PORT}" >/dev/null 2>&1; then
+  kill -9 $(lsof -ti "tcp:${PORT}") >/dev/null 2>&1 || true
+  sleep 1
+fi
+
+APP_URL="$(gcloud run services describe "${SERVICE}" \
+  --project "${PROJECT_ID}" \
+  --region "${REGION}" \
+  --format='value(status.url)')"
+TOKEN="$(gcloud auth print-identity-token)"
+PROXY_BIN="/usr/local/share/google-cloud-sdk/bin/cloud-run-proxy"
+if [ ! -x "${PROXY_BIN}" ]; then
+  echo "Missing cloud-run-proxy binary at ${PROXY_BIN}"
   exit 1
 fi
 
-LOG_DIR="$ROOT/logs"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/cloud_proxy_${APP_SERVICE}_${PORT}.log"
+nohup "${PROXY_BIN}" \
+  -host "${APP_URL}" \
+  -token "${TOKEN}" \
+  -bind "127.0.0.1:${PORT}" \
+  -server-up-time 8h >"${LOG_FILE}" 2>&1 &
+PROXY_PID=$!
 
-nohup gcloud run services proxy "$APP_SERVICE" \
-  --region "$REGION" \
-  --project "$PROJECT_ID" \
-  --port "$PORT" \
-  >"$LOG_FILE" 2>&1 &
-PID=$!
+# Wait for proxy to be reachable.
+for _ in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:${PORT}/health/live" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
 
-sleep 2
-if ! ps -p "$PID" >/dev/null 2>&1; then
-  echo "Failed to start cloud proxy. Check log: $LOG_FILE" >&2
+if ! curl -fsS "http://127.0.0.1:${PORT}/health/live" >/dev/null 2>&1; then
+  echo "Failed to start cloud proxy. Check log: ${LOG_FILE}"
+  if ps -p "${PROXY_PID}" >/dev/null 2>&1; then
+    kill -9 "${PROXY_PID}" >/dev/null 2>&1 || true
+  fi
   exit 1
 fi
 
-URL="http://127.0.0.1:${PORT}"
-open "$URL"
+URL="http://127.0.0.1:${PORT}${PATH_SUFFIX}"
+echo "Cloud proxy ready (pid=${PROXY_PID})"
+echo "Open: ${URL}"
+echo "Log:  ${LOG_FILE}"
 
-echo "Cloud proxy started: PID=$PID"
-echo "Open URL: $URL"
-echo "Log file: $LOG_FILE"
-echo "Stop proxy: kill -9 $PID"
+if [ "${NO_OPEN}" != "1" ]; then
+  open "${URL}" >/dev/null 2>&1 || true
+fi

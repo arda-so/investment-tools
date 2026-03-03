@@ -349,7 +349,9 @@ def finish_agent_run(run_uid: str, status: str, output_payload: dict[str, Any] |
 
 def cleanup_stuck_agent_runs(stale_minutes: int = 60) -> int:
     """Mark any agent_runs rows stuck in 'running' state for > stale_minutes as 'error'.
-    Returns count of rows cleaned up. Safe to call on every worker startup."""
+    Returns count of rows cleaned up. Safe to call on every worker startup.
+    When > 3 runs are cleaned, emits a structured JSON log so Cloud Monitoring
+    can fire the stuck-agent-runs alert policy."""
     cutoff = (dt.datetime.now() - dt.timedelta(minutes=int(stale_minutes or 60))).isoformat()
     now = dt.datetime.now().isoformat()
     cleaned = 0
@@ -389,6 +391,19 @@ def cleanup_stuck_agent_runs(stale_minutes: int = 60) -> int:
             pass
         finally:
             con.close()
+    # Emit structured JSON log when > 3 stuck runs found so Cloud Monitoring
+    # can fire the stuck-agent-runs alert policy (log-based condition).
+    if cleaned > 3:
+        import json as _json
+        import sys as _sys
+        _sys.stdout.write(_json.dumps({
+            "severity": "WARNING",
+            "alert": "stuck_agent_runs",
+            "message": f"Cleaned {cleaned} stuck agent runs (stale_minutes={stale_minutes})",
+            "count": cleaned,
+            "stale_minutes": stale_minutes,
+        }) + "\n")
+        _sys.stdout.flush()
     return cleaned
 
 
@@ -1376,6 +1391,25 @@ def _proposal_upsert(
                 "updated_at": now,
             }
         )
+        # Dual-write to unified investment_records_core
+        try:
+            from app.services.workspace_os_service import create_record as _ws_create
+            _action = str(row.get("suggested_action") or "REVIEW").upper()
+            _sent = "bullish" if _action in ("BUY", "ADD", "OVERWEIGHT") else \
+                    "bearish" if _action in ("SELL", "REDUCE", "UNDERWEIGHT") else "neutral"
+            _ws_create(
+                kind="decision",
+                domain="work",
+                title=str(row.get("title") or "")[:240],
+                body=str(row.get("thesis_summary") or "")[:800],
+                ticker=str(row.get("ticker") or "").upper(),
+                source="agent",
+                created_by="agent",
+                source_ref_id=str(new_id),
+                sentiment=_sent,
+            )
+        except Exception:
+            pass
         # Phase 3.4: auto-run cascade analysis when a new proposal is created
         if tk:
             try:
@@ -2656,154 +2690,157 @@ def list_action_proposals(status: str = "open", limit: int = 8) -> list[dict[str
             }
         )
 
-        # Consolidate alert fatigue: merge multiple open signals per ticker into one card.
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for p in raw_items:
-            tk = _safe_ticker(str(p.get("ticker") or ""))
-            key = tk or f"__id_{int(p.get('id') or 0)}"
-            grouped.setdefault(key, []).append(p)
+    # Consolidate alert fatigue: merge multiple open signals per ticker into one card.
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for p in raw_items:
+        tk = _safe_ticker(str(p.get("ticker") or ""))
+        key = tk or f"__id_{int(p.get('id') or 0)}"
+        grouped.setdefault(key, []).append(p)
 
-        def _reasoning_strength(item: dict[str, Any]) -> tuple[int, int]:
-            rz = dict(item.get("reasoning") or {})
-            score = 0
-            for k in ("margin_impact", "thesis_validation", "risk_assessment", "actionable_proposal", "peer_contagion"):
-                if str(rz.get(k) or "").strip():
-                    score += 2
-            if str(rz.get("recommended_stance") or "").strip():
-                score += 1
-            ins_count = len([x for x in list(item.get("insights") or []) if isinstance(x, dict)])
-            score += min(ins_count, 3)
-            return (score, int(item.get("id") or 0))
+    def _reasoning_strength(item: dict[str, Any]) -> tuple[int, int]:
+        rz = dict(item.get("reasoning") or {})
+        score = 0
+        for k in ("margin_impact", "thesis_validation", "risk_assessment", "actionable_proposal", "peer_contagion"):
+            if str(rz.get(k) or "").strip():
+                score += 2
+        if str(rz.get("recommended_stance") or "").strip():
+            score += 1
+        ins_count = len([x for x in list(item.get("insights") or []) if isinstance(x, dict)])
+        score += min(ins_count, 3)
+        return (score, int(item.get("id") or 0))
 
-        for key, items in grouped.items():
-            items_sorted = sorted(items, key=lambda x: float(x.get("priority_score") or 0.0), reverse=True)
-            base = dict(items_sorted[0])
-            best_reasoning_item = max(items_sorted, key=_reasoning_strength)
-            tk = _safe_ticker(str(base.get("ticker") or ""))
-            if tk and len(items_sorted) > 1:
-                kinds = [str(x.get("kind") or "").strip() for x in items_sorted if str(x.get("kind") or "").strip()]
-                uniq_kinds: list[str] = []
-                for k in kinds:
-                    if k not in uniq_kinds:
-                        uniq_kinds.append(k)
-                merged_bullets: list[str] = []
-                for x in items_sorted[:6]:
-                    for b in list(x.get("bullets") or []):
-                        bb = str(b or "").strip()
-                        if bb and bb not in merged_bullets:
-                            merged_bullets.append(bb)
-                        if len(merged_bullets) >= 3:
-                            break
+    for _key, items in grouped.items():
+        items_sorted = sorted(items, key=lambda x: float(x.get("priority_score") or 0.0), reverse=True)
+        base = dict(items_sorted[0])
+        best_reasoning_item = max(items_sorted, key=_reasoning_strength)
+        tk = _safe_ticker(str(base.get("ticker") or ""))
+        if tk and len(items_sorted) > 1:
+            kinds = [str(x.get("kind") or "").strip() for x in items_sorted if str(x.get("kind") or "").strip()]
+            uniq_kinds: list[str] = []
+            for k in kinds:
+                if k not in uniq_kinds:
+                    uniq_kinds.append(k)
+            merged_bullets: list[str] = []
+            for x in items_sorted[:6]:
+                for b in list(x.get("bullets") or []):
+                    bb = str(b or "").strip()
+                    if bb and bb not in merged_bullets:
+                        merged_bullets.append(bb)
                     if len(merged_bullets) >= 3:
                         break
-                if not merged_bullets:
-                    merged_bullets = list(base.get("bullets") or [])
-                base["bullets"] = merged_bullets[:3]
-                base["kind"] = "multi_signal" if len(set(uniq_kinds)) > 1 else (uniq_kinds[0] if uniq_kinds else str(base.get("kind") or ""))
-                base["priority_score"] = min(99.9, float(base.get("priority_score") or 0.0) + min(1.5, 0.35 * (len(items_sorted) - 1)))
-                base["confidence"] = max(float(x.get("confidence") or 0.0) for x in items_sorted)
-                base["signal_count"] = len(items_sorted)
-                base["title"] = f"{len(items_sorted)} macro/filing signals consolidated"
-                merged_cites: list[dict[str, str]] = []
-                seen_urls: set[str] = set()
-                for x in items_sorted[:8]:
-                    for c in list(x.get("citations") or []):
-                        if not isinstance(c, dict):
-                            continue
-                        u = str(c.get("url") or "").strip()
-                        if u and u not in seen_urls:
-                            seen_urls.add(u)
-                            merged_cites.append({"label": str(c.get("label") or "Source"), "url": u})
-                if merged_cites:
-                    base["citations"] = merged_cites[:8]
-                base["kind_details"] = ", ".join(uniq_kinds[:4])
-            # Preserve card ordering by priority, but always render the richest AI reasoning.
-            merged_reasoning: dict[str, Any] = {}
-            reasoning_items = sorted(items_sorted, key=_reasoning_strength, reverse=True)
-            for ritem in reasoning_items:
-                rz = dict(ritem.get("reasoning") or {})
-                if not isinstance(rz, dict):
+                if len(merged_bullets) >= 3:
+                    break
+            if not merged_bullets:
+                merged_bullets = list(base.get("bullets") or [])
+            base["bullets"] = merged_bullets[:3]
+            base["kind"] = "multi_signal" if len(set(uniq_kinds)) > 1 else (uniq_kinds[0] if uniq_kinds else str(base.get("kind") or ""))
+            base["priority_score"] = min(99.9, float(base.get("priority_score") or 0.0) + min(1.5, 0.35 * (len(items_sorted) - 1)))
+            base["confidence"] = max(float(x.get("confidence") or 0.0) for x in items_sorted)
+            base["signal_count"] = len(items_sorted)
+            base["title"] = f"{len(items_sorted)} macro/filing signals consolidated"
+            merged_cites: list[dict[str, str]] = []
+            seen_urls: set[str] = set()
+            for x in items_sorted[:8]:
+                for c in list(x.get("citations") or []):
+                    if not isinstance(c, dict):
+                        continue
+                    u = str(c.get("url") or "").strip()
+                    if u and u not in seen_urls:
+                        seen_urls.add(u)
+                        merged_cites.append({"label": str(c.get("label") or "Source"), "url": u})
+            if merged_cites:
+                base["citations"] = merged_cites[:8]
+            base["kind_details"] = ", ".join(uniq_kinds[:4])
+        # Preserve card ordering by priority, but always render the richest AI reasoning.
+        merged_reasoning: dict[str, Any] = {}
+        reasoning_items = sorted(items_sorted, key=_reasoning_strength, reverse=True)
+        for ritem in reasoning_items:
+            rz = dict(ritem.get("reasoning") or {})
+            if not isinstance(rz, dict):
+                continue
+            for k, v in rz.items():
+                if k in merged_reasoning and str(merged_reasoning.get(k) or "").strip():
                     continue
-                for k, v in rz.items():
-                    if k in merged_reasoning and str(merged_reasoning.get(k) or "").strip():
-                        continue
-                    if isinstance(v, list):
-                        if v:
-                            merged_reasoning[k] = v
-                    elif str(v or "").strip():
+                if isinstance(v, list):
+                    if v:
                         merged_reasoning[k] = v
-            merged_insights: list[dict[str, str]] = []
-            seen_pairs: set[str] = set()
-            for iitem in reasoning_items:
-                for ins in list(iitem.get("insights") or []):
-                    if not isinstance(ins, dict):
-                        continue
-                    lb = str(ins.get("label") or "").strip()
-                    tx = str(ins.get("text") or "").strip()
-                    key_ins = f"{lb}|{tx}"
-                    if not lb or not tx or key_ins in seen_pairs:
-                        continue
-                    seen_pairs.add(key_ins)
-                    merged_insights.append({"label": lb[:42], "text": tx[:320]})
-                    if len(merged_insights) >= 3:
-                        break
+                elif str(v or "").strip():
+                    merged_reasoning[k] = v
+        merged_insights: list[dict[str, str]] = []
+        seen_pairs: set[str] = set()
+        for iitem in reasoning_items:
+            for ins in list(iitem.get("insights") or []):
+                if not isinstance(ins, dict):
+                    continue
+                lb = str(ins.get("label") or "").strip()
+                tx = str(ins.get("text") or "").strip()
+                key_ins = f"{lb}|{tx}"
+                if not lb or not tx or key_ins in seen_pairs:
+                    continue
+                seen_pairs.add(key_ins)
+                merged_insights.append({"label": lb[:42], "text": tx[:320]})
                 if len(merged_insights) >= 3:
                     break
-            base["reasoning"] = merged_reasoning or dict(best_reasoning_item.get("reasoning") or {})
-            base["insights"] = merged_insights[:3]
-            out.append(base)
+            if len(merged_insights) >= 3:
+                break
+        base["reasoning"] = merged_reasoning or dict(best_reasoning_item.get("reasoning") or {})
+        base["insights"] = merged_insights[:3]
+        out.append(base)
 
-        for p in out:
-            kind = str(p.get("kind") or "").strip().lower()
-            is_blue = bool(p.get("is_blue_chip"))
-            is_macro_signal = bool(
-                kind in {"macro_signal", "macro_context", "contagion_peer_alert"}
-                or kind.startswith("macro_")
-                or "macro" in kind
-            )
-            tk = _safe_ticker(str(p.get("ticker") or ""))
-            nm = str(name_map.get(tk) or "").strip()
-            w = float(weight_map.get(tk, 0.0) or 0.0)
-            rz0 = dict(p.get("reasoning") or {})
-            direction = str(rz0.get("recommended_stance") or "").strip().upper() or "REVIEW"
-            p["direction"] = direction
-            p["company_name"] = nm
-            p["portfolio_weight_pct"] = w
-            # Headline clarity.
-            base_title = str(p.get("title") or "").strip()
-            if tk:
-                bt = base_title
-                if bt.upper().startswith((tk + " ·").upper()):
-                    bt = bt[len(tk) + 2 :].strip()
-                p["title"] = f"{tk} · {direction} · {bt}"
-            bs = [str(x or "").strip() for x in list(p.get("bullets") or []) if str(x or "").strip()]
-            rz = dict(p.get("reasoning") or {})
-            ins = [x for x in list(p.get("insights") or []) if isinstance(x, dict)]
-            if not ins:
-                ins = insights_from_reasoning(rz)
-            p["insights"] = ins[:3]
-            p["reasoning"] = rz
-            p["bullets"] = bs[:3]
+    for p in out:
+        kind = str(p.get("kind") or "").strip().lower()
+        is_blue = bool(p.get("is_blue_chip"))
+        is_macro_signal = bool(
+            kind in {"macro_signal", "macro_context", "contagion_peer_alert"}
+            or kind.startswith("macro_")
+            or "macro" in kind
+        )
+        tk = _safe_ticker(str(p.get("ticker") or ""))
+        nm = str(name_map.get(tk) or "").strip()
+        w = float(weight_map.get(tk, 0.0) or 0.0)
+        rz0 = dict(p.get("reasoning") or {})
+        direction = str(rz0.get("recommended_stance") or "").strip().upper() or "REVIEW"
+        p["direction"] = direction
+        p["company_name"] = nm
+        p["portfolio_weight_pct"] = w
+        # Headline clarity + de-dup repeated stance tokens.
+        base_title = str(p.get("title") or "").strip()
+        bt = base_title
+        if tk and bt.upper().startswith((tk + " ·").upper()):
+            bt = bt[len(tk) + 2 :].strip()
+        # Strip duplicated leading stance markers like "WATCH · WATCH · ...".
+        bt = re.sub(rf"^(?:{re.escape(direction)}\s*·\s*)+", "", bt, flags=re.IGNORECASE).strip()
+        if tk:
+            p["title"] = f"{tk} · {direction} · {bt or 'review update'}"
+        bs = [str(x or "").strip() for x in list(p.get("bullets") or []) if str(x or "").strip()]
+        rz = dict(p.get("reasoning") or {})
+        ins = [x for x in list(p.get("insights") or []) if isinstance(x, dict)]
+        if not ins:
+            ins = insights_from_reasoning(rz)
+        p["insights"] = ins[:3]
+        p["reasoning"] = rz
+        p["bullets"] = bs[:3]
 
-            if is_macro_signal:
-                p["badge_variant"] = "macro_signal"
-                p["badge_label"] = "📡 Macro Signal"
-            elif is_blue:
-                p["badge_variant"] = "blue_chip"
-                p["badge_label"] = "💎 Blue Chip"
-            else:
-                p["badge_variant"] = ""
-                p["badge_label"] = ""
-        # Only surface high-quality, reasoning-backed cards.
-        out = [
-            p for p in out
-            if _reasoning_strength(p)[0] > 0
-            and passes_reasoning_quality(
-                dict(p.get("reasoning") or {}),
-                [x for x in list(p.get("insights") or []) if isinstance(x, dict)],
-                [x for x in list(p.get("citations") or []) if isinstance(x, dict)],
-            )
-        ]
+        if is_macro_signal:
+            p["badge_variant"] = "macro_signal"
+            p["badge_label"] = "📡 Macro Signal"
+        elif is_blue:
+            p["badge_variant"] = "blue_chip"
+            p["badge_label"] = "💎 Blue Chip"
+        else:
+            p["badge_variant"] = ""
+            p["badge_label"] = ""
+
+    # Only surface high-quality, reasoning-backed cards.
+    out = [
+        p for p in out
+        if _reasoning_strength(p)[0] > 0
+        and passes_reasoning_quality(
+            dict(p.get("reasoning") or {}),
+            [x for x in list(p.get("insights") or []) if isinstance(x, dict)],
+            [x for x in list(p.get("citations") or []) if isinstance(x, dict)],
+        )
+    ]
     out_sorted = sorted(out, key=lambda x: float(x.get("priority_score") or 0.0), reverse=True)
     return out_sorted[: max(1, min(50, int(limit or 8)))]
 

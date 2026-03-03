@@ -642,8 +642,14 @@ def _fire_background_learning(q: str, history: list[dict], session_id: str) -> N
     threading.Thread(target=_run, daemon=True).start()
 
 
+_PREFS_SCHEMA_CHECKED = False
+
+
 def _ai_command_sync(payload: dict) -> dict:
-    ensure_user_preferences_schema()
+    global _PREFS_SCHEMA_CHECKED
+    if not _PREFS_SCHEMA_CHECKED:
+        ensure_user_preferences_schema()
+        _PREFS_SCHEMA_CHECKED = True
     q = str((payload or {}).get("query") or "").strip()
     job_type = str((payload or {}).get("job_type") or "").strip().lower()
     image_data_url = str((payload or {}).get("image_data_url") or "").strip()
@@ -722,6 +728,27 @@ def _ai_command_sync(payload: dict) -> dict:
             except Exception:
                 pass
     ctx = inject_runtime_context(ctx, query=q)
+
+    # News search — only for real-time/current-events queries ("why is oil up today?")
+    import logging as _logging
+    _ai_log = _logging.getLogger("ai.realtime")
+    try:
+        from app.services.web_search_service import is_realtime_query, search_news, format_news_text
+        _is_rt = bool(q and is_realtime_query(q))
+        _ai_log.info("realtime_check query=%r is_realtime=%s", q[:80] if q else "", _is_rt)
+        if _is_rt:
+            _headlines = search_news(q, 6)
+            ctx["live_news_text"] = format_news_text(_headlines)
+            _ai_log.info("news_search results=%d text_len=%d", len(_headlines), len(ctx["live_news_text"]))
+        else:
+            ctx["live_news_text"] = ""
+    except Exception as _nex:
+        _ai_log.warning("news_search failed: %s", _nex)
+        ctx["live_news_text"] = ""
+    # Log macro snapshot status
+    _macro = str(ctx.get("runtime", {}).get("macro_snapshot_text") or "")[:60]
+    _ai_log.info("macro_snapshot preview=%r", _macro)
+
     image_bytes, mime_type = _parse_image_data_url(image_data_url)
     if image_bytes:
         try:
@@ -1036,6 +1063,25 @@ def ai_memory_bootstrap_guardrails():
     }
 
 
+@router.post("/ai/feedback")
+def ai_feedback(payload: dict = Body(default={})):
+    """Store thumbs-up/down feedback for an AI response."""
+    from app.services.postgres_core_service import store_ai_response_feedback
+    rating = str((payload or {}).get("rating") or "").strip().lower()
+    if rating not in {"up", "down"}:
+        return {"ok": False, "error": "rating must be 'up' or 'down'"}
+    ok = store_ai_response_feedback(
+        session_id=str((payload or {}).get("session_id") or ""),
+        message_id=str((payload or {}).get("message_id") or ""),
+        query_text=str((payload or {}).get("query_text") or ""),
+        response_text=str((payload or {}).get("response_text") or ""),
+        intent=str((payload or {}).get("intent") or ""),
+        rating=rating,
+        comment=str((payload or {}).get("comment") or ""),
+    )
+    return {"ok": ok}
+
+
 @router.post("/ai/memory/forget")
 def ai_memory_forget(payload: dict = Body(default={})):
     query = str((payload or {}).get("query") or "").strip()
@@ -1241,5 +1287,32 @@ def ai_phase2_map_reduce_report(reducer_job_id: str):
                 "analysis_type": "phase2_map_reduce",
                 "reducer_job_id": str(reducer_job_id or "").strip(),
             },
+        ),
+    }
+
+
+@router.get("/ai/search/status")
+def ai_search_status():
+    """Return the active web search engine tier and whether Brave API key is configured."""
+    import os
+    try:
+        from app.services.web_search_service import get_search_engine_status
+        engine = get_search_engine_status()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "engine": "unknown", "brave_configured": False}
+    brave_configured = bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip())
+    tier_labels = {
+        "brave": "Tier 1 — Brave Search API (industry standard)",
+        "duckduckgo": "Tier 2 — DuckDuckGo free search",
+        "rss_only": "Tier 3 — RSS headline scoring (fallback)",
+    }
+    return {
+        "ok": True,
+        "engine": engine,
+        "tier": tier_labels.get(engine, engine),
+        "brave_configured": brave_configured,
+        "upgrade_tip": (
+            "Set BRAVE_SEARCH_API_KEY env var to upgrade to Tier 1 (2 000 free queries/month at search.brave.com/app)"
+            if not brave_configured else None
         ),
     }

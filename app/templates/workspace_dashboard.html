@@ -1,171 +1,275 @@
 {% extends "base.html" %}
-{% block title %}Workspace | Investor OS v2{% endblock %}
+{% block title %}Dashboard | Investor OS v2{% endblock %}
 {% block head_extra %}
 <style>
-  /* Hide the legacy AI* floating button and worker badge on the dashboard —
-     the bottom bar is the single AI entry point here. */
   #aiOpenBtn, #aiWorkerBadge { display: none !important; }
 
-  .ws{display:grid;grid-template-columns:200px 1fr 260px;gap:12px;padding:12px;}
-  .ws-card{background:#fff;border:1px solid #dbe4ee;border-radius:12px;padding:10px;}
-  .ws-side h3,.ws-right h3{margin:0 0 10px 0;font-size:11px;text-transform:uppercase;color:#94a3b8;letter-spacing:.07em;font-weight:800;}
-  .ws-ch{display:block;width:100%;text-align:left;border:none;background:transparent;color:#475569;border-radius:8px;padding:7px 10px;margin-bottom:2px;font-size:13px;font-weight:600;cursor:pointer;transition:background .1s,color .1s;}
-  .ws-ch:hover{background:#f1f5f9;color:#0f172a;}
-  .ws-ch.active{background:#f1f5f9;color:#0f172a;font-weight:800;}
-  .ws-ch.active::before{content:'';display:inline-block;width:3px;height:14px;background:#0f172a;border-radius:2px;margin-right:8px;vertical-align:middle;}
-  .ws-main{display:grid;grid-template-rows:auto 1fr auto;min-height:78vh;}
-  .ws-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
-  .ws-title{font-size:18px;font-weight:800;color:#0f172a;}
-  .ws-feed{overflow:auto;min-height:0;display:grid;gap:8px;padding-right:4px;align-content:start;}
-  .ws-item{border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px 12px;}
-  .ws-item-error{border-color:#fecaca;background:#fff7f7;}
-  .ws-item-thinking{border-color:#e0f2fe;background:#f0f9ff;animation:ws-pulse 1.4s ease-in-out infinite;}
-  @keyframes ws-pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
-  .ws-item h4{margin:0 0 4px 0;font-size:13px;font-weight:700;color:#0f172a;}
-  .ws-meta{font-size:11px;color:#94a3b8;margin-bottom:5px;}
-  .ws-text{white-space:pre-wrap;font-size:13px;color:#334155;line-height:1.55;}
-  .ws-item-user{background:#f8fafc;}
-  .ws-item-ai{background:#fff;border-color:#dbeafe;}
-  .ws-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
-  .ws-act{border:1px solid #e2e8f0;background:#f8fafc;color:#475569;border-radius:7px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer;transition:background .1s;}
-  .ws-act:hover{background:#f1f5f9;color:#0f172a;}
-  .ws-act-primary{background:#0f172a;color:#fff;border-color:#0f172a;}
-  .ws-act-primary:hover{background:#1e293b;}
-  .ws-status{font-size:11px;color:#64748b;margin-top:6px;}
+  /* ── Layout ────────────────────────────────────────────────────────── */
+  .ws { display:grid; grid-template-columns:200px 1fr 268px; gap:12px; padding:12px; }
+  .ws-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:12px; }
+  .ws-main { display:grid; grid-template-rows:auto auto 1fr; min-height:82vh; gap:0; }
 
-  /* ── AI Input bar ─────────────────────────────────────────────────────── */
-  .ws-input{margin-top:12px;}
-  .ws-input-wrap{display:flex;align-items:center;gap:8px;border:1.5px solid #e2e8f0;border-radius:16px;background:#fff;padding:9px 12px;transition:border-color .15s,box-shadow .15s;}
-  .ws-input-wrap:focus-within{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.08);}
-  .ws-input-wrap input{flex:1;border:none;outline:none;background:transparent;height:26px;font-size:14px;color:#0f172a;}
-  .ws-input-wrap input::placeholder{color:#94a3b8;}
-  .ws-input-wrap input:disabled{color:#94a3b8;}
-  /* Mode badge — changes based on query type */
-  .ws-mode{font-size:11px;font-weight:700;border-radius:8px;padding:3px 8px;white-space:nowrap;transition:all .2s;}
-  .ws-mode-fast{color:#059669;background:#ecfdf5;border:1px solid #a7f3d0;}
-  .ws-mode-deep{color:#7c3aed;background:#f5f3ff;border:1px solid #ddd6fe;}
-  .ws-send{border:none;background:#0f172a;color:#fff;border-radius:10px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;min-width:52px;transition:background .15s,opacity .15s;}
-  .ws-send:hover{background:#1e293b;}
-  .ws-send:disabled{opacity:.35;cursor:not-allowed;}
-  .ws-hint{font-size:11px;color:#475569;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:5px 10px;margin-top:6px;display:none;}
-  .ws-hint.visible{display:block;}
+  /* ── Left sidebar — semantic nav ────────────────────────────────────── */
+  .ws-nav-ai {
+    display:block; width:100%; text-align:center; border:none; cursor:pointer;
+    background:#0f172a; color:#fff; border-radius:10px; padding:9px 12px;
+    font-size:13px; font-weight:700; margin-bottom:16px;
+    transition:background .15s;
+  }
+  .ws-nav-ai:hover { background:#1e293b; }
+  .ws-nav-ai.active { background:#6366f1; }
 
-  .ws-clear-btn{font-size:11px;color:#94a3b8;background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;}
-  .ws-clear-btn:hover{color:#dc2626;}
-  .ws-right .hint{font-size:12px;color:#475569;line-height:1.4;}
-  @media (max-width:1100px){.ws{grid-template-columns:1fr;}.ws-right{order:3;}.ws-side{order:1;}.ws-main{order:2;min-height:65vh;}}
+  .ws-nav-group { margin-bottom:14px; }
+  .ws-nav-label {
+    font-size:10px; font-weight:800; color:#94a3b8;
+    letter-spacing:.08em; text-transform:uppercase;
+    padding:0 6px; margin-bottom:3px;
+  }
+  .ws-nav-item {
+    display:block; width:100%; text-align:left; border:none; background:transparent;
+    color:#64748b; border-radius:8px; padding:6px 10px; margin-bottom:1px;
+    font-size:13px; font-weight:500; cursor:pointer; transition:background .1s,color .1s;
+  }
+  .ws-nav-item:hover { background:#f1f5f9; color:#0f172a; }
+  .ws-nav-item.active {
+    background:#f1f5f9; color:#0f172a; font-weight:700;
+    border-left:3px solid #6366f1; padding-left:7px;
+  }
+
+  /* ── Feed header ─────────────────────────────────────────────────────── */
+  .ws-head { display:flex; justify-content:space-between; align-items:center;
+             padding-bottom:10px; border-bottom:1px solid #f1f5f9; margin-bottom:0; }
+  .ws-title { font-size:16px; font-weight:800; color:#0f172a; }
+  .ws-clear-btn { font-size:11px; color:#94a3b8; background:none; border:none;
+                  cursor:pointer; padding:0; text-decoration:underline; }
+  .ws-clear-btn:hover { color:#dc2626; }
+
+  /* ── AI Input bar — top of feed ─────────────────────────────────────── */
+  .ws-input { padding:10px 0 8px; border-bottom:1px solid #f1f5f9; }
+  .ws-input-wrap {
+    display:flex; align-items:center; gap:8px;
+    border:1.5px solid #e2e8f0; border-radius:14px;
+    background:#f8fafc; padding:8px 12px;
+    transition:border-color .15s, box-shadow .15s, background .15s;
+  }
+  .ws-input-wrap:focus-within {
+    border-color:#6366f1; background:#fff;
+    box-shadow:0 0 0 3px rgba(99,102,241,.08);
+  }
+  .ws-input-wrap input {
+    flex:1; border:none; outline:none; background:transparent;
+    height:24px; font-size:14px; color:#0f172a;
+  }
+  .ws-input-wrap input::placeholder { color:#94a3b8; }
+  .ws-input-wrap input:disabled { color:#94a3b8; }
+  .ws-mode { font-size:11px; font-weight:700; border-radius:8px; padding:3px 8px;
+             white-space:nowrap; transition:all .2s; }
+  .ws-mode-fast { color:#059669; background:#ecfdf5; border:1px solid #a7f3d0; }
+  .ws-mode-deep { color:#7c3aed; background:#f5f3ff; border:1px solid #ddd6fe; }
+  .ws-send {
+    border:none; background:#0f172a; color:#fff; border-radius:10px;
+    padding:6px 14px; font-size:12px; font-weight:700; cursor:pointer;
+    transition:background .15s, opacity .15s;
+  }
+  .ws-send:hover { background:#1e293b; }
+  .ws-send:disabled { opacity:.35; cursor:not-allowed; }
+  .ws-hint {
+    font-size:11px; color:#475569; background:#f0fdf4;
+    border:1px solid #bbf7d0; border-radius:8px; padding:4px 10px;
+    margin-top:5px; display:none;
+  }
+  .ws-hint.visible { display:block; }
+
+  /* ── Feed ────────────────────────────────────────────────────────────── */
+  .ws-feed { overflow:auto; display:grid; gap:7px; padding:10px 2px 4px;
+             align-content:start; }
+
+  /* Base card */
+  .ws-item {
+    border:1px solid #e2e8f0; border-radius:10px; background:#fff;
+    padding:10px 12px; border-left-width:3px;
+  }
+  /* Card type accents — left border colour */
+  .ws-item-morning  { border-left-color:#3b82f6; }  /* blue   — morning brief  */
+  .ws-item-proposal { border-left-color:#f97316; }  /* orange — proposals      */
+  .ws-item-alert    { border-left-color:#ef4444; }  /* red    — breach/cascade */
+  .ws-item-filing   { border-left-color:#10b981; }  /* green  — filings        */
+  .ws-item-agent    { border-left-color:#8b5cf6; }  /* purple — agent runs     */
+  .ws-item-note     { border-left-color:#64748b; }  /* slate  — notes          */
+  .ws-item-ai       { border-left-color:#6366f1; background:#fafafe; } /* indigo — AI */
+  .ws-item-user     { border-left-color:#e2e8f0; background:#f8fafc; }
+  .ws-item-error    { border-left-color:#ef4444; background:#fff7f7; }
+  .ws-item-thinking { border-left-color:#e0f2fe; background:#f0f9ff;
+                      animation:ws-pulse 1.4s ease-in-out infinite; }
+  @keyframes ws-pulse { 0%,100%{opacity:1;} 50%{opacity:.45;} }
+
+  .ws-item h4 { margin:0 0 3px; font-size:13px; font-weight:700; color:#0f172a; }
+  .ws-meta { font-size:11px; color:#94a3b8; }
+  .ws-text { white-space:pre-wrap; font-size:13px; color:#334155; line-height:1.55;
+             margin-top:4px; }
+  .ws-actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .ws-act {
+    border:1px solid #e2e8f0; background:#f8fafc; color:#475569;
+    border-radius:7px; padding:4px 9px; font-size:11px; font-weight:700;
+    cursor:pointer; transition:background .1s;
+  }
+  .ws-act:hover { background:#f1f5f9; color:#0f172a; }
+  .ws-act-primary { background:#0f172a; color:#fff; border-color:#0f172a; }
+  .ws-act-primary:hover { background:#1e293b; }
+  .ws-status { font-size:11px; color:#64748b; margin-top:6px; }
+
+  /* ── Live right panel ────────────────────────────────────────────────── */
+  .ws-right { overflow-y:auto; }
+  .rp-section { margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid #f1f5f9; }
+  .rp-section:last-child { border-bottom:none; margin-bottom:0; padding-bottom:0; }
+  .rp-label { font-size:10px; font-weight:800; color:#94a3b8;
+              letter-spacing:.08em; text-transform:uppercase; margin-bottom:6px; }
+  .rp-mkt-row { display:flex; justify-content:space-between; align-items:center;
+                padding:3px 0; border-bottom:1px solid #f8fafc; }
+  .rp-mkt-row:last-child { border-bottom:none; }
+  .rp-holding-row { display:flex; justify-content:space-between; align-items:center;
+                    padding:3px 0; border-bottom:1px solid #f8fafc; }
+  .rp-holding-row:last-child { border-bottom:none; }
+
+  @media (max-width:1100px) {
+    .ws { grid-template-columns:1fr; }
+    .ws-right { order:3; } .ws-side { order:1; } .ws-main { order:2; min-height:65vh; }
+  }
 </style>
 {% endblock %}
 {% block body %}
 <div class="ws">
+
+  <!-- ── Left sidebar ──────────────────────────────────────────────────── -->
   <aside class="ws-card ws-side">
-    <h3>Channels</h3>
-    {% for c in channels %}
-    <button class="ws-ch {% if c.id == active_channel %}active{% endif %}" data-channel="{{ c.id }}"># {{ c.label }}</button>
-    {% endfor %}
+    <button class="ws-nav-ai" data-channel="ai-agent">Ask AI</button>
+
+    <div class="ws-nav-group">
+      <div class="ws-nav-label">Intelligence</div>
+      <button class="ws-nav-item active" data-channel="all">All Activity</button>
+      <button class="ws-nav-item" data-channel="morning-brief">Morning Brief</button>
+    </div>
+
+    <div class="ws-nav-group">
+      <div class="ws-nav-label">Portfolio</div>
+      <button class="ws-nav-item" data-channel="portfolio">Proposals</button>
+      <button class="ws-nav-item" data-channel="alerts">Alerts</button>
+    </div>
+
+    <div class="ws-nav-group">
+      <div class="ws-nav-label">Research</div>
+      <button class="ws-nav-item" data-channel="filings">Filings</button>
+      <button class="ws-nav-item" data-channel="notes">Notes</button>
+      <button class="ws-nav-item" data-channel="agent-runs">Automation</button>
+    </div>
+
+    <div class="ws-nav-group" style="margin-top:auto;padding-top:12px;border-top:1px solid #f1f5f9;">
+      <a class="ws-nav-item" href="/dashboard/classic" style="text-decoration:none">Markets</a>
+    </div>
   </aside>
 
+  <!-- ── Center: header + AI input + feed ──────────────────────────────── -->
   <section class="ws-card ws-main">
     <div class="ws-head">
-      <div class="ws-title" id="wsTitle"># All</div>
-      <div style="display:flex;align-items:center;gap:12px;">
-        <button class="ws-clear-btn" id="wsClearHistory" style="display:none" type="button">Clear history</button>
-        <a class="btn" href="/dashboard/classic">Classic Dashboard</a>
-      </div>
+      <div class="ws-title" id="wsTitle">All Activity</div>
+      <button class="ws-clear-btn" id="wsClearHistory" style="display:none" type="button">Clear history</button>
     </div>
-    <div class="ws-feed" id="wsFeed"></div>
+
     <form class="ws-input" id="wsForm">
       <div class="ws-input-wrap">
-        <input id="wsText" type="text" placeholder="Ask your portfolio anything…" autocomplete="off" autocorrect="off" spellcheck="false">
+        <input id="wsText" type="text" placeholder="Ask your portfolio anything…"
+               autocomplete="off" autocorrect="off" spellcheck="false">
         <span class="ws-mode ws-mode-fast" id="wsModeBadge">⚡ Fast</span>
         <button class="ws-send" id="wsSend" type="submit">Ask</button>
       </div>
       <div class="ws-hint" id="wsHint"></div>
     </form>
+
+    <div class="ws-feed" id="wsFeed"></div>
   </section>
 
+  <!-- ── Right: live panel ─────────────────────────────────────────────── -->
   <aside class="ws-card ws-right">
-    <h3>Context</h3>
-    <div id="wsContext">
-      <div class="hint">Loading…</div>
-    </div>
+    <div id="wsContext"><div style="font-size:12px;color:#94a3b8">Loading…</div></div>
   </aside>
+
 </div>
 
 <script>
 (() => {
-  const channels     = Array.from(document.querySelectorAll('.ws-ch'));
-  const feedEl       = document.getElementById('wsFeed');
-  const titleEl      = document.getElementById('wsTitle');
-  const formEl       = document.getElementById('wsForm');
-  const textEl       = document.getElementById('wsText');
-  const sendBtn      = document.getElementById('wsSend');
-  const hintEl       = document.getElementById('wsHint');
-  const modeBadge    = document.getElementById('wsModeBadge');
+  const navBtns    = Array.from(document.querySelectorAll('.ws-nav-item, .ws-nav-ai'));
+  const feedEl     = document.getElementById('wsFeed');
+  const titleEl    = document.getElementById('wsTitle');
+  const formEl     = document.getElementById('wsForm');
+  const textEl     = document.getElementById('wsText');
+  const sendBtn    = document.getElementById('wsSend');
+  const hintEl     = document.getElementById('wsHint');
+  const modeBadge  = document.getElementById('wsModeBadge');
   const clearHistBtn = document.getElementById('wsClearHistory');
+
   let active    = 'all';
   let lastItems = [];
   let isSending = false;
   let hintTimer = null;
 
-  // Dynamic mode badge: update as user types
-  textEl.addEventListener('input', () => {
-    const deep = isDeepQuery(textEl.value);
-    modeBadge.textContent  = deep ? '🔍 Deep' : '⚡ Fast';
-    modeBadge.className    = 'ws-mode ' + (deep ? 'ws-mode-deep' : 'ws-mode-fast');
-  });
-
-  // ── helpers ──────────────────────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────────────
   function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  function int(v){ try{ return parseInt(v)||0; }catch(_){ return 0; } }
 
-  // Human-readable timestamp: "2:53 PM" today, "Feb 27, 2:53 PM" otherwise
   function fmtTs(raw) {
     if(!raw) return '';
-    try{
-      const d   = new Date(String(raw));
+    try {
+      const d = new Date(String(raw));
       const now = new Date();
       const time = d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
-      if(d.toDateString() === now.toDateString()) return time;
-      return d.toLocaleDateString([], {month:'short', day:'numeric'}) + ', ' + time;
-    }catch(_){ return String(raw).slice(0,16); }
+      return d.toDateString() === now.toDateString()
+        ? time
+        : d.toLocaleDateString([], {month:'short', day:'numeric'}) + ', ' + time;
+    } catch(_){ return String(raw).slice(0,16); }
   }
 
-  // Bug 4: lightweight markdown → safe HTML (esc() first, then markup — safe for innerHTML)
   function mdRender(raw) {
     let s = esc(raw);
-    // bold **text**
     s = s.replace(/\*\*([^*\n]{1,200})\*\*/g, '<b>$1</b>');
-    // italic *text* (skip if adjacent to another *)
     s = s.replace(/(?<!\*)\*([^*\n]{1,120})\*(?!\*)/g, '<em>$1</em>');
-    // headings ## text (only at line start)
     s = s.replace(/^#{1,3}\s+(.+)$/gm, '<span style="font-weight:800">$1</span>');
-    // bullet lines:  - item  or  • item
     s = s.replace(/^[-•]\s(.+)$/gm, '<span style="display:block;padding-left:14px;position:relative"><span style="position:absolute;left:4px;color:#64748b">•</span>$1</span>');
-    // numbered list: 1. item
     s = s.replace(/^(\d+)\.\s(.+)$/gm, '<span style="display:block;padding-left:14px;position:relative"><span style="position:absolute;left:0;font-weight:700;color:#64748b">$1.</span>$2</span>');
     return s;
   }
 
-  function channelLabel(id){
-    const btn = channels.find(b => b.dataset.channel === id);
-    return btn ? btn.textContent.trim() : `# ${id}`;
+  // Card accent class by type/channel
+  function cardAccent(it) {
+    const kind = String(it.kind || '');
+    const ch   = String(it.channel || '');
+    const meta = String(it.meta || '').toLowerCase();
+    if(it._thinking) return 'ws-item-thinking';
+    if(kind === 'morning_brief') return 'ws-item-morning';
+    if(kind === 'proposal' || ch === 'portfolio') return 'ws-item-proposal';
+    if(kind === 'thesis_breach' || kind === 'cascade_alert' || ch === 'alerts') return 'ws-item-alert';
+    if(kind === 'filing' || ch === 'filings') return 'ws-item-filing';
+    if(kind === 'agent_run' || ch === 'agent-runs') return 'ws-item-agent';
+    if(kind === 'note' || ch === 'notes') return 'ws-item-note';
+    if(ch === 'ai-agent') return meta === 'user' ? 'ws-item-user' : 'ws-item-ai';
+    return '';
   }
+
   function isAssistantMessage(it){
-    return String(it.channel || '') === 'ai-agent' && String(it.meta || '').toLowerCase() === 'assistant';
+    return String(it.channel||'') === 'ai-agent' && String(it.meta||'').toLowerCase() === 'assistant';
   }
   function isErrorText(text){
-    const t = String(text || '').toLowerCase();
+    const t = String(text||'').toLowerCase();
     return t.includes('transport issue') || t.includes('command failed') || t.includes('could not complete') || t.includes('error');
   }
   function smartErrorHelp(text){
-    const t = String(text || '').toLowerCase();
+    const t = String(text||'').toLowerCase();
     if(t.includes('transport issue')) return 'AI transport timeout. Retry once; if repeated, check AI provider key/network.';
     if(t.includes('permission') || t.includes('forbidden')) return 'Permission issue. Verify auth token or service IAM access.';
     return 'Request failed. Retry with a more specific question, e.g. "analyze $CRM margins".';
   }
   function withUiActions(it){
     const base = Array.isArray(it.actions) ? it.actions.slice() : [];
-    if(isAssistantMessage(it) && String(it.text || '').trim()){
+    if(isAssistantMessage(it) && String(it.text||'').trim()){
       base.push({label:'Save to Notes', method:'POST_FORM', url:'/dashboard/ai-agent/save-note'});
       base.push({label:'Discard', method:'CLIENT', action:'discard'});
       if(isErrorText(it.text)){ base.push({label:'Retry', method:'CLIENT', action:'retry'}); }
@@ -182,12 +286,11 @@
     }).join('')}</div>`;
   }
 
-  // Bug 2: loading state helpers
   function setLoading(on) {
     isSending = on;
     textEl.disabled = on;
     sendBtn.disabled = on;
-    sendBtn.textContent = on ? '…' : 'Send';
+    sendBtn.textContent = on ? '…' : 'Ask';
   }
   function showHint(msg, ms = 4000) {
     clearTimeout(hintTimer);
@@ -196,42 +299,37 @@
     hintTimer = setTimeout(() => hintEl.classList.remove('visible'), ms);
   }
 
-  // ── render ────────────────────────────────────────────────────────────────
+  // ── Render feed ──────────────────────────────────────────────────────
   function render(items){
     lastItems = Array.isArray(items) ? items.slice() : [];
     if(!Array.isArray(items) || !items.length){
-      feedEl.innerHTML = '<div class="ws-item"><h4>No items yet</h4><div class="ws-text">No feed data for this channel.</div></div>';
+      feedEl.innerHTML = '<div class="ws-item" style="border-left-color:#e2e8f0"><div class="ws-text" style="color:#94a3b8">No items yet in this view.</div></div>';
       return;
     }
     feedEl.innerHTML = items.map((it, itemIdx) => {
-      // Bug 2: thinking placeholder (not stored in DB, purely local)
       if(it._thinking){
         return `<article class="ws-item ws-item-thinking">
           <h4>Investor AI</h4>
           <div class="ws-text" style="color:#64748b">Thinking…</div>
         </article>`;
       }
-      const isChat = String(it.kind || '') === 'chat_message' || String(it.channel || '') === 'ai-agent';
-      const isUser = isChat && String(it.meta || '').toLowerCase() === 'user';
+      const isChat = String(it.kind||'') === 'chat_message' || String(it.channel||'') === 'ai-agent';
+      const isUser = isChat && String(it.meta||'').toLowerCase() === 'user';
       const isAI   = isAssistantMessage(it);
-      const err    = isAI && isErrorText(it.text || '');
-      const info   = err ? `<div class="ws-status">${esc(smartErrorHelp(it.text || ''))}</div>` : '';
+      const err    = isAI && isErrorText(it.text||'');
+      const info   = err ? `<div class="ws-status">${esc(smartErrorHelp(it.text||''))}</div>` : '';
+      const accent = err ? 'ws-item-error' : cardAccent(it);
 
-      // Meta line: for chat messages show only timestamp (not raw role labels)
       const metaLine = isChat
-        ? `<span style="color:#94a3b8">${fmtTs(it.ts)}</span>`
-        : `${esc(it.meta || '')}${it.ts ? ' · ' + fmtTs(it.ts) : ''}`;
+        ? `<span class="ws-meta">${fmtTs(it.ts)}</span>`
+        : `<span class="ws-meta">${esc(it.meta||'')}${it.ts ? ' · '+fmtTs(it.ts) : ''}</span>`;
 
-      // Bug 4: markdown rendering for assistant messages only
-      const body = isAI ? mdRender(it.text || '') : esc(it.text || '');
+      const body = isAI ? mdRender(it.text||'') : esc(it.text||'');
 
-      // Chat items: style user vs AI differently
-      const itemClass = err ? 'ws-item-error' : (isUser ? 'ws-item-user' : (isAI ? 'ws-item-ai' : ''));
-
-      return `<article class="ws-item ${itemClass}" data-item-idx="${itemIdx}">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
-          <h4 style="margin:0;font-size:13px;${isUser ? 'color:#475569' : ''}">${esc(it.title || 'Update')}</h4>
-          <div class="ws-meta" style="margin:0">${metaLine}</div>
+      return `<article class="ws-item ${accent}" data-item-idx="${itemIdx}">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
+          <h4 style="${isUser?'color:#64748b':''}">${esc(it.title||'Update')}</h4>
+          ${metaLine}
         </div>
         <div class="ws-text">${body}</div>
         ${actionHtml(it).replaceAll('__ITEMIDX__', String(itemIdx))}
@@ -241,12 +339,10 @@
     wireActions();
   }
 
-  // ── deep query detection ─────────────────────────────────────────────────
-  // Returns true when a prompt warrants the real agent loop (invest_cli data access)
-  // vs a fast one-shot LLM call.
+  // ── Deep query detection ─────────────────────────────────────────────
   function isDeepQuery(text) {
     const t = text.toLowerCase();
-    if (/\$[a-z]{1,5}/i.test(text)) return true; // $AAPL / $CRM
+    if (/\$[a-z]{1,5}/i.test(text)) return true;
     const kw = ['filing','10-k','10-q','8-k','earnings','margin','revenue','thesis',
                 'analyz','financials','holdings','portfolio','insider','sec filing',
                 'quarter','annual','cash flow','guidance','beat','miss','eps','fcf',
@@ -254,34 +350,27 @@
                 'performance','results','balance sheet','buyback'];
     return kw.some(k => t.includes(k));
   }
-
   function extractTicker(text) {
     const m = text.match(/\$([A-Za-z]{1,5})/);
     if (m) return m[1].toUpperCase();
-    // bare known tickers (holdings shown in context panel)
     const bare = text.match(/\b(AAPL|MSFT|GOOGL|AMZN|META|NVDA|CRM|HUBS|UNH|IT|IBM|ORCL|QCOM)\b/i);
     return bare ? bare[1].toUpperCase() : '';
   }
 
-  // ── network ───────────────────────────────────────────────────────────────
+  // ── Network ──────────────────────────────────────────────────────────
   async function sendUserMessage(text, channel){
     const fd = new FormData();
-    fd.append('channel', channel);
-    fd.append('text', text);
-    const res = await fetch('/dashboard/message', {method:'POST', body:fd});
-    return res.json();
+    fd.append('channel', channel); fd.append('text', text);
+    return (await fetch('/dashboard/message', {method:'POST', body:fd})).json();
   }
-
   async function sendAgentQuery(text) {
     const fd = new FormData();
     fd.append('text', text);
     const tk = extractTicker(text);
     if (tk) fd.append('ticker', tk);
-    const res = await fetch('/dashboard/agent-query', {method:'POST', body:fd});
-    return res.json();
+    return (await fetch('/dashboard/agent-query', {method:'POST', body:fd})).json();
   }
 
-  // Poll feed every 4s for up to 90s waiting for agent response, then revert to normal 20s
   let _agentPollTimer = null;
   function startAgentPoll() {
     if (_agentPollTimer) return;
@@ -289,10 +378,7 @@
     _agentPollTimer = setInterval(async () => {
       elapsed += 4;
       await loadFeed();
-      if (elapsed >= 90) {
-        clearInterval(_agentPollTimer);
-        _agentPollTimer = null;
-      }
+      if (elapsed >= 90) { clearInterval(_agentPollTimer); _agentPollTimer = null; }
     }, 4000);
   }
 
@@ -308,52 +394,40 @@
     if(method === 'GET'){ window.location.href = url; return; }
     if(method === 'POST_FORM'){
       btn.disabled = true;
-      try{
+      try {
         const fd = new FormData();
-        fd.append('text', String(it.text || ''));
-        fd.append('ticker', String(it.ticker || ''));
+        fd.append('text', String(it.text||'')); fd.append('ticker', String(it.ticker||''));
         await fetch(url, {method:'POST', body:fd, headers:{'Accept':'application/json'}});
         await loadFeed();
-      }catch(_e){ btn.disabled = false; }
+      } catch(_e){ btn.disabled = false; }
       return;
     }
     if(method === 'CLIENT'){
-      if(String(action.action || '') === 'discard'){
-        lastItems.splice(itemIdx, 1);
-        render(lastItems);
-        return;
-      }
-      if(String(action.action || '') === 'retry'){
+      if(String(action.action||'') === 'discard'){ lastItems.splice(itemIdx, 1); render(lastItems); return; }
+      if(String(action.action||'') === 'retry'){
         let retryPrompt = '';
-        for(let i = itemIdx + 1; i < lastItems.length; i += 1){
-          const cand = lastItems[i] || {};
-          if(String(cand.channel || '') === 'ai-agent' && String(cand.meta || '').toLowerCase() === 'user'){
-            retryPrompt = String(cand.text || '').trim();
-            break;
+        for(let i = itemIdx+1; i < lastItems.length; i++){
+          const cand = lastItems[i]||{};
+          if(String(cand.channel||'') === 'ai-agent' && String(cand.meta||'').toLowerCase() === 'user'){
+            retryPrompt = String(cand.text||'').trim(); break;
           }
         }
-        if(!retryPrompt){ retryPrompt = String(textEl.value || '').trim(); }
-        if(!retryPrompt){ return; }
+        if(!retryPrompt) retryPrompt = String(textEl.value||'').trim();
+        if(!retryPrompt) return;
         setLoading(true);
-        try{
-          const data = await sendUserMessage(retryPrompt, 'ai-agent');
-          if(data && data.reply){ await loadFeed(); }
-        } finally { setLoading(false); }
+        try { const data = await sendUserMessage(retryPrompt, 'ai-agent'); if(data && data.reply) await loadFeed(); }
+        finally { setLoading(false); }
         return;
       }
       return;
     }
     btn.disabled = true;
-    try{
-      await fetch(url, {method, headers: {'Accept':'application/json'}});
-      await loadFeed();
-    }catch(_e){ btn.disabled = false; }
+    try { await fetch(url, {method, headers:{'Accept':'application/json'}}); await loadFeed(); }
+    catch(_e){ btn.disabled = false; }
   }
 
   function wireActions(){
-    document.querySelectorAll('.ws-act').forEach(btn => {
-      btn.onclick = () => runAction(btn);
-    });
+    document.querySelectorAll('.ws-act').forEach(btn => { btn.onclick = () => runAction(btn); });
   }
 
   async function loadFeed(){
@@ -362,145 +436,208 @@
     render(data.items || []);
   }
 
-  // ── channel switching ─────────────────────────────────────────────────────
-  function updateClearBtn() {
-    clearHistBtn.style.display = active === 'ai-agent' ? '' : 'none';
+  // ── Sidebar nav ──────────────────────────────────────────────────────
+  const LABELS = {
+    'all':'All Activity','morning-brief':'Morning Brief','alerts':'Alerts',
+    'filings':'Filings','portfolio':'Proposals','notes':'Notes',
+    'agent-runs':'Automation','ai-agent':'AI Chat',
+  };
+
+  function setActiveNav(channel) {
+    navBtns.forEach(b => {
+      const isAiBtn = b.classList.contains('ws-nav-ai');
+      b.classList.remove('active');
+      if(b.dataset.channel === channel) b.classList.add('active');
+    });
+    active = channel;
+    titleEl.textContent = LABELS[channel] || channel;
+    clearHistBtn.style.display = channel === 'ai-agent' ? '' : 'none';
   }
 
-  channels.forEach(btn => {
+  navBtns.forEach(btn => {
     btn.addEventListener('click', () => {
-      channels.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      active = btn.dataset.channel || 'all';
-      titleEl.textContent = channelLabel(active);
-      updateClearBtn();
+      setActiveNav(btn.dataset.channel || 'all');
       loadFeed();
     });
   });
 
+  function switchToAiAgent() {
+    const btn = navBtns.find(b => b.dataset.channel === 'ai-agent');
+    if(btn) btn.click();
+  }
+
   clearHistBtn.addEventListener('click', async () => {
     if(!confirm('Clear all AI Chat history? This cannot be undone.')) return;
     clearHistBtn.disabled = true;
-    try{
+    try {
       await fetch('/dashboard/ai-agent/clear-history', {method:'POST', headers:{'Accept':'application/json'}});
       await loadFeed();
     } finally { clearHistBtn.disabled = false; }
   });
 
-  function switchToAiAgent() {
-    const btn = channels.find(b => b.dataset.channel === 'ai-agent');
-    if(btn) btn.click();
-  }
+  // ── Mode badge ───────────────────────────────────────────────────────
+  textEl.addEventListener('input', () => {
+    const deep = isDeepQuery(textEl.value);
+    modeBadge.textContent = deep ? '🔍 Deep' : '⚡ Fast';
+    modeBadge.className   = 'ws-mode ' + (deep ? 'ws-mode-deep' : 'ws-mode-fast');
+  });
 
-  // ── form submit ───────────────────────────────────────────────────────────
+  // ── Form submit ──────────────────────────────────────────────────────
   formEl.addEventListener('submit', async (e) => {
     e.preventDefault();
     if(isSending) return;
     const text = textEl.value.trim();
     if(!text) return;
-
     textEl.value = '';
-    // Always switch to AI Chat channel so the response is visible
     switchToAiAgent();
-
     const mine = {channel:'ai-agent', title:'You', text, meta:'user', ts:new Date().toISOString()};
-    const deep  = isDeepQuery(text);
+    const deep = isDeepQuery(text);
 
-    if (deep) {
-      // Deep query: agent loop fetches real data. Returns immediately, result appears in feed.
+    if(deep){
       const analyzing = {channel:'ai-agent', title:'Investor AI',
         text:'Analyzing… fetching real portfolio data. Result will appear here shortly.',
         meta:'assistant', _thinking:true, ts:new Date().toISOString()};
-      render([analyzing, mine, ...lastItems].slice(0, 51));
-      try {
-        await sendAgentQuery(text);
-        startAgentPoll(); // speed up feed refresh while agent runs
-      } catch(_e) {
-        const err = {channel:'ai-agent', title:'Investor AI',
-          text:'Could not reach agent. Check network.', meta:'assistant', ts:new Date().toISOString()};
-        render([err, mine, ...lastItems].slice(0, 50));
+      render([analyzing, mine, ...lastItems].slice(0,51));
+      try { await sendAgentQuery(text); startAgentPoll(); }
+      catch(_e){
+        render([{channel:'ai-agent',title:'Investor AI',text:'Could not reach agent. Check network.',
+          meta:'assistant',ts:new Date().toISOString()}, mine, ...lastItems].slice(0,50));
       }
     } else {
-      // Fast path: one-shot LLM for simple questions
       setLoading(true);
-      render([{_thinking:true}, mine, ...lastItems].slice(0, 51));
-      try{
+      render([{_thinking:true}, mine, ...lastItems].slice(0,51));
+      try {
         const data = await sendUserMessage(text, 'ai-agent');
         if(data && data.reply){
-          const bot = {channel:'ai-agent', title:'Investor AI', text:data.reply, meta:'assistant', ts:data.ts || new Date().toISOString()};
-          render([bot, mine, ...lastItems].slice(0, 50));
-        } else {
-          await loadFeed();
-        }
-      } catch(_e) {
-        const bot = {channel:'ai-agent', title:'Investor AI', text:'Could not reach AI. Check network and try again.', meta:'assistant', ts:new Date().toISOString()};
-        render([bot, mine, ...lastItems].slice(0, 50));
-      } finally {
-        setLoading(false);
-      }
+          const bot = {channel:'ai-agent',title:'Investor AI',text:data.reply,meta:'assistant',ts:data.ts||new Date().toISOString()};
+          render([bot, mine, ...lastItems].slice(0,50));
+        } else { await loadFeed(); }
+      } catch(_e){
+        render([{channel:'ai-agent',title:'Investor AI',text:'Could not reach AI. Check network.',
+          meta:'assistant',ts:new Date().toISOString()}, mine, ...lastItems].slice(0,50));
+      } finally { setLoading(false); }
     }
   });
 
   loadFeed();
   setInterval(loadFeed, 20000);
 
-  // ── global top bar interception (dashboard page only) ─────────────────────
-  // If the user types an investment question in the global omnibox (top of page),
-  // route it to the agent instead of the organizer task input.
-  const globalOmnibox     = document.getElementById('globalOmniboxInput');
+  // Global omnibox routing
+  const globalOmnibox = document.getElementById('globalOmniboxInput');
   const globalOmniboxForm = globalOmnibox && globalOmnibox.closest('form');
-  if (globalOmnibox && globalOmniboxForm) {
-    globalOmnibox.placeholder = 'Add a task or note… (investment questions go in the bar below)';
+  if(globalOmnibox && globalOmniboxForm){
+    globalOmnibox.placeholder = 'Add a task or note… (investment questions go in the bar above)';
     globalOmniboxForm.addEventListener('submit', async (e) => {
-      const text = (globalOmnibox.value || '').trim();
-      if (!text) return;
-      // Route to agent if it looks like an investment question
-      if (isDeepQuery(text) || text.includes('?')) {
+      const text = (globalOmnibox.value||'').trim();
+      if(!text) return;
+      if(isDeepQuery(text) || text.includes('?')){
         e.preventDefault();
         globalOmnibox.value = '';
         switchToAiAgent();
-        // Feed the text into the AI Agent channel input and trigger the submit flow
         textEl.value = text;
-        formEl.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        formEl.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true}));
       }
-      // else: let the organizer handle task/note entries as normal
     });
   }
 
-  // ── live right panel ──────────────────────────────────────────────────────
+  // ── Live right panel ─────────────────────────────────────────────────
   async function loadContext(){
-    try{
-      const res = await fetch('/dashboard/context');
+    try {
+      const res = await fetch('/dashboard/context/live');
       const d   = await res.json();
       const el  = document.getElementById('wsContext');
       if(!el) return;
-      const statusColor = (d.last_run_status||'').toLowerCase() === 'completed' ? '#16a34a'
-                        : (d.last_run_status||'').toLowerCase() === 'error'     ? '#dc2626' : '#64748b';
+
+      // Portfolio pulse
+      const p      = (typeof d.portfolio === 'object' && d.portfolio) ? d.portfolio : {};
+      const pct    = parseFloat(p.day_change_pct || 0);
+      const usd    = parseFloat(p.day_change_usd || 0);
+      const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+      const usdStr = (usd >= 0 ? '+$' : '-$') + Math.abs(Math.round(usd)).toLocaleString();
+      const pColor = pct >= 0 ? '#16a34a' : '#dc2626';
+      const pBg    = pct >= 0 ? 'background:#f0fdf4;border:1px solid #bbf7d0' : 'background:#fef2f2;border:1px solid #fecaca';
+      const hcount = int(p.holdings_count) || (Array.isArray(d.holdings) ? d.holdings.length : 0);
+      const best   = (typeof p.best  === 'object' && p.best)  ? p.best  : {};
+      const worst  = (typeof p.worst === 'object' && p.worst) ? p.worst : {};
+      const bTk = esc(best.ticker||'');   const bPct = parseFloat(best.day_pct||0);
+      const wTk = esc(worst.ticker||''); const wPct = parseFloat(worst.day_pct||0);
+      let moversHtml = '';
+      if(bTk || wTk){
+        moversHtml = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">';
+        if(bTk) moversHtml += `<span style="font-size:11px;font-weight:700;color:#16a34a">${bTk} ${bPct>=0?'+':''}${bPct.toFixed(1)}%</span>`;
+        if(wTk && wTk!==bTk) moversHtml += `<span style="font-size:11px;color:#94a3b8">·</span><span style="font-size:11px;font-weight:700;color:#dc2626">${wTk} ${wPct.toFixed(1)}%</span>`;
+        moversHtml += '</div>';
+      }
+      const portfolioHtml = (pct!==0||usd!==0) ? `
+        <div class="rp-section">
+          <div class="rp-label">Portfolio Today</div>
+          <div style="${pBg};border-radius:10px;padding:10px 12px;display:flex;align-items:baseline;gap:10px;">
+            <span style="font-size:22px;font-weight:800;color:${pColor};line-height:1">${pctStr}</span>
+            <span style="font-size:12px;color:#64748b;font-weight:600">${usdStr}</span>
+          </div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:4px">${hcount} holding${hcount===1?'':'s'}</div>
+          ${moversHtml}
+        </div>` : '';
+
+      // Market metrics
+      const mkts = Array.isArray(d.market) ? d.market : [];
+      let mktRows = '';
+      for(const m of mkts){
+        const mp = parseFloat(m.day_pct||0);
+        const col = mp >= 0 ? '#16a34a' : '#dc2626';
+        const arr = mp >= 0 ? '▲' : '▼';
+        const raw = parseFloat(m.price||0);
+        const priceStr = (m.label==='VIX'||m.label==='10Y Yield')
+          ? raw.toFixed(2)
+          : raw>=1000 ? raw.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:0})
+          : raw.toFixed(2);
+        mktRows += `<div class="rp-mkt-row">
+          <span style="font-size:12px;color:#475569;font-weight:600">${esc(m.label)}</span>
+          <span style="font-size:12px;font-weight:700;color:${col}">${esc(priceStr)} <span style="font-size:10px">${arr}${Math.abs(mp).toFixed(1)}%</span></span>
+        </div>`;
+      }
+      const marketHtml = mkts.length ? `
+        <div class="rp-section">
+          <div class="rp-label">Market</div>${mktRows}
+        </div>` : '';
+
+      // System
+      const runStatus  = (d.last_run_status||'').toLowerCase();
+      const statusColor = runStatus==='completed' ? '#16a34a' : runStatus==='error' ? '#dc2626' : '#64748b';
+      const systemHtml = `
+        <div class="rp-section">
+          <div class="rp-label">System</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
+            <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:#15803d">${esc(String(d.open_proposals||0))}</div>
+              <div style="font-size:10px;color:#64748b">Proposals</div>
+            </div>
+            <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:#dc2626">${esc(String(d.breach_alerts||0))}</div>
+              <div style="font-size:10px;color:#64748b">Alerts</div>
+            </div>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:.05em;margin-bottom:2px">Last Agent Run</div>
+          <div style="font-size:12px;font-weight:700;color:${statusColor}">${esc(d.last_run_status||'—')}</div>
+          <div style="font-size:11px;color:#94a3b8">${esc(d.last_run_agent||'')} ${esc(d.last_run_at||'')}</div>
+        </div>`;
+
+      // Holdings
       let holdingsHtml = '';
       if(Array.isArray(d.holdings) && d.holdings.length){
-        holdingsHtml = '<div style="margin-top:10px;font-size:11px;font-weight:700;color:#64748b;letter-spacing:.05em;">HOLDINGS</div>'
-          + d.holdings.map(h => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0;">
-              <span style="font-weight:700">${esc(h.ticker)}</span>
-              <span style="color:#64748b">${esc(h.weight)}</span></div>`).join('');
+        holdingsHtml = `<div class="rp-section">
+          <div class="rp-label">Holdings</div>
+          ${d.holdings.map(h=>`<div class="rp-holding-row">
+            <span style="font-size:12px;font-weight:700;color:#0f172a">${esc(h.ticker)}</span>
+            <span style="font-size:11px;color:#64748b">${esc(h.weight)}</span>
+          </div>`).join('')}
+        </div>`;
       }
-      el.innerHTML = `
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
-          <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px;text-align:center;">
-            <div style="font-size:20px;font-weight:800;color:#15803d">${esc(String(d.open_proposals||0))}</div>
-            <div style="font-size:10px;color:#64748b">Open Proposals</div>
-          </div>
-          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center;">
-            <div style="font-size:20px;font-weight:800;color:#dc2626">${esc(String(d.breach_alerts||0))}</div>
-            <div style="font-size:10px;color:#64748b">Breach Alerts</div>
-          </div>
-        </div>
-        <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:.05em;margin-bottom:4px;">LAST AGENT RUN</div>
-        <div style="font-size:12px;font-weight:700;color:${statusColor}">${esc(d.last_run_status||'—')}</div>
-        <div style="font-size:11px;color:#64748b">${esc(d.last_run_agent||'')} ${esc(d.last_run_at||'')}</div>
-        ${holdingsHtml}
-        <div style="margin-top:12px;font-size:11px;color:#94a3b8;">Type in the bar below to ask AI anything about your portfolio.</div>`;
-    }catch(_){}
+
+      el.innerHTML = portfolioHtml + marketHtml + systemHtml + holdingsHtml;
+    } catch(_){}
   }
+
   loadContext();
   setInterval(loadContext, 60000);
 })();

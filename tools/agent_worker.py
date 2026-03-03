@@ -53,6 +53,7 @@ from app.services.proactive_ai_service import (
     start_agent_run,
 )
 from app.core.filing_text import read_filing_text_any
+from app.schemas.ai_outputs import AgentRunOutput, StructuredAnalysis
 
 # ---------------------------------------------------------------------------
 # Startup guard — ensure all tables exist (safe on repeated calls)
@@ -160,28 +161,60 @@ Do NOT present bull arguments.
 {rules}"""
 
 
+def _build_risk_prompt(ticker: str, today: str, rules: str = "") -> str:
+    return f"""\
+You are a tail-risk analyst. Today is {today}.
+
+Your ONLY job: identify the TOP 3-5 TAIL RISKS that could INVALIDATE the investment thesis
+for {ticker} in a NON-OBVIOUS way. Do NOT rehash the standard bull/bear debate.
+
+Focus on catastrophic or hard-to-reverse scenarios:
+- REGULATORY: pending legislation, antitrust probes, pricing regulation, export controls
+- EXECUTION: management credibility gap, integration failure, platform migration delay
+- BALANCE SHEET: debt covenant breach, refinancing cliff, credit rating downgrade, cash burn
+- MACRO/STRUCTURAL: FX exposure, customer concentration cliff, platform disruption, tariffs
+- COMPETITIVE: silent new entrant, substitute technology, pricing power permanently eroded
+
+Commands available (max 3 — go deep, not broad):
+> invest_app fetch_filings --ticker {ticker} --limit 2
+> invest_app get_financials --ticker {ticker}
+> invest_app get_intel --ticker {ticker}
+> invest_app get_thesis --ticker {ticker}
+> invest_app read_filing --ticker {ticker} --form 10-K [--offset 6000]
+
+Focus on the Risk Factors section of the most recent filing.
+
+Present your risk assessment in <RISK_CASE>...</RISK_CASE> (3-5 bullets max).
+Format each bullet: [RISK TYPE] <specific risk> — likelihood: low|medium|high, magnitude: moderate|severe|catastrophic
+{rules}"""
+
+
 def _build_moderator_prompt(
-    ticker: str, thesis: str, bull_case: str, bear_case: str, today: str, rules: str = ""
+    ticker: str, thesis: str, bull_case: str, bear_case: str, today: str,
+    rules: str = "", risk_case: str = ""
 ) -> str:
+    risk_block = f"\nRISK CASE:\n{risk_case[:1200]}\n" if risk_case.strip() else ""
     return f"""\
 You are the senior portfolio manager. Today is {today}.
-Two analysts have reviewed the same SEC filing for {ticker}.
+Three analysts have reviewed the same SEC filing for {ticker}.
 
 INVESTMENT THESIS:
 {thesis[:400]}
 
 BULL CASE:
-{bull_case[:1500]}
+{bull_case[:1200]}
 
 BEAR CASE:
-{bear_case[:1500]}
-
-Weigh both sides against the original thesis and produce the final verdict.
+{bear_case[:1200]}
+{risk_block}
+Weigh all three perspectives against the original thesis and produce the final verdict.
+The RISK CASE surfaces tail events — weight it heavily if any risk is high-magnitude.
 
 You MUST output both blocks:
 
 <FINAL_REPORT>
 3-5 bullet points: net verdict, key data points, what changed vs. thesis, what to watch.
+If a tail risk was flagged as high/catastrophic, include it as a watch item.
 </FINAL_REPORT>
 <STRUCTURED>
 sentiment: bullish|neutral|bearish
@@ -193,6 +226,8 @@ breach_detail: <1-2 sentences if breach, else "none">
 actual_values: <key numbers, e.g. "revenue +4% vs +12% prior, margin -180bps">
 cascade_tickers: <comma-separated portfolio tickers affected, or "none">
 confidence: <integer 0-100>
+risk_flags: <comma-separated top 2 tail risk types identified, e.g. "regulatory,debt_covenant" or "none">
+risk_severity: low|medium|high|critical
 </STRUCTURED>
 {rules}"""
 
@@ -631,17 +666,20 @@ def _extract_case(text: str, tag: str) -> str:
 def _parse_structured(text: str) -> dict[str, str]:
     """
     Extract <STRUCTURED>...</STRUCTURED> from LLM output.
-    Returns a dict of field -> value.  Safe: never raises.
+    Returns a validated dict of field -> value.  Safe: never raises.
+    Values are run through StructuredAnalysis schema contract:
+    - confidence is normalized to '0'-'100' string
+    - unexpected sentiment/severity/thesis_status emit a WARNING log
     """
     m = re.search(r"<STRUCTURED>(.*?)</STRUCTURED>", text, re.DOTALL)
     if not m:
         return {}
-    result: dict[str, str] = {}
+    raw: dict[str, str] = {}
     for line in m.group(1).splitlines():
         if ":" in line:
             k, _, v = line.partition(":")
-            result[k.strip().lower().replace(" ", "_")] = v.strip()
-    return result
+            raw[k.strip().lower().replace(" ", "_")] = v.strip()
+    return StructuredAnalysis.from_llm(raw).to_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -919,12 +957,19 @@ def _log_run(result: dict, event: dict) -> None:
 
 def _run_perspective(event: dict, role: str, today: str, rules: str = "") -> tuple[str, list[str]]:
     """
-    Run bull or bear single-perspective loop (DEBATE_STEPS max).
+    Run bull, bear, or risk single-perspective loop (DEBATE_STEPS max).
     Returns (case_text, commands_run).
     """
-    ticker   = str(event.get("ticker") or "").strip().upper()
-    end_tag  = "BULL_CASE" if role == "bull" else "BEAR_CASE"
-    sys_prompt = _build_bull_prompt(ticker, today, rules) if role == "bull" else _build_bear_prompt(ticker, today, rules)
+    ticker = str(event.get("ticker") or "").strip().upper()
+    if role == "bull":
+        end_tag    = "BULL_CASE"
+        sys_prompt = _build_bull_prompt(ticker, today, rules)
+    elif role == "risk":
+        end_tag    = "RISK_CASE"
+        sys_prompt = _build_risk_prompt(ticker, today, rules)
+    else:
+        end_tag    = "BEAR_CASE"
+        sys_prompt = _build_bear_prompt(ticker, today, rules)
 
     messages: list[dict] = [
         {"role": "system", "content": sys_prompt},
@@ -963,8 +1008,10 @@ def _run_perspective(event: dict, role: str, today: str, rules: str = "") -> tup
 
 def _run_debate(event: dict, dry_run: bool = False) -> dict:
     """
-    Full Phase 4.1 debate: bull perspective → bear perspective → moderator synthesis.
-    Writes structured output to all three intelligence tables.
+    Full Phase 4.2 debate: bull → bear → risk → moderator synthesis.
+    The risk analyst surfaces tail risks (regulatory, execution, balance sheet, macro).
+    The moderator weighs all three and produces the final verdict + structured output.
+    Writes to all three intelligence tables (thesis breach, cascades, outcome baseline).
     """
     ticker = str(event.get("ticker") or "").strip().upper()
     today  = datetime.date.today().isoformat()
@@ -974,22 +1021,28 @@ def _run_debate(event: dict, dry_run: bool = False) -> dict:
         print(f"[agent_worker] [bull]  {ticker} …")
         bull_case, bull_cmds = _run_perspective(event, "bull", today, rules)
 
-        time.sleep(min(WATCH_DELAY_SEC, 3))  # brief pause between LLM calls
+        time.sleep(min(WATCH_DELAY_SEC, 2))
 
         print(f"[agent_worker] [bear]  {ticker} …")
         bear_case, bear_cmds = _run_perspective(event, "bear", today, rules)
 
+        time.sleep(min(WATCH_DELAY_SEC, 2))
+
+        print(f"[agent_worker] [risk]  {ticker} …")
+        risk_case, risk_cmds = _run_perspective(event, "risk", today, rules)
+
         print(f"[agent_worker] [mod]   {ticker} …")
-        thesis    = _get_thesis_text(ticker)
-        mod_resp  = ask_ai(
-            _build_moderator_prompt(ticker, thesis, bull_case, bear_case, today, rules),
+        thesis   = _get_thesis_text(ticker)
+        mod_resp = ask_ai(
+            _build_moderator_prompt(ticker, thesis, bull_case, bear_case, today, rules,
+                                    risk_case=risk_case),
             context="", mode="smart", temperature=0.1,
         )
 
         report     = _extract_report(mod_resp)
         structured = _parse_structured(mod_resp)
         cross      = structured.get("cascade_tickers", "")
-        all_cmds   = bull_cmds + bear_cmds
+        all_cmds   = bull_cmds + bear_cmds + risk_cmds
 
         _write_thesis_breach(ticker, structured, report, dry_run)
         _write_cascade_alerts(ticker, structured, dry_run)
@@ -999,14 +1052,17 @@ def _run_debate(event: dict, dry_run: bool = False) -> dict:
             _save_agent_memory(ticker, report, structured)
 
         result = {
-            "mode":          "debate",
-            "status":        "ok",
-            "report":        report,
-            "structured":    structured,
-            "bull_case":     bull_case,
-            "bear_case":     bear_case,
-            "steps":         DEBATE_STEPS * 2 + 1,
-            "commands":      all_cmds,
+            "mode":            "debate",
+            "status":          "ok",
+            "report":          report,
+            "structured":      structured,
+            "bull_case":       bull_case,
+            "bear_case":       bear_case,
+            "risk_case":       risk_case,
+            "risk_flags":      structured.get("risk_flags", "none"),
+            "risk_severity":   structured.get("risk_severity", "low"),
+            "steps":           DEBATE_STEPS * 3 + 1,
+            "commands":        all_cmds,
             "cross_portfolio": cross,
         }
         _log_run(result, event)
@@ -1016,7 +1072,8 @@ def _run_debate(event: dict, dry_run: bool = False) -> dict:
         result = {
             "mode": "debate", "status": "error",
             "report": f"Debate error: {exc}",
-            "steps": 0, "commands": [], "cross_portfolio": "", "structured": {},
+            "steps": 0, "commands": [], "cross_portfolio": "",
+            "structured": {}, "risk_case": "", "risk_flags": "none", "risk_severity": "low",
         }
         _log_run(result, event)
         return result
@@ -1139,17 +1196,18 @@ def run(
 
     if not dry_run and run_uid:
         try:
+            _out = AgentRunOutput.from_dict({
+                "ticker":        ticker,
+                "steps":         result.get("steps", 0),
+                "report_chars":  len(result.get("report", "")),
+                "thesis_status": result.get("structured", {}).get("thesis_status", ""),
+                "sentiment":     result.get("structured", {}).get("sentiment", ""),
+                "confidence":    result.get("structured", {}).get("confidence", ""),
+            })
             finish_agent_run(
                 run_uid=run_uid,
                 status=result.get("status", "finished"),
-                output_payload={
-                    "ticker":       ticker,
-                    "steps":        result.get("steps", 0),
-                    "report_chars": len(result.get("report", "")),
-                    "thesis_status": result.get("structured", {}).get("thesis_status", ""),
-                    "sentiment":    result.get("structured", {}).get("sentiment", ""),
-                    "confidence":   result.get("structured", {}).get("confidence", ""),
-                },
+                output_payload=_out.to_dict(),
                 error_text=result.get("report", "")[:500] if result.get("status") == "error" else "",
             )
         except Exception:
@@ -1252,10 +1310,11 @@ def run_query(
 
     if not dry_run and run_uid:
         try:
+            _out = AgentRunOutput.from_dict({"steps": step + 1, "report_chars": len(report)})
             finish_agent_run(
                 run_uid=run_uid,
                 status=status,
-                output_payload={"query": query, "steps": step + 1, "report_chars": len(report)},
+                output_payload={**_out.to_dict(), "query": str(query or "")[:200]},
             )
         except Exception:
             pass

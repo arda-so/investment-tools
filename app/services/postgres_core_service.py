@@ -127,6 +127,7 @@ def pg_pool() -> QueuePool | None:
                 max_overflow=_max_overflow(),
                 recycle=_pool_recycle_sec(),
                 pre_ping=True,
+                timeout=5,  # fail fast if pool exhausted (prevents 30s/call blocking at startup)
             )
         except Exception:
             _PG_POOL = None
@@ -523,12 +524,17 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
                 country TEXT NOT NULL DEFAULT '',
                 industry TEXT NOT NULL DEFAULT '',
                 sector TEXT NOT NULL DEFAULT '',
+                market_cap BIGINT,
                 updated_at TEXT NOT NULL DEFAULT ''
             )
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_cpc_core_name ON company_profile_cache_core(name)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_cpc_core_industry ON company_profile_cache_core(industry)")
+        try:
+            cur.execute("ALTER TABLE company_profile_cache_core ADD COLUMN IF NOT EXISTS market_cap BIGINT")
+        except Exception:
+            pass
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS companies_core (
@@ -1176,6 +1182,24 @@ def ensure_postgres_core_schema() -> dict[str, Any]:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_cascade_core_trigger ON portfolio_cascade_alerts_core(trigger_ticker)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_cascade_core_affected ON portfolio_cascade_alerts_core(affected_ticker)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_cascade_core_status ON portfolio_cascade_alerts_core(status)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_response_feedback (
+                id BIGSERIAL PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                session_id TEXT NOT NULL DEFAULT '',
+                message_id TEXT NOT NULL DEFAULT '',
+                query_text TEXT NOT NULL DEFAULT '',
+                response_text TEXT NOT NULL DEFAULT '',
+                intent TEXT NOT NULL DEFAULT '',
+                rating TEXT NOT NULL DEFAULT '',
+                comment TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_feedback_rating ON ai_response_feedback(rating)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_feedback_session ON ai_response_feedback(session_id)")
 
         con.commit()
         return {"ok": True}
@@ -3282,6 +3306,468 @@ def delete_earnings_transcripts_by_ids_pg(ids: list[int]) -> int:
         con.close()
 
 
+def ensure_earnings_call_artifacts_schema_pg() -> bool:
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ir_source_registry_core (
+                ticker TEXT PRIMARY KEY,
+                ir_home_url TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT '',
+                rss_url TEXT NOT NULL DEFAULT '',
+                last_good_audio_pattern TEXT NOT NULL DEFAULT '',
+                last_good_event_url TEXT NOT NULL DEFAULT '',
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ir_registry_provider_active ON ir_source_registry_core(provider, active)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS earnings_call_artifacts_core (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL DEFAULT '',
+                event_datetime TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                audio_uri TEXT NOT NULL DEFAULT '',
+                audio_source_url TEXT NOT NULL DEFAULT '',
+                audio_checksum TEXT NOT NULL DEFAULT '',
+                transcript_text TEXT NOT NULL DEFAULT '',
+                transcript_source TEXT NOT NULL DEFAULT 'whisper_local',
+                transcript_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                ingest_status TEXT NOT NULL DEFAULT 'pending',
+                idempotency_key TEXT NOT NULL DEFAULT '',
+                meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_eca_core_idempotency ON earnings_call_artifacts_core(idempotency_key)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_eca_core_ticker_event_dt ON earnings_call_artifacts_core(ticker, event_datetime DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_eca_core_status_updated ON earnings_call_artifacts_core(ingest_status, updated_at DESC)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS earnings_call_ingest_runs_core (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL DEFAULT '',
+                event_datetime TEXT NOT NULL DEFAULT '',
+                idempotency_key TEXT NOT NULL DEFAULT '',
+                stage TEXT NOT NULL DEFAULT 'discovery',
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempt INTEGER NOT NULL DEFAULT 0,
+                error_text TEXT NOT NULL DEFAULT '',
+                detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                next_retry_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ecir_core_status_retry ON earnings_call_ingest_runs_core(status, next_retry_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ecir_core_ticker_created ON earnings_call_ingest_runs_core(ticker, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ecir_core_idempotency ON earnings_call_ingest_runs_core(idempotency_key)")
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def upsert_ir_source_registry_pg(
+    *,
+    ticker: str,
+    ir_home_url: str,
+    provider: str,
+    rss_url: str,
+    last_good_audio_pattern: str = "",
+    last_good_event_url: str = "",
+    active: bool = True,
+    meta: dict[str, Any] | None = None,
+) -> bool:
+    _ = ensure_earnings_call_artifacts_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO ir_source_registry_core
+            (ticker, ir_home_url, provider, rss_url, last_good_audio_pattern, last_good_event_url, active, meta_json, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+            ON CONFLICT(ticker) DO UPDATE SET
+              ir_home_url=EXCLUDED.ir_home_url,
+              provider=EXCLUDED.provider,
+              rss_url=EXCLUDED.rss_url,
+              last_good_audio_pattern=EXCLUDED.last_good_audio_pattern,
+              last_good_event_url=EXCLUDED.last_good_event_url,
+              active=EXCLUDED.active,
+              meta_json=EXCLUDED.meta_json,
+              updated_at=EXCLUDED.updated_at
+            """,
+            (
+                tk,
+                str(ir_home_url or "")[:1600],
+                str(provider or "")[:80],
+                str(rss_url or "")[:1600],
+                str(last_good_audio_pattern or "")[:800],
+                str(last_good_event_url or "")[:1600],
+                bool(active),
+                json.dumps(dict(meta or {}), ensure_ascii=True),
+                now,
+                now,
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def get_ir_source_registry_pg(ticker: str) -> dict[str, Any]:
+    _ = ensure_earnings_call_artifacts_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT ticker, ir_home_url, provider, rss_url, last_good_audio_pattern, last_good_event_url, active, meta_json, updated_at
+            FROM ir_source_registry_core
+            WHERE ticker=%s
+            LIMIT 1
+            """,
+            (tk,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return {}
+        return {
+            "ticker": str(r[0] or ""),
+            "ir_home_url": str(r[1] or ""),
+            "provider": str(r[2] or ""),
+            "rss_url": str(r[3] or ""),
+            "last_good_audio_pattern": str(r[4] or ""),
+            "last_good_event_url": str(r[5] or ""),
+            "active": bool(r[6]),
+            "meta": dict(r[7] or {}) if isinstance(r[7], dict) else {},
+            "updated_at": str(r[8] or ""),
+        }
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def upsert_earnings_call_artifact_pg(
+    *,
+    ticker: str,
+    event_datetime: str,
+    title: str,
+    audio_uri: str,
+    audio_source_url: str,
+    audio_checksum: str,
+    transcript_text: str,
+    transcript_source: str,
+    transcript_confidence: float,
+    ingest_status: str,
+    idempotency_key: str,
+    meta: dict[str, Any] | None = None,
+) -> bool:
+    _ = ensure_earnings_call_artifacts_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    key = str(idempotency_key or "").strip()[:200]
+    if not tk or not key:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO earnings_call_artifacts_core
+            (ticker, event_datetime, title, audio_uri, audio_source_url, audio_checksum, transcript_text, transcript_source, transcript_confidence, ingest_status, idempotency_key, meta_json, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+              ticker=EXCLUDED.ticker,
+              event_datetime=EXCLUDED.event_datetime,
+              title=EXCLUDED.title,
+              audio_uri=EXCLUDED.audio_uri,
+              audio_source_url=EXCLUDED.audio_source_url,
+              audio_checksum=EXCLUDED.audio_checksum,
+              transcript_text=EXCLUDED.transcript_text,
+              transcript_source=EXCLUDED.transcript_source,
+              transcript_confidence=EXCLUDED.transcript_confidence,
+              ingest_status=EXCLUDED.ingest_status,
+              meta_json=EXCLUDED.meta_json,
+              updated_at=EXCLUDED.updated_at
+            """,
+            (
+                tk,
+                str(event_datetime or "")[:40],
+                str(title or "")[:320],
+                str(audio_uri or "")[:2000],
+                str(audio_source_url or "")[:2000],
+                str(audio_checksum or "")[:160],
+                str(transcript_text or "")[:220000],
+                str(transcript_source or "whisper_local")[:60],
+                float(transcript_confidence or 0.0),
+                str(ingest_status or "pending")[:32],
+                key,
+                json.dumps(dict(meta or {}), ensure_ascii=True),
+                now,
+                now,
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def insert_earnings_call_ingest_run_pg(
+    *,
+    ticker: str,
+    event_datetime: str,
+    idempotency_key: str,
+    stage: str,
+    status: str,
+    attempt: int = 0,
+    error_text: str = "",
+    detail: dict[str, Any] | None = None,
+    next_retry_at: str = "",
+) -> bool:
+    _ = ensure_earnings_call_artifacts_schema_pg()
+    tk = str(ticker or "").strip().upper()[:16]
+    if not tk:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        stage_norm = str(stage or "discovery")[:40]
+        key_norm = str(idempotency_key or "")[:200]
+        # Debounce active duplicate runs for the same ticker/stage in a short time window.
+        cutoff = (dt.datetime.now() - dt.timedelta(minutes=5)).isoformat()
+        cur.execute(
+            """
+            SELECT id
+            FROM earnings_call_ingest_runs_core
+            WHERE ticker=%s
+              AND stage=%s
+              AND status IN ('queued','retry','processing')
+              AND created_at >= %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (tk, stage_norm, cutoff),
+        )
+        if cur.fetchone():
+            con.commit()
+            return True
+        if key_norm:
+            cur.execute(
+                """
+                SELECT id
+                FROM earnings_call_ingest_runs_core
+                WHERE idempotency_key=%s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (key_norm,),
+            )
+            if cur.fetchone():
+                con.commit()
+                return True
+        cur.execute(
+            """
+            INSERT INTO earnings_call_ingest_runs_core
+            (ticker, event_datetime, idempotency_key, stage, status, attempt, error_text, detail_json, next_retry_at, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)
+            """,
+            (
+                tk,
+                str(event_datetime or "")[:40],
+                key_norm,
+                stage_norm,
+                str(status or "queued")[:24],
+                max(0, int(attempt or 0)),
+                str(error_text or "")[:4000],
+                json.dumps(dict(detail or {}), ensure_ascii=True),
+                str(next_retry_at or "")[:40],
+                now,
+                now,
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+def claim_next_earnings_call_ingest_run_pg(*, worker_id: str) -> dict[str, Any] | None:
+    _ = ensure_earnings_call_artifacts_schema_pg()
+    wid = str(worker_id or "").strip()[:80]
+    if not wid:
+        return None
+    con = pg_connect()
+    if con is None:
+        return None
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            WITH next_run AS (
+                SELECT id
+                FROM earnings_call_ingest_runs_core
+                WHERE status IN ('queued', 'retry')
+                  AND (COALESCE(next_retry_at,'') = '' OR next_retry_at <= %s)
+                ORDER BY created_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE earnings_call_ingest_runs_core r
+            SET
+              status='processing',
+              attempt=attempt+1,
+              updated_at=%s,
+              detail_json=COALESCE(r.detail_json, '{}'::jsonb) || %s::jsonb
+            FROM next_run
+            WHERE r.id = next_run.id
+            RETURNING r.id, r.ticker, r.event_datetime, r.idempotency_key, r.stage, r.status, r.attempt, r.error_text, r.detail_json, r.next_retry_at, r.created_at, r.updated_at
+            """,
+            (now, now, json.dumps({"worker_id": wid, "claimed_at": now}, ensure_ascii=True)),
+        )
+        row = cur.fetchone()
+        if not row:
+            con.commit()
+            return None
+        con.commit()
+        return {
+            "id": int(row[0] or 0),
+            "ticker": str(row[1] or ""),
+            "event_datetime": str(row[2] or ""),
+            "idempotency_key": str(row[3] or ""),
+            "stage": str(row[4] or ""),
+            "status": str(row[5] or ""),
+            "attempt": int(row[6] or 0),
+            "error_text": str(row[7] or ""),
+            "detail": dict(row[8] or {}) if isinstance(row[8], dict) else {},
+            "next_retry_at": str(row[9] or ""),
+            "created_at": str(row[10] or ""),
+            "updated_at": str(row[11] or ""),
+        }
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        con.close()
+
+
+def update_earnings_call_ingest_run_status_pg(
+    *,
+    run_id: int,
+    status: str,
+    error_text: str = "",
+    detail: dict[str, Any] | None = None,
+    next_retry_at: str = "",
+) -> bool:
+    _ = ensure_earnings_call_artifacts_schema_pg()
+    rid = int(run_id or 0)
+    if rid <= 0:
+        return False
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            UPDATE earnings_call_ingest_runs_core
+            SET
+              status=%s,
+              error_text=%s,
+              detail_json=CASE
+                WHEN %s::jsonb = '{}'::jsonb THEN detail_json
+                ELSE COALESCE(detail_json, '{}'::jsonb) || %s::jsonb
+              END,
+              next_retry_at=%s,
+              updated_at=%s
+            WHERE id=%s
+            """,
+            (
+                str(status or "done")[:24],
+                str(error_text or "")[:4000],
+                json.dumps(dict(detail or {}), ensure_ascii=True),
+                json.dumps(dict(detail or {}), ensure_ascii=True),
+                str(next_retry_at or "")[:40],
+                now,
+                rid,
+            ),
+        )
+        ok = int(getattr(cur, "rowcount", 0) or 0) > 0
+        con.commit()
+        return ok
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
 def get_mini_statements_pg(ticker: str) -> dict[str, Any]:
     _ = ensure_mini_statements_schema_pg()
     tk = str(ticker or "").strip().upper()[:16]
@@ -3598,6 +4084,194 @@ def upsert_watchlist_thesis_pg(
                 now,
                 now,
             ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+## ── ai_response_feedback PG helpers ─────────────────────────────────────────
+
+
+def store_ai_response_feedback(
+    session_id: str = "",
+    message_id: str = "",
+    query_text: str = "",
+    response_text: str = "",
+    intent: str = "",
+    rating: str = "",
+    comment: str = "",
+) -> bool:
+    """Store user thumbs-up/down feedback for an AI response."""
+    con = pg_connect()
+    if con is None:
+        return False
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """INSERT INTO ai_response_feedback
+               (created_at, session_id, message_id, query_text, response_text, intent, rating, comment)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                now,
+                str(session_id or "")[:120],
+                str(message_id or "")[:64],
+                str(query_text or "")[:2000],
+                str(response_text or "")[:4000],
+                str(intent or "")[:120],
+                str(rating or "")[:20],
+                str(comment or "")[:500],
+            ),
+        )
+        con.commit()
+        return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        con.close()
+
+
+## ── memory_compact_core PG helpers ──────────────────────────────────────────
+
+
+def list_compact_memories_pg(
+    query: str = "",
+    bucket: str = "",
+    limit: int = 30,
+    include_archived: bool = False,
+) -> list[dict]:
+    """Read compact memories from Postgres memory_compact_core table."""
+    con = pg_connect()
+    if con is None:
+        return []
+    q = str(query or "").strip().lower()
+    b = str(bucket or "").strip().lower()
+    lim = max(1, min(300, int(limit or 30)))
+    try:
+        cur = con.cursor()
+        clauses = ["1=1"]
+        vals: list = []
+        if not include_archived:
+            clauses.append("status='active'")
+        if b:
+            clauses.append("bucket=%s")
+            vals.append(b[:32])
+        if q:
+            like = "%" + q[:120] + "%"
+            clauses.append("(LOWER(value) LIKE %s OR LOWER(memory_key) LIKE %s)")
+            vals.extend([like, like])
+        sql = (
+            "SELECT id, memory_key, bucket, value, source, reliability, reuse_count, "
+            "status, conflict_of, created_at, updated_at, last_used_at "
+            "FROM memory_compact_core WHERE " + " AND ".join(clauses) + " ORDER BY updated_at DESC LIMIT %s"
+        )
+        vals.append(lim)
+        cur.execute(sql, tuple(vals))
+        out: list[dict] = []
+        for r in cur.fetchall() or []:
+            rel = float(r[5] or 0.0)
+            reuse = int(r[6] or 0)
+            # Freshness scoring (mirrors SQLite path)
+            fw = 0.5
+            try:
+                ua = str(r[10] or "")
+                if ua:
+                    ts = dt.datetime.fromisoformat(ua.replace("Z", "+00:00").split("+")[0])
+                    age_days = max(0.0, (dt.datetime.now() - ts).total_seconds() / 86400.0)
+                    if age_days <= 7:
+                        fw = 1.0
+                    elif age_days <= 30:
+                        fw = 0.85
+                    elif age_days <= 90:
+                        fw = 0.65
+                    else:
+                        fw = 0.45
+            except Exception:
+                pass
+            score = rel * fw * (1.0 + min(2.0, reuse / 4.0))
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "memory_key": str(r[1] or ""),
+                    "bucket": str(r[2] or ""),
+                    "value": str(r[3] or ""),
+                    "source": str(r[4] or ""),
+                    "reliability": rel,
+                    "reuse_count": reuse,
+                    "status": str(r[7] or ""),
+                    "conflict_of": str(r[8] or ""),
+                    "created_at": str(r[9] or ""),
+                    "updated_at": str(r[10] or ""),
+                    "last_used_at": str(r[11] or ""),
+                    "score": float(score),
+                }
+            )
+        out.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def upsert_compact_memory_pg(
+    bucket: str,
+    value: str,
+    *,
+    source: str = "chat_turn",
+    reliability: float = 0.7,
+    memory_key: str = "",
+    status: str = "active",
+    conflict_of: str = "",
+) -> bool:
+    """Write a compact memory to Postgres memory_compact_core table."""
+    import hashlib
+
+    b = str(bucket or "preference").strip().lower()[:32] or "preference"
+    v = str(value or "").strip()[:2000]
+    if not v:
+        return False
+    k = str(memory_key or "").strip().lower()[:64]
+    if not k:
+        base = f"{b}::{v.lower()}"
+        k = hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()[:40]
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    rel = max(0.0, min(1.0, float(reliability or 0.0)))
+    st = str(status or "active").strip().lower()
+    if st not in {"active", "archived", "pending_confirmation"}:
+        st = "active"
+    cf_of = str(conflict_of or "").strip()[:64]
+    con = pg_connect()
+    if con is None:
+        return False
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO memory_compact_core
+                (id, memory_key, bucket, value, source, reliability, reuse_count, status, conflict_of, created_at, updated_at, last_used_at)
+            VALUES (
+                COALESCE((SELECT id FROM memory_compact_core WHERE memory_key=%s), (SELECT COALESCE(MAX(id),0)+1 FROM memory_compact_core)),
+                %s, %s, %s, %s, %s, 1, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT(memory_key) DO UPDATE SET
+                value=EXCLUDED.value, bucket=EXCLUDED.bucket, source=EXCLUDED.source,
+                reliability=EXCLUDED.reliability, status=EXCLUDED.status, conflict_of=EXCLUDED.conflict_of,
+                reuse_count=memory_compact_core.reuse_count+1, updated_at=EXCLUDED.updated_at
+            """,
+            (k, k, b, v, str(source or "chat_turn")[:64], rel, st, cf_of, now, now, now),
         )
         con.commit()
         return True

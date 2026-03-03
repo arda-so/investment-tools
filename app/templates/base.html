@@ -296,6 +296,9 @@
       margin-top:8px; font-size:11px; color:#64748b;
     }
     .msg-status{margin-top:8px; font-size:11px; color:#64748b;}
+    .ai-feedback{margin-top:6px; display:flex; gap:6px; align-items:center;}
+    .ai-fb-btn{background:none; border:1px solid #d4deea; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:14px; opacity:0.5; transition:opacity 0.15s, border-color 0.15s;}
+    .ai-fb-btn:hover{opacity:1; border-color:#94a3b8;}
     .msg-audit{margin-top:8px; border:1px solid #d4deea; border-radius:10px; background:#f8fafc; overflow:hidden;}
     .msg-audit summary{
       list-style:none; cursor:pointer; padding:8px 10px; font-size:11px; font-weight:700; color:#334155;
@@ -484,7 +487,7 @@
     .ai-worker-badge.down .ai-worker-dot{ background:#ef4444; }
     .ai-ghost{
       position:fixed;
-      right:18px;
+      right:58px;
       top:14px;
       width:10px;height:10px;border-radius:999px;
       z-index:10003;
@@ -523,6 +526,60 @@
     .section-title{margin:0 0 8px 0;font-size:18px;letter-spacing:.01em;}
     .subtle{font-size:12px;color:var(--muted);}
     @media (min-width:1020px) { .grid { grid-template-columns:1fr 1fr; } .grid3{grid-template-columns:1fr 1fr 1fr;} }
+    /* Hide old omnibox bar — replaced by quick-capture modal */
+    .global-omnibox-wrap { display:none !important; }
+    /* Quick-capture button in nav */
+    .qc-nav-btn {
+      flex-shrink:0;
+      width:32px; height:32px;
+      background:rgba(255,255,255,.12);
+      color:#fff;
+      border:1px solid rgba(255,255,255,.2);
+      border-radius:8px;
+      font-size:20px; font-weight:300; line-height:1;
+      cursor:pointer;
+      display:flex; align-items:center; justify-content:center;
+      transition:background .15s;
+    }
+    .qc-nav-btn:hover { background:rgba(255,255,255,.24); }
+    /* Quick-capture modal */
+    .qc-overlay {
+      display:none; position:fixed; inset:0; z-index:9500;
+      background:rgba(15,23,42,.5); backdrop-filter:blur(3px);
+    }
+    .qc-modal {
+      position:absolute; top:28%; left:50%; transform:translateX(-50%);
+      background:#fff; border-radius:16px;
+      box-shadow:0 24px 60px rgba(15,23,42,.22);
+      padding:20px 20px 16px; width:500px; max-width:calc(100vw - 32px);
+    }
+    .qc-modal-label {
+      font-size:10px; font-weight:800; color:#94a3b8;
+      letter-spacing:.08em; text-transform:uppercase; margin-bottom:10px;
+    }
+    .qc-modal-input {
+      width:100%; height:48px; box-sizing:border-box;
+      border:1.5px solid #e2e8f0; border-radius:10px;
+      padding:0 14px; font-size:15px; font-weight:500; color:#0f172a;
+      background:#f8fafc; outline:none;
+    }
+    .qc-modal-input:focus {
+      border-color:#6366f1; background:#fff;
+      box-shadow:0 0 0 3px rgba(99,102,241,.12);
+    }
+    .qc-modal-footer {
+      display:flex; justify-content:space-between; align-items:center; margin-top:10px;
+    }
+    .qc-modal-hint { font-size:11px; color:#94a3b8; }
+    .qc-modal-hint kbd {
+      background:#f1f5f9; border:1px solid #e2e8f0; border-radius:4px;
+      padding:1px 5px; font-size:10px; font-family:monospace;
+    }
+    .qc-modal-save {
+      background:#0f172a; color:#fff; border:none; border-radius:8px;
+      padding:8px 20px; font-size:13px; font-weight:700; cursor:pointer;
+    }
+    .qc-modal-save:hover { background:#1e293b; }
   </style>
   {% block head_extra %}{% endblock %}
 </head>
@@ -531,14 +588,15 @@
     <aside class="global-nav">
       <h3 class="global-brand">Investor OS v2</h3>
       <a class="global-link" href="/dashboard" data-nav="dashboard"><span class="global-link-label">Dashboard</span></a>
+      <a class="global-link" href="/day" data-nav="day"><span class="global-link-label">Organizer</span></a>
       <a class="global-link" href="/my_universe" data-nav="universe"><span class="global-link-label">Portfolio / Universe</span></a>
       <a class="global-link" href="/company_file" data-nav="company"><span class="global-link-label">Company Search</span></a>
-      <a class="global-link" href="/organizer" data-nav="organizer"><span class="global-link-label">Organizer</span></a>
       <a class="global-link" href="/observability" data-nav="settings"><span class="global-link-label">Settings</span></a>
       <div class="global-search-wrap">
         <input id="globalSearchInput" class="global-search-input" type="text" autocomplete="off" placeholder="Search app, companies, tasks, notes, reports...">
         <div id="globalSearchResults" class="global-search-results"></div>
       </div>
+      <button id="qcOpenBtn" class="qc-nav-btn" type="button" title="Quick capture — note or task (N)">+</button>
     </aside>
     <main class="global-main">
       <div class="wrap">
@@ -565,6 +623,27 @@
   </div>
   <div id="aiToastWrap" class="ai-toast-wrap"></div>
   <div id="aiGhost" class="ai-ghost idle" aria-hidden="true"></div>
+
+  <!-- Quick-capture modal -->
+  <div id="qcOverlay" class="qc-overlay">
+    <div class="qc-modal">
+      <div class="qc-modal-label">Quick Capture</div>
+      <input id="qcInput" class="qc-modal-input" type="text"
+             placeholder="Note or task… e.g. Review AAPL margins, buy NVDA thesis"
+             autocomplete="off" autocorrect="off" spellcheck="false">
+      <div style="display:flex;gap:6px;margin-top:8px;">
+        <button class="qc-domain-btn active" data-domain="work" type="button"
+                style="border:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8;border-radius:999px;padding:3px 11px;font-size:11px;font-weight:700;cursor:pointer;">Work</button>
+        <button class="qc-domain-btn" data-domain="personal" type="button"
+                style="border:1px solid var(--border);background:var(--panel2);color:var(--muted);border-radius:999px;padding:3px 11px;font-size:11px;font-weight:700;cursor:pointer;">Personal</button>
+      </div>
+      <div class="qc-modal-footer">
+        <span class="qc-modal-hint"><kbd>Enter</kbd> to save &nbsp;·&nbsp; <kbd>Esc</kbd> to close</span>
+        <button id="qcSaveBtn" class="qc-modal-save" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div id="cmdkOverlay">
     <div id="cmdkCard">
       <div class="ai-head" id="cmdkDragBar">
@@ -1340,50 +1419,83 @@
       function renderThread(){
         if(!result) return;
         var renderRows = aiThread.slice(-Math.max(1, Number(maxRenderMessages || 40)));
-        var html = renderRows.map(function(m, idx){
-          if(m.role==='user'){
-            return '<div class=\"msg-row msg-user\"><div class=\"bubble md\"><p>'+esc(m.text)+'</p></div></div>';
-          }
-          var kind = classifyKind(m);
-          var rowClass = 'msg-row msg-ai ' + kind;
-          var out = '<div class=\"'+rowClass+'\"><div class=\"msg-avatar\">✨</div><div class=\"bubble md\">'+renderAssistantBody(m);
-          out += renderActionCard(m);
-          out += richCard(m);
-          if(Array.isArray(m.citations) && m.citations.length){
-            out += '<div class=\"msg-meta\">' + m.citations.map(function(c){
-              var u = String((c && c.url) || '#');
-              var l = String((c && c.label) || 'source');
-              return '<a class=\"ai-chip\" style=\"text-decoration:none;margin-right:6px;\" href=\"' + esc(u) + '\">' + esc(l) + '</a>';
-            }).join('') + '</div>';
-          }
-          var sid = 'audit_' + String(m._id || idx);
-          if(Array.isArray(m.traces) && m.traces.length){
-            out += renderAuditTrail(m, sid, '>_ View ' + String(m.traces.length) + ' Agent Steps');
-          } else {
-            out += '<div class=\"msg-status\">' + esc(statusLabel(m)) + '</div>';
-          }
-          out += renderApprovalControls(m);
-          if(String(m.intent||'') === 'portfolio_interview' && String(m.status||'') === 'needs_input'){
-            out += '<div class="iv-controls">';
-            out += '<button class="iv-btn" type="button" data-iv-action="skip">Skip</button>';
-            out += '<button class="iv-btn" type="button" data-iv-action="later">Answer Later</button>';
-            out += '<button class="iv-btn" type="button" data-iv-action="why">Why this matters</button>';
-            out += '</div>';
-          }
-          if(String(m.status||'') === 'needs_clarification' && String(m.text||'').toLowerCase().indexOf('choose one: open now, cancel, or back to chat') >= 0){
-            out += '<div class="rec-controls">';
-            out += '<button class="rec-btn" type="button" data-rec-action="open_now">Open now</button>';
-            out += '<button class="rec-btn" type="button" data-rec-action="cancel">Cancel</button>';
-            out += '<button class="rec-btn" type="button" data-rec-action="back_chat">Back to chat</button>';
-            out += '</div>';
-          }
-          out += '</div></div>';
-          return out;
-        }).join('');
+        var html = renderRows.map(function(m, idx){ return buildMessageHTML(m, idx); }).join('');
         showResult(html);
         showEmpty(!aiThread.length);
         result.scrollTop = result.scrollHeight;
-        result.querySelectorAll('[data-iv-action]').forEach(function(btn){
+        // Attach listeners to all message nodes
+        _attachMessageListeners(result);
+        saveState();
+      }
+      /* ── Build HTML for a single message (shared by renderThread & appendMessage) ── */
+      function buildMessageHTML(m, idx){
+        if(m.role==='user'){
+          return '<div class="msg-row msg-user"><div class="bubble md"><p>'+esc(m.text)+'</p></div></div>';
+        }
+        var kind = classifyKind(m);
+        var rowClass = 'msg-row msg-ai ' + kind;
+        var out = '<div class="'+rowClass+'"><div class="msg-avatar">✨</div><div class="bubble md">'+renderAssistantBody(m);
+        out += renderActionCard(m);
+        out += richCard(m);
+        if(Array.isArray(m.citations) && m.citations.length){
+          out += '<div class="msg-meta">' + m.citations.map(function(c){
+            var u = String((c && c.url) || '#');
+            var l = String((c && c.label) || 'source');
+            return '<a class="ai-chip" style="text-decoration:none;margin-right:6px;" href="' + esc(u) + '">' + esc(l) + '</a>';
+          }).join('') + '</div>';
+        }
+        var sid = 'audit_' + String(m._id || idx);
+        if(Array.isArray(m.traces) && m.traces.length){
+          out += renderAuditTrail(m, sid, '>_ View ' + String(m.traces.length) + ' Agent Steps');
+        } else {
+          out += '<div class="msg-status">' + esc(statusLabel(m)) + '</div>';
+        }
+        out += renderApprovalControls(m);
+        if(String(m.intent||'') === 'portfolio_interview' && String(m.status||'') === 'needs_input'){
+          out += '<div class="iv-controls">';
+          out += '<button class="iv-btn" type="button" data-iv-action="skip">Skip</button>';
+          out += '<button class="iv-btn" type="button" data-iv-action="later">Answer Later</button>';
+          out += '<button class="iv-btn" type="button" data-iv-action="why">Why this matters</button>';
+          out += '</div>';
+        }
+        if(String(m.status||'') === 'needs_clarification' && String(m.text||'').toLowerCase().indexOf('choose one: open now, cancel, or back to chat') >= 0){
+          out += '<div class="rec-controls">';
+          out += '<button class="rec-btn" type="button" data-rec-action="open_now">Open now</button>';
+          out += '<button class="rec-btn" type="button" data-rec-action="cancel">Cancel</button>';
+          out += '<button class="rec-btn" type="button" data-rec-action="back_chat">Back to chat</button>';
+          out += '</div>';
+        }
+        // Thumbs up/down feedback (only for substantive AI responses)
+        var fbStatus = String(m.status||'').toLowerCase();
+        if(fbStatus !== 'needs_input' && fbStatus !== 'needs_clarification' && fbStatus !== 'needs_confirmation' && fbStatus !== 'error'){
+          out += '<div class="ai-feedback" data-fb-id="'+esc(String(m._id||idx))+'">'
+            + '<button class="ai-fb-btn" type="button" data-fb="up" title="Good answer">&#x1F44D;</button>'
+            + '<button class="ai-fb-btn" type="button" data-fb="down" title="Bad answer">&#x1F44E;</button>'
+            + '</div>';
+        }
+        out += '</div></div>';
+        return out;
+      }
+      /* ── Incremental append: add ONE message without re-rendering all ── */
+      function appendMessage(m){
+        if(!result) return;
+        var idx = aiThread.length - 1;
+        var html = buildMessageHTML(m, idx);
+        var wrapper = document.createElement('div');
+        wrapper.innerHTML = html;
+        var node = wrapper.firstChild;
+        if(!node) return;
+        result.style.display = 'block';
+        result.appendChild(node);
+        showEmpty(false);
+        // Attach event listeners only on the new node
+        _attachMessageListeners(node);
+        result.scrollTop = result.scrollHeight;
+        saveState();
+      }
+      /* ── Attach interactive listeners to a single message DOM node ── */
+      function _attachMessageListeners(root){
+        root.querySelectorAll('[data-iv-action]').forEach(function(btn){
           btn.addEventListener('click', function(){
             var a = String(btn.getAttribute('data-iv-action') || '');
             if(a === 'skip'){
@@ -1401,7 +1513,7 @@
             }
           });
         });
-        result.querySelectorAll('[data-rec-action]').forEach(function(btn){
+        root.querySelectorAll('[data-rec-action]').forEach(function(btn){
           btn.addEventListener('click', function(){
             var a = String(btn.getAttribute('data-rec-action') || '');
             if(!input || !form){ return; }
@@ -1410,7 +1522,7 @@
             if(a === 'back_chat'){ input.value = 'back to chat'; form.requestSubmit(); return; }
           });
         });
-        result.querySelectorAll('[data-msg-action]').forEach(function(btn){
+        root.querySelectorAll('[data-msg-action]').forEach(function(btn){
           btn.addEventListener('click', function(){
             var a = String(btn.getAttribute('data-msg-action') || '');
             if(!input || !form){ return; }
@@ -1420,7 +1532,45 @@
             if(a === 'retry_last'){ input.value = pendingQuery || 'retry last request'; form.requestSubmit(); return; }
           });
         });
-        result.querySelectorAll('[data-task-complete]').forEach(function(btn){
+        root.querySelectorAll('.ai-fb-btn').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            var rating = String(btn.getAttribute('data-fb') || '');
+            var container = btn.closest('.ai-feedback');
+            if(!container) return;
+            var fbId = String(container.getAttribute('data-fb-id') || '');
+            // Find the message in aiThread
+            var msg = null;
+            var prevMsg = null;
+            for(var i = aiThread.length - 1; i >= 0; i--){
+              if(String(aiThread[i]._id || '') === fbId){
+                msg = aiThread[i];
+                if(i > 0 && aiThread[i-1].role === 'user'){ prevMsg = aiThread[i-1]; }
+                break;
+              }
+            }
+            // Visual feedback
+            container.querySelectorAll('.ai-fb-btn').forEach(function(b){ b.style.opacity='0.3'; });
+            btn.style.opacity='1';
+            btn.style.fontWeight='bold';
+            // Store to backend
+            var sid = '';
+            try{ sid = String(localStorage.getItem(sessionKey) || ''); }catch(_e){}
+            fetch('/ai/feedback', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({
+                rating: rating,
+                session_id: sid,
+                message_id: fbId,
+                query_text: prevMsg ? String(prevMsg.text || '') : '',
+                response_text: msg ? String(msg.text || '').slice(0, 2000) : '',
+                intent: msg ? String(msg.intent || '') : ''
+              })
+            }).catch(function(){});
+            showToast(rating === 'up' ? 'Thanks for the feedback!' : 'Noted — I\'ll try to do better.');
+          });
+        });
+        root.querySelectorAll('[data-task-complete]').forEach(function(btn){
           btn.addEventListener('click', async function(){
             var card = btn.closest('.task-card');
             var todoId = String(btn.getAttribute('data-task-id') || '').trim();
@@ -1452,7 +1602,43 @@
             }
           });
         });
-        saveState();
+      }
+      /* ── Typewriter: progressively reveal last AI message word by word ── */
+      var _twTimer = null;
+      function typewriterLastMessage(){
+        if(_twTimer){ clearInterval(_twTimer); _twTimer = null; }
+        var bubbles = result ? result.querySelectorAll('.msg-ai .bubble') : [];
+        if(!bubbles.length) return;
+        var bubble = bubbles[bubbles.length - 1];
+        var fullHTML = bubble.innerHTML;
+        // Split on word boundaries, keeping tags intact
+        var tokens = fullHTML.match(/<[^>]+>|[^\s<]+|\s+/g);
+        if(!tokens || tokens.length < 6){
+          // Too short to animate — just show it
+          return;
+        }
+        var shown = 0;
+        bubble.innerHTML = '';
+        bubble.style.minHeight = '2em';
+        var speed = 18; // ms per token (~55 words/sec)
+        _twTimer = setInterval(function(){
+          if(shown >= tokens.length){
+            clearInterval(_twTimer);
+            _twTimer = null;
+            bubble.innerHTML = fullHTML; // restore full HTML for links/formatting
+            bubble.style.minHeight = '';
+            result.scrollTop = result.scrollHeight;
+            return;
+          }
+          // Batch: reveal 2-3 tokens per frame for natural speed
+          var batch = Math.min(3, tokens.length - shown);
+          var chunk = '';
+          for(var b = 0; b < batch; b++){
+            chunk += tokens[shown++];
+          }
+          bubble.insertAdjacentHTML('beforeend', chunk);
+          result.scrollTop = result.scrollHeight;
+        }, speed);
       }
       function forceFocusInput(){
         if(!input) return;
@@ -1878,6 +2064,8 @@
           }
         }
         if(e.key==='Escape'){
+          var _qcOv = document.getElementById('qcOverlay');
+          if(_qcOv && _qcOv.style.display==='block'){ return; } // handled by qc listener
           if(ov && ov.style.display==='block'){ closeCmdk(); }
           else { window.location.assign('/dashboard'); }
         }
@@ -2071,14 +2259,15 @@
             if(/next time|from now on|be like that|always/i.test(q)){
               userPrefs = q;
             }
-            aiThread.push({role:'user', text:(q || ('[Image] ' + (pendingImageName || 'uploaded image'))), _id: Date.now()});
-            renderThread();
+            var userMsg = {role:'user', text:(q || ('[Image] ' + (pendingImageName || 'uploaded image'))), _id: Date.now()};
+            aiThread.push(userMsg);
+            appendMessage(userMsg);
             var naturalPhase2 = parsePhase2Prompt(q);
             if(naturalPhase2){
               var sidNatural = String(localStorage.getItem(sessionKey) || 'phase2-chat');
               var queued = await runPhase2MapReduceFromPrompt(naturalPhase2, sidNatural);
               if(queued && queued.ok){
-                aiThread.push({
+                var mrMsg = {
                   role:'assistant',
                   intent:'map_reduce_enqueue',
                   status:'ok',
@@ -2089,8 +2278,9 @@
                   citations:[],
                   redirect_url:'',
                   _id: Date.now() + 1
-                });
-                renderThread();
+                };
+                aiThread.push(mrMsg);
+                appendMessage(mrMsg);
                 setState('done');
                 awaitingAssistant = false;
                 voiceSubmitting = false;
@@ -2232,7 +2422,8 @@
               _id: Date.now() + 1
             };
             aiThread.push(assistantMsg);
-            renderThread();
+            appendMessage(assistantMsg);
+            typewriterLastMessage();
             setState('done');
             awaitingAssistant = false;
             voiceSubmitting = false;
@@ -2265,7 +2456,7 @@
             awaitingAssistant = false;
             voiceSubmitting = false;
             var errText = String((_e && _e.message) || 'unknown_error').replace(/_/g, ' ');
-            aiThread.push({
+            var errMsg = {
               role:'assistant',
               intent:'error',
               status:'error',
@@ -2275,8 +2466,9 @@
               citations:[],
               redirect_url:'',
               _id: Date.now()+2
-            });
-            renderThread();
+            };
+            aiThread.push(errMsg);
+            appendMessage(errMsg);
             setState('failed');
             maybeResumeVoiceLoop(260);
             return;
@@ -2352,15 +2544,113 @@
       try{
         var p = String(window.location.pathname || '');
         var key = 'dashboard';
-        if(p.indexOf('/my_universe') === 0){ key = 'universe'; }
+        if(p === '/day' || p.indexOf('/workspace') === 0 || p.indexOf('/organizer') === 0){ key = 'day'; }
+        else if(p.indexOf('/my_universe') === 0){ key = 'universe'; }
         else if(p.indexOf('/company_file') === 0){ key = 'company'; }
-        else if(p.indexOf('/organizer') === 0){ key = 'organizer'; }
         else if(p.indexOf('/observability') === 0){ key = 'settings'; }
         document.querySelectorAll('.global-link').forEach(function(el){
           el.classList.toggle('active', String(el.getAttribute('data-nav') || '') === key);
         });
       }catch(_e){}
     })();
+
+  // ── Quick-capture modal ────────────────────────────────────────────────
+  (function(){
+    var overlay  = document.getElementById('qcOverlay');
+    var qcInput  = document.getElementById('qcInput');
+    var saveBtn  = document.getElementById('qcSaveBtn');
+    var openBtn  = document.getElementById('qcOpenBtn');
+    if(!overlay || !qcInput) return;
+
+    // Domain toggle state
+    var _qcDomain = 'work';
+    overlay.querySelectorAll('.qc-domain-btn').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        _qcDomain = btn.getAttribute('data-domain') || 'work';
+        overlay.querySelectorAll('.qc-domain-btn').forEach(function(b){
+          var isActive = b === btn;
+          b.classList.toggle('active', isActive);
+          if(isActive){
+            b.style.borderColor='#bfdbfe'; b.style.background='#eff6ff'; b.style.color='#1d4ed8';
+          } else {
+            b.style.borderColor=''; b.style.background=''; b.style.color='';
+          }
+        });
+      });
+    });
+
+    function openCapture(){
+      overlay.style.display = 'block';
+      requestAnimationFrame(function(){ qcInput.focus(); qcInput.select(); });
+    }
+    function closeCapture(){
+      overlay.style.display = 'none';
+      qcInput.value = '';
+    }
+    function saveCapture(){
+      var text = String(qcInput.value || '').trim();
+      if(!text) return;
+      var domain = _qcDomain || 'work';
+      // Extract ticker from text
+      var tm = text.match(/\$([A-Za-z]{1,5})\b/);
+      var ticker = tm ? tm[1].toUpperCase() : '';
+      // Dual-write: organizer (existing) + workspace_os (new)
+      var body1 = new FormData();
+      body1.append('entry', text);
+      var body2 = new FormData();
+      body2.append('kind', 'action');
+      body2.append('domain', domain);
+      body2.append('title', text);
+      body2.append('ticker', ticker);
+      body2.append('source', 'manual');
+      body2.append('created_by', 'user');
+      Promise.all([
+        fetch('/organizer/omnibox-add', { method:'POST', body:body1 }),
+        fetch('/workspace/record', { method:'POST', body:body2 }),
+      ]).then(function(){
+          closeCapture();
+          var tw = document.getElementById('aiToastWrap');
+          if(tw){
+            var t = document.createElement('div');
+            t.className = 'ai-toast';
+            t.textContent = 'Saved ✓';
+            tw.appendChild(t);
+            setTimeout(function(){ t.classList.add('visible'); }, 10);
+            setTimeout(function(){ t.classList.remove('visible'); setTimeout(function(){ t.remove(); }, 300); }, 2000);
+          }
+        })
+        .catch(function(){ closeCapture(); });
+    }
+
+    if(openBtn){ openBtn.addEventListener('click', openCapture); }
+    if(saveBtn){ saveBtn.addEventListener('click', saveCapture); }
+
+    // Enter to save inside the input
+    qcInput.addEventListener('keydown', function(e){
+      if(e.key === 'Enter'){ e.preventDefault(); saveCapture(); }
+      if(e.key === 'Escape'){ e.preventDefault(); closeCapture(); }
+    });
+
+    // Click overlay backdrop (not modal) to close
+    overlay.addEventListener('click', function(e){
+      if(e.target === overlay){ closeCapture(); }
+    });
+
+    // N key (when not in editable field) opens capture
+    document.addEventListener('keydown', function(e){
+      if(overlay.style.display === 'block'){
+        if(e.key === 'Escape'){ closeCapture(); }
+        return;
+      }
+      var tag = String((document.activeElement && document.activeElement.tagName) || '').toLowerCase();
+      var editable = document.activeElement && document.activeElement.isContentEditable;
+      if(tag === 'input' || tag === 'textarea' || tag === 'select' || editable) return;
+      if(!e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'n'){
+        e.preventDefault();
+        openCapture();
+      }
+    }, true);
+  })();
   </script>
 </body>
 </html>

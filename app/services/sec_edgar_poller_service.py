@@ -472,11 +472,15 @@ def poll_ticker(
 def poll_and_ingest_tickers(
     tickers: list[str] | None = None,
     forms: tuple[str, ...] = POLL_FORMS,
+    held_only: bool = False,
 ) -> dict[str, Any]:
     """
     Main entry point for the SEC poll background loop.
     If tickers=None, polls portfolio + watchlist (held) AND signal_universe_core (universe-only).
     Universe-only filings route to cascade analysis instead of proposal generation.
+
+    held_only=True  → skip signal universe (for 15-min edgar-watch job; reduces scope to
+                       held/watchlist tickers only for low-latency detection runs)
     """
     ensure_poller_schema()
 
@@ -484,11 +488,15 @@ def poll_and_ingest_tickers(
         from app.services.proactive_ai_service import _read_scope_tickers
         portfolio, watchlist, _bluechips = _read_scope_tickers()
         held = set(portfolio) | set(watchlist)
-        universe = get_signal_universe_tickers()
-        # Universe-only = in signal universe but NOT already in held (avoid double-processing)
-        universe_only = universe - held
-        scope_held = sorted(held)
-        scope_universe = sorted(universe_only)
+        if held_only:
+            scope_held = sorted(held)
+            scope_universe = []
+        else:
+            universe = get_signal_universe_tickers()
+            # Universe-only = in signal universe but NOT already in held (avoid double-processing)
+            universe_only = universe - held
+            scope_held = sorted(held)
+            scope_universe = sorted(universe_only)
     else:
         # Explicit list: treat all as held
         scope_held = [_safe_ticker(t) for t in tickers if _safe_ticker(t)]

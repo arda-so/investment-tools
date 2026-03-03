@@ -52,6 +52,7 @@ from app.services.portfolio_memory_service import (
     query_report_facts,
     record_decision,
     record_portfolio_transaction,
+    render_morning_brief_bullets,
     upsert_watchlist_thesis,
 )
 from app.services.reports_service import list_reports
@@ -1367,12 +1368,10 @@ def dashboard_report_panels() -> dict[str, object]:
     morning_points: list[str] = []
     morning_updated_fallback = "-"
     # Cloud/Postgres-first source of truth: morning_briefs_core.
-    # File parsing is retained only as fallback for local/offline workflows.
     try:
         cached = get_cached_morning_brief()
-        b = [str(x or "").strip() for x in list((cached or {}).get("bullets") or []) if str(x or "").strip()]
-        if b:
-            morning_points = b[:7]
+        morning_points = render_morning_brief_bullets(cached, max_bullets=7, allow_runtime_fallback=True)
+        if morning_points:
             asof = str((cached or {}).get("asof") or "").strip()
             if asof:
                 try:
@@ -1381,16 +1380,6 @@ def dashboard_report_panels() -> dict[str, object]:
                     morning_updated_fallback = asof[:5] if len(asof) >= 5 else asof
     except Exception:
         pass
-    # Fallback: if Postgres cache has fewer than 3 bullets (portfolio-only / degraded),
-    # supplement with bullets parsed directly from the morning intelligence file.
-    if len(morning_points) < 3 and morning_txt:
-        file_points = _extract_morning_points(morning_txt, limit=7)
-        seen = {p.lower() for p in morning_points}
-        for fp in file_points:
-            if fp.lower() not in seen:
-                morning_points.append(fp)
-                seen.add(fp.lower())
-        morning_points = morning_points[:7]
 
     both_rows = _extract_section_table_rows(
         appendix_txt,
@@ -2657,6 +2646,12 @@ def dashboard_workspace_feed(channel: str = "all", limit: int = 50):
 @router.get("/dashboard/context")
 def dashboard_workspace_context():
     return JSONResponse({"ok": True, **get_workspace_context()})
+
+
+@router.get("/dashboard/context/live")
+def dashboard_workspace_context_live():
+    from app.services.workspace_feed_service import get_workspace_live_panel  # noqa: PLC0415
+    return JSONResponse({"ok": True, **get_workspace_live_panel()})
 
 
 @router.post("/dashboard/message")

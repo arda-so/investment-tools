@@ -5619,26 +5619,69 @@ def _wants_financial_tooling(query: str) -> bool:
         "revenue", "margin", "gross", "debt", "cash flow", "fcf", "cagr",
         "balance sheet", "income statement", "valuation", "equity",
         "compare", "comparison", "peer", "trend", "historical", "5 year", "5y",
+        # News / headline triggers
+        "news", "headline", "why is", "why are", "what happened",
+        # Proposal / AI suggestions triggers
+        "proposal", "suggestion", "recommendation", "alert", "proactive",
+        # Portfolio triggers
+        "portfolio", "holdings", "position", "exposure",
     }
     return any(k in low for k in keys)
 
 
 def _execute_financial_tool_call(name: str, args: dict[str, object], context: dict | None = None) -> dict[str, object]:
-    if str(name or "").strip() != "fetch_historical_financials":
-        return {"ok": False, "error": "unknown_tool", "name": str(name or "")}
-    t = str((args or {}).get("ticker") or "").strip().upper()
-    metric = str((args or {}).get("metric") or "all").strip().lower()
-    years_raw = (args or {}).get("years")
-    refresh_raw = (args or {}).get("refresh")
-    if not t:
-        cands = _extract_query_tickers_for_tools("", context=context, max_items=1)
-        t = str(cands[0] or "").strip().upper() if cands else ""
-    try:
-        years = int(years_raw) if years_raw is not None else 5
-    except Exception:
-        years = 5
-    refresh = bool(refresh_raw) if isinstance(refresh_raw, bool) else (str(refresh_raw or "").strip().lower() in {"1", "true", "yes", "on"})
-    return fetch_historical_financials(ticker=t, metric=metric or "all", years=years, refresh=refresh)
+    nm = str(name or "").strip()
+    a = dict(args or {})
+
+    # ── fetch_historical_financials ──────────────────────────────────────
+    if nm == "fetch_historical_financials":
+        t = str(a.get("ticker") or "").strip().upper()
+        metric = str(a.get("metric") or "all").strip().lower()
+        years_raw = a.get("years")
+        refresh_raw = a.get("refresh")
+        if not t:
+            cands = _extract_query_tickers_for_tools("", context=context, max_items=1)
+            t = str(cands[0] or "").strip().upper() if cands else ""
+        try:
+            years = int(years_raw) if years_raw is not None else 5
+        except Exception:
+            years = 5
+        refresh = bool(refresh_raw) if isinstance(refresh_raw, bool) else (str(refresh_raw or "").strip().lower() in {"1", "true", "yes", "on"})
+        return fetch_historical_financials(ticker=t, metric=metric or "all", years=years, refresh=refresh)
+
+    # ── search_news ──────────────────────────────────────────────────────
+    if nm == "search_news":
+        try:
+            from app.services.web_search_service import search_news as _search_news
+            query = str(a.get("query") or "").strip()
+            if not query:
+                return {"ok": False, "error": "missing required parameter: query"}
+            max_results = max(1, min(10, int(a.get("max_results") or 6)))
+            results = _search_news(query, max_results=max_results)
+            return {"ok": True, "query": query, "count": len(results), "results": results}
+        except Exception as exc:
+            return {"ok": False, "error": f"search_news failed: {exc}"}
+
+    # ── get_portfolio_summary ────────────────────────────────────────────
+    if nm == "get_portfolio_summary":
+        try:
+            summary = get_live_portfolio_summary()
+            return {"ok": True, "data": dict(summary or {})}
+        except Exception as exc:
+            return {"ok": False, "error": f"get_portfolio_summary failed: {exc}"}
+
+    # ── get_proposals ────────────────────────────────────────────────────
+    if nm == "get_proposals":
+        try:
+            from app.services.proactive_ai_service import list_action_proposals
+            status = str(a.get("status") or "open").strip().lower()
+            limit = max(1, min(20, int(a.get("limit") or 8)))
+            proposals = list_action_proposals(status=status, limit=limit)
+            return {"ok": True, "status": status, "count": len(proposals), "proposals": proposals}
+        except Exception as exc:
+            return {"ok": False, "error": f"get_proposals failed: {exc}"}
+
+    return {"ok": False, "error": "unknown_tool", "name": nm}
 
 
 def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResult:
@@ -5647,9 +5690,29 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
     hist = ctx.get("history") if isinstance(ctx.get("history"), list) else []
     prefs = str(ctx.get("user_prefs") or "").strip()
     user_profile = str(ctx.get("user_profile") or "").strip()
-    compact_mem = summarize_compact_memory_for_prompt(query=q, limit=14)
-    semantic_mem = _semantic_memory_lines(q, limit=8)
-    active_rules = summarize_active_rules_for_prompt(query=q, limit=10)
+    # Parallel fetch: 4 independent DB/memory queries at once
+    with cf.ThreadPoolExecutor(max_workers=4) as _pool:
+        _f_compact = _pool.submit(summarize_compact_memory_for_prompt, query=q, limit=14)
+        _f_semantic = _pool.submit(_semantic_memory_lines, q, limit=8)
+        _f_rules = _pool.submit(summarize_active_rules_for_prompt, query=q, limit=10)
+        _f_knowledge = _pool.submit(retrieve_app_knowledge, q, limit=10)
+        try:
+            compact_mem = _f_compact.result(timeout=3)
+        except Exception:
+            compact_mem = ""
+        try:
+            semantic_mem = _f_semantic.result(timeout=3)
+        except Exception:
+            semantic_mem = []
+        try:
+            active_rules = _f_rules.result(timeout=3)
+        except Exception:
+            active_rules = ""
+        try:
+            hits = _f_knowledge.result(timeout=3)
+        except Exception:
+            hits = []
+    knowledge_ctx = format_app_knowledge(hits)
     runtime = ctx.get("runtime") if isinstance(ctx.get("runtime"), dict) else {}
     runtime_txt = ""
     if runtime:
@@ -5687,11 +5750,14 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
             if not tx:
                 continue
             fact_lines.append(f"- {tk + ': ' if tk else ''}{tx[:180]}")
+        macro_snap_txt = str(runtime.get("macro_snapshot_text") or "").strip()
         runtime_txt = (
             f"Runtime context:\n- page={page_line}\n- portfolio={live_line}\n{ev_lines}\n"
             + ("Recent transactions:\n" + "\n".join(tx_lines) + "\n" if tx_lines else "")
             + ("Report facts:\n" + "\n".join(fact_lines) if fact_lines else "")
         )
+        if macro_snap_txt:
+            runtime_txt += f"\nLive market prices (as of now):\n{macro_snap_txt}"
         if company_ctx:
             cc_ticker = str(company_ctx.get("ticker") or "").strip().upper()
             val = company_ctx.get("valuation") if isinstance(company_ctx.get("valuation"), dict) else {}
@@ -5703,8 +5769,6 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                 f"- valuation: ytd={val.get('ytd_return')} m12={val.get('m12_return')} y5={val.get('y5_return')}\n"
                 f"- financial_years={yrs}\n"
             )
-    hits = retrieve_app_knowledge(q, limit=10)
-    knowledge_ctx = format_app_knowledge(hits)
     hist_lines: list[str] = []
     for h in hist[-36:]:
         if not isinstance(h, dict):
@@ -5715,6 +5779,46 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
             continue
         hist_lines.append(f"{role.upper()}: {txt[:300]}")
     hist_block = "\n".join(hist_lines) if hist_lines else "(none)"
+
+    # ── Token budget: estimate prompt size and trim if too large ──
+    # Rough estimator: 1 token ≈ 4 chars (conservative for English text)
+    _TOKEN_BUDGET = 28000  # leave room for output + system in a 32K context
+    def _est_tokens(s: str) -> int:
+        return max(1, len(s) // 4)
+    _sections = {
+        "compact_mem": compact_mem or "",
+        "semantic_mem": "\n".join(semantic_mem) if semantic_mem else "",
+        "active_rules": active_rules or "",
+        "hist_block": hist_block,
+        "runtime_txt": runtime_txt or "",
+        "knowledge_ctx": knowledge_ctx or "",
+        "news_txt": str(ctx.get("live_news_text") or ""),
+    }
+    _base_tokens = _est_tokens(q) + 1200  # query + system contract + labels
+    _total = _base_tokens + sum(_est_tokens(v) for v in _sections.values())
+    if _total > _TOKEN_BUDGET:
+        # Trim sections in priority order (lowest priority trimmed first)
+        _trim_order = ["knowledge_ctx", "semantic_mem", "active_rules", "compact_mem", "hist_block", "news_txt", "runtime_txt"]
+        for _sk in _trim_order:
+            if _total <= _TOKEN_BUDGET:
+                break
+            _sv = _sections[_sk]
+            _sv_tokens = _est_tokens(_sv)
+            if _sv_tokens <= 50:
+                continue
+            _allowed = max(200, int((_TOKEN_BUDGET - _total + _sv_tokens) * 4))
+            _sections[_sk] = _sv[:_allowed] + "\n...(trimmed for context budget)"
+            _total = _base_tokens + sum(_est_tokens(v) for v in _sections.values())
+        # Update local vars from trimmed sections
+        compact_mem = _sections["compact_mem"]
+        semantic_mem = [_sections["semantic_mem"]] if _sections["semantic_mem"] else []
+        active_rules = _sections["active_rules"]
+        hist_block = _sections["hist_block"]
+        runtime_txt = _sections["runtime_txt"]
+        knowledge_ctx = _sections["knowledge_ctx"]
+        if _sections["news_txt"] != str(ctx.get("live_news_text") or ""):
+            ctx["live_news_text"] = _sections["news_txt"]
+
     if ask_ai is not None:
         try:
             system_contract = (
@@ -5741,6 +5845,16 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                 "Output style:\n"
                 "- Plain, human language. No raw JSON unless explicitly requested.\n"
                 "- Prefer short paragraphs or compact bullets.\n"
+                "Live data policy:\n"
+                "- LIVE MARKET SNAPSHOT contains real-time prices fetched just now via yfinance APIs.\n"
+                "- RECENT NEWS HEADLINES are live web search results fetched in the last few minutes.\n"
+                "- When these sections are present, YOU MUST use them. Quote specific prices, % changes, and headline details.\n"
+                "- Do NOT say 'I don't have access to real-time data' when LIVE MARKET SNAPSHOT is shown.\n"
+                "- For 'why is X up/down' queries: LEAD with the actual price + % move from the snapshot, THEN explain why using news headlines.\n"
+                "- Example format: 'Natural Gas is at $3.08 (+2.83% today). The move appears driven by [headline summary].'\n"
+                "- Synthesize the news headlines into a direct, factual answer — not generic education.\n"
+                "- Never give textbook explanations when you have live data. Be specific and data-driven.\n"
+                "- If headlines don't explain the move, say what you can confirm from prices and note news is limited.\n"
             )
             prompt = (
                 f"{system_contract}\n"
@@ -5766,7 +5880,12 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                 f"{hist_block}\n\n"
                 "RUNTIME CONTEXT:\n"
                 f"{runtime_txt or '(none)'}\n\n"
-                "APP KNOWLEDGE:\n"
+                + (
+                    "RECENT NEWS HEADLINES (live, fetched now):\n"
+                    f"{ctx.get('live_news_text', '')}\n\n"
+                    if ctx.get("live_news_text") else ""
+                )
+                + "APP KNOWLEDGE:\n"
                 f"{knowledge_ctx}\n\n"
                 "USER QUERY:\n"
                 f"{q}"
@@ -5791,7 +5910,38 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                             },
                             "required": ["ticker"],
                         },
-                    }
+                    },
+                    {
+                        "name": "search_news",
+                        "description": "Search latest financial news headlines for a topic, ticker, or event. Returns recent headlines with source and summary.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "Search query, e.g. 'NVDA earnings' or 'oil prices Iran'"},
+                                "max_results": {"type": "integer", "description": "Max headlines to return (1-10)"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                    {
+                        "name": "get_portfolio_summary",
+                        "description": "Get user's current portfolio: all held tickers, shares, cost basis, current value, day change, total P&L. Use when user asks about holdings or portfolio status.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "get_proposals",
+                        "description": "Get recent AI-generated action proposals (buy/sell/trim/hedge recommendations) for the user's portfolio. Shows proactive alerts and suggestions.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "status": {"type": "string", "description": "Filter by status: open, executed, dismissed, debate_rejected"},
+                                "limit": {"type": "integer", "description": "Max proposals to return (1-20)"},
+                            },
+                        },
+                    },
                 ]
                 first = ask_ai_with_tools(
                     prompt,
@@ -5861,6 +6011,9 @@ def _ask_llm_fallback(query: str, context: dict | None = None) -> AICommandResul
                 merged += "\n\nUser preference:\n" + prefs
             if runtime_txt:
                 merged += "\n\n" + runtime_txt
+            live_news = str(ctx.get("live_news_text") or "").strip()
+            if live_news:
+                merged += "\n\nRECENT NEWS HEADLINES (live):\n" + live_news
             fut = ex.submit(ask_agent, merged, 6)
             out = str(fut.result(timeout=LLM_FALLBACK_TIMEOUT_SEC) or "").strip()
     except cf.TimeoutError:
@@ -6015,12 +6168,65 @@ def run_ai_command(query: str, context: dict | None = None) -> AICommandResult:
     )
 
     ctx = context or {}
+    pending = str(ctx.get("pending_query") or "").strip()
+    last_intent = str(ctx.get("last_intent") or "").strip()
+
+    # ── Heuristic fast-path: skip 2 LLM classifier calls for obvious questions ──
+    # This saves ~3s for simple questions while producing IDENTICAL answer quality
+    # because _ask_llm_fallback (the answer generator) is the same code path.
+    _low_fp = _norm(q_raw)
+    _questionish_fp = bool(
+        re.search(r"\b(what|why|how|which|who|when|vs|versus|better|status|today|explain|summarize|compare)\b", _low_fp)
+        or _low_fp.endswith("?")
+    )
+    _actionish_fp = bool(
+        re.match(r"^\s*(add|remove|delete|open|go to|navigate|take me|create|save|update|set|sync|show)\b", _low_fp)
+    )
+    _is_simple_question = (
+        _questionish_fp
+        and not _actionish_fp
+        and not _is_confirmation_text(q_raw)
+        and not _looks_like_correction(q_raw)
+        and not _looks_like_fresh_command(q_raw)
+        and not pending
+        and last_intent not in {"portfolio_interview"}
+    )
+    if _is_simple_question:
+        # Fast-path: data-first handlers still get a chance, then straight to LLM answer
+        fast_traces = [
+            {"step": "trace.id", "detail": trace_id},
+            {"step": "fast_path", "detail": "heuristic_question_skip"},
+        ]
+        hist_res = _intent_trade_history_period(q_raw) or _intent_position_why(q_raw) or _intent_portfolio_change_log(q_raw)
+        if hist_res is not None:
+            hist_res = _apply_confidence_policy(hist_res)
+            hist_res.traces = fast_traces + list(hist_res.traces or []) + [{"step": "route", "detail": "fast_path_data_override"}] + _runtime_trace_entries()
+            log_system_event(
+                service="AICommand",
+                status=hist_res.status,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                message=f"{hist_res.intent}: {hist_res.message[:180]}",
+                trace_id=trace_id,
+            )
+            _log_action(query, hist_res)
+            return hist_res
+        chat_res = _ask_llm_fallback(q_raw, ctx)
+        chat_res = _apply_confidence_policy(chat_res)
+        chat_res.traces = fast_traces + list(chat_res.traces or []) + [{"step": "route", "detail": "fast_path_chat"}] + _runtime_trace_entries()
+        log_system_event(
+            service="AICommand",
+            status=chat_res.status,
+            latency_ms=(time.perf_counter() - t0) * 1000.0,
+            message=f"{chat_res.intent}: {chat_res.message[:180]}",
+            trace_id=trace_id,
+        )
+        _log_action(query, chat_res)
+        return chat_res
+    # ── End heuristic fast-path ──
+
     understanding = _understand_user_turn(q_raw, ctx)
     if understanding.intent_class == "correction" and last_intent != "portfolio_interview":
         _learn_from_correction(q_raw)
-
-    pending = str(ctx.get("pending_query") or "").strip()
-    last_intent = str(ctx.get("last_intent") or "").strip()
     interrupt_intent, interrupt_conf, interrupt_by = _manager_detect_interrupt(q_raw, ctx)
     # Conversation-first: normal questions should not be trapped by yes/no worker follow-ups.
     skip_worker_handlers = bool(interrupt_intent and interrupt_intent != "portfolio_interview")

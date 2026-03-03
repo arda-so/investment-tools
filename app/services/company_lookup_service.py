@@ -90,6 +90,35 @@ def _save_market_cap_cache(data: dict[str, dict[str, object]]) -> None:
         return
 
 
+def _save_market_caps_pg(tk_vals: dict[str, int]) -> None:
+    """Persist fetched market caps to Postgres so they survive container restarts."""
+    if not tk_vals:
+        return
+    try:
+        from app.services.postgres_core_service import pg_connect  # noqa: PLC0415
+        con = pg_connect()
+        if con is None:
+            return
+        try:
+            cur = con.cursor()
+            for tk, val in tk_vals.items():
+                if not tk or val <= 0:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO company_profile_cache_core(ticker, market_cap, updated_at)
+                    VALUES (%s, %s, NOW()::text)
+                    ON CONFLICT(ticker) DO UPDATE SET market_cap = EXCLUDED.market_cap
+                    """,
+                    (tk, int(val)),
+                )
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
 def _cache_value_valid(item: dict[str, object]) -> float:
     try:
         mcap = float(item.get("market_cap") or 0.0)
@@ -225,15 +254,18 @@ def market_cap_map(tickers: list[str] | None = None, *, live_fetch: bool = True)
         return out
 
     fetched_any = False
+    pg_vals: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=min(12, len(missing))) as ex:
         for tk, val in ex.map(_fetch_market_cap_live, missing):
             if not tk or val <= 0:
                 continue
             out[tk] = _format_market_cap(val)
             cache[tk] = {"market_cap": float(val), "asof": _now_utc().isoformat()}
+            pg_vals[tk] = int(val)
             fetched_any = True
     if fetched_any:
         _save_market_cap_cache(cache)
+        _save_market_caps_pg(pg_vals)
     return out
 
 
@@ -261,15 +293,18 @@ def prefetch_market_cap_async(tickers: list[str] | None = None, *, limit: int = 
     def _worker(batch: list[str]) -> None:
         local_cache = _load_market_cap_cache()
         updated = False
+        pg_vals: dict[str, int] = {}
         try:
             with ThreadPoolExecutor(max_workers=min(10, len(batch))) as ex:
                 for tk, val in ex.map(_fetch_market_cap_live, batch):
                     if not tk or val <= 0:
                         continue
                     local_cache[tk] = {"market_cap": float(val), "asof": _now_utc().isoformat()}
+                    pg_vals[tk] = int(val)
                     updated = True
             if updated:
                 _save_market_cap_cache(local_cache)
+                _save_market_caps_pg(pg_vals)
         finally:
             with _MCAP_PREFETCH_LOCK:
                 for tk in batch:

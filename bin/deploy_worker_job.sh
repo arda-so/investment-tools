@@ -61,12 +61,21 @@ if secret_exists GROQ_API_KEY; then
   SECRETS="${SECRETS},GROQ_API_KEY=GROQ_API_KEY:latest"
 fi
 
-ENV_VARS="APP_ENV=cloud,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1,AI_WORKER_ONCE=1,AI_TIMEOUT_SECONDS=${AI_TIMEOUT_SECONDS:-45},AI_MAX_TOKENS=${AI_MAX_TOKENS:-1200},AI_ENABLE_RESPONSE_CACHE=${AI_ENABLE_RESPONSE_CACHE:-1},AI_CACHE_TTL_SEC=${AI_CACHE_TTL_SEC:-300},AI_CACHE_MAX_ENTRIES=${AI_CACHE_MAX_ENTRIES:-256}"
+ENV_VARS="APP_ENV=cloud,CORE_DB_BACKEND=postgres,CORE_DB_GUARD_ENFORCE=1,CORE_DB_STRICT_POSTGRES=1,PHASE2_POSTGRES_ENABLED=1,AI_QUEUE_BACKEND=postgres,AI_QUEUE_STRICT_PROD=1,AI_WORKER_ONCE=1,AI_TIMEOUT_SECONDS=${AI_TIMEOUT_SECONDS:-45},AI_MAX_TOKENS=${AI_MAX_TOKENS:-1200},AI_ENABLE_RESPONSE_CACHE=${AI_ENABLE_RESPONSE_CACHE:-1},AI_CACHE_TTL_SEC=${AI_CACHE_TTL_SEC:-300},AI_CACHE_MAX_ENTRIES=${AI_CACHE_MAX_ENTRIES:-256},ENABLE_IR_AUDIO_TRANSCRIBE=${ENABLE_IR_AUDIO_TRANSCRIBE:-1}"
 if [ -n "${CLOUD_FILES_BUCKET:-}" ]; then
   ENV_VARS="${ENV_VARS},CLOUD_FILES_BUCKET=${CLOUD_FILES_BUCKET}"
 fi
 if [ -n "${CLOUD_FILES_PREFIX:-}" ]; then
   ENV_VARS="${ENV_VARS},CLOUD_FILES_PREFIX=${CLOUD_FILES_PREFIX}"
+fi
+if [ -n "${WHISPER_PYTHON_BIN:-}" ]; then
+  ENV_VARS="${ENV_VARS},WHISPER_PYTHON_BIN=${WHISPER_PYTHON_BIN}"
+fi
+if [ -n "${WHISPER_MODEL:-}" ]; then
+  ENV_VARS="${ENV_VARS},WHISPER_MODEL=${WHISPER_MODEL}"
+fi
+if [ -n "${WHISPER_LANGUAGE:-}" ]; then
+  ENV_VARS="${ENV_VARS},WHISPER_LANGUAGE=${WHISPER_LANGUAGE}"
 fi
 
 CONN_NAME="${PROJECT_ID}:${REGION}:${DB_INSTANCE}"
@@ -259,11 +268,23 @@ deploy_job "investor-daily-job" \
   "/app/bin/run_daily_job" "" \
   "0 18 * * 1-5" "2400s"
 
+# Earnings transcript ingest queue drainer: every 2 minutes (cloud-only, no local terminal needed)
+deploy_job "investor-earnings-ingest-job" \
+  "/app/bin/run_earnings_ingest_worker" "--once" \
+  "*/2 * * * *" "900s"
+
 # Universe registry refresh: daily (SEC company tickers/exchanges to core tables)
 UNIVERSE_SYNC_SCHEDULE="${UNIVERSE_SYNC_SCHEDULE:-15 3 * * *}"
 deploy_job "investor-universe-sync-job" \
   "/app/bin/run_universe_sync_job" "" \
   "${UNIVERSE_SYNC_SCHEDULE}" "1800s"
+
+# EDGAR near-real-time watch: every 15 min — polls held/watchlist tickers for new SEC filings
+# and fires run_event_driven_monitor() so proposals surface within ~15 min of SEC filing.
+# Timeout 600s (10 min) allows LLM calls in run_event_driven_monitor to complete.
+deploy_job "investor-edgar-watch-job" \
+  "/app/bin/run_edgar_watch" "" \
+  "*/15 * * * *" "600s"
 
 echo ""
 echo "All jobs deployed."

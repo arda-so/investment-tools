@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import re
-import urllib.parse
-import urllib.request
 from typing import Any
 
-from app.core.filing_text import resolve_filing_path, read_filing_text
-from app.core.market import finnhub_key
+from app.core.filing_text import read_filing_text_any
 from app.services.postgres_core_service import (
     pg_connect,
     query_report_facts_pg,
@@ -27,7 +23,6 @@ except Exception:
 # For "earnings release from SEC filings", keep this strict to release-style filings.
 # 10-Q/10-K signals are handled separately via quarterly facts.
 _RELEASE_FORMS = {"8-K", "6-K"}
-_HTTP_TIMEOUT = 20
 
 
 def _ticker(raw: str) -> str:
@@ -86,30 +81,68 @@ def _extract_payload(raw: str) -> dict[str, Any] | None:
         "operator:",
         "earnings release",
         "transcript",
+        # Press release markers
+        "financial results",
+        "revenue",
+        "fourth quarter",
+        "third quarter",
+        "q4 ",
+        "q3 ",
     ]
     if not any(k in low for k in key_hits):
         return None
-    if not _is_transcript_like(low):
+    # Accept either a call transcript OR an earnings press release.
+    is_transcript = _is_transcript_like(low)
+    is_press_release = _is_press_release_like(low)
+    if not (is_transcript or is_press_release):
         return None
     if not _is_earnings_context(low):
         return None
-    score = 0.35
-    score += 0.1 if "earnings call" in low or "conference call" in low else 0.0
-    score += 0.1 if "prepared remarks" in low else 0.0
-    score += 0.1 if "question-and-answer" in low or "question and answer" in low else 0.0
-    score += 0.1 if "operator:" in low else 0.0
-    score += 0.05 if len(s) > 8000 else 0.0
+    # Quality score: transcripts score higher than press releases.
+    if is_transcript:
+        score = 0.35
+        score += 0.1 if "earnings call" in low or "conference call" in low else 0.0
+        score += 0.1 if "prepared remarks" in low else 0.0
+        score += 0.1 if "question-and-answer" in low or "question and answer" in low else 0.0
+        score += 0.1 if "operator:" in low else 0.0
+        score += 0.05 if len(s) > 8000 else 0.0
+    else:
+        # Press release
+        score = 0.45
+        score += 0.05 if len(s) > 8000 else 0.0
     score = min(0.95, score)
 
-    m = re.search(r"(earnings call|conference call|prepared remarks|question(?:-and-|\s+and\s+)answer)", low)
-    i = m.start() if m else 0
-    start = max(0, i - 120)
-    end = min(len(s), i + 540)
+    if is_press_release and not is_transcript:
+        # For press releases, anchor on the first financial highlight (revenue/income figure)
+        # rather than "conference call" which hits the non-GAAP boilerplate disclaimer.
+        pr_anchor = re.search(
+            r"(total\s+revenue|net\s+revenue|operating\s+revenue|revenue\s+(?:was|of|grew|increased|decreased)"
+            r"|net\s+income|operating\s+income|diluted\s+(?:eps|earnings)"
+            r"|\$\s*\d[\d,.]+\s*(?:million|billion)"
+            r"|\d+(?:\.\d+)?%\s+(?:year-over-year|yoy|growth|increase|decrease))",
+            low,
+        )
+        i = pr_anchor.start() if pr_anchor else 0
+        # Fall back to first paragraph that mentions quarter results
+        if i == 0:
+            qtr_m = re.search(r"(fourth quarter|third quarter|second quarter|first quarter|full[ -]year)", low)
+            i = qtr_m.start() if qtr_m else 0
+    else:
+        m = re.search(r"(earnings call|conference call|prepared remarks|question(?:-and-|\s+and\s+)answer)", low)
+        i = m.start() if m else 0
+    start = max(0, i - 80)
+    end = min(len(s), i + 600)
     excerpt = s[start:end].strip()
-    title = "Earnings Call Transcript"
-    t = re.search(r"([A-Z][A-Za-z0-9&,\-(). ]{0,120}(?:earnings|conference)\s+call)", s, flags=re.I)
-    if t:
-        title = t.group(1).strip()[:140]
+    title = "Earnings Press Release" if is_press_release and not is_transcript else "Earnings Call Transcript"
+    if is_press_release and not is_transcript:
+        # For press releases, capture the headline (typically first non-empty line with "Reports")
+        headline_m = re.search(r"([A-Z][A-Za-z0-9& ,.\-']{5,120}(?:Reports?|Announces?|Results?)[A-Za-z0-9 ,.\-']{0,80})", s)
+        if headline_m:
+            title = headline_m.group(1).strip()[:140]
+    else:
+        t = re.search(r"([A-Z][A-Za-z0-9&,\-(). ]{0,120}(?:earnings|conference)\s+call)", s, flags=re.I)
+        if t:
+            title = t.group(1).strip()[:140]
     return {
         "title": title,
         "excerpt": excerpt[:700],
@@ -148,11 +181,34 @@ def _is_transcript_like(low: str) -> bool:
     return strong >= 2
 
 
+def _is_press_release_like(low: str) -> bool:
+    """True for earnings press release content (EX-99.1 style).
+
+    Press releases use different markers than call transcripts — they report
+    quarterly results, revenue, guidance, EPS, etc. but don't have 'operator:' or
+    'prepared remarks'.
+    """
+    s = str(low or "")
+    hits = 0
+    if "financial results" in s:
+        hits += 1
+    if "revenue" in s:
+        hits += 1
+    if re.search(r"\b(fourth quarter|third quarter|second quarter|first quarter|q4|q3|q2|q1)\b", s):
+        hits += 1
+    if "full year" in s or "fiscal year" in s:
+        hits += 1
+    if "guidance" in s or "outlook" in s:
+        hits += 1
+    if "earnings per share" in s or "diluted eps" in s or "net income" in s:
+        hits += 1
+    return hits >= 3
+
+
 def _is_earnings_context(low: str) -> bool:
     s = str(low or "")
     deny = (
         "merger agreement",
-        "acquisition",
         "tender offer",
         "special meeting",
         "proxy statement",
@@ -170,211 +226,51 @@ def _is_earnings_context(low: str) -> bool:
         hits += 1
     if "quarter ended" in s or "for the quarter" in s:
         hits += 1
+    # Press release additional signals
+    if "fourth quarter" in s or "third quarter" in s or "second quarter" in s or "first quarter" in s:
+        hits += 1
+    if "full year" in s:
+        hits += 1
     return hits >= 2
 
 
-def _http_json(url: str) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "InvestorOS/2.0 (+local)"})
-    with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
-        raw = r.read()
-    if not raw:
-        return None
-    try:
-        return json.loads(raw.decode("utf-8", errors="ignore"))
-    except Exception:
-        return None
-
-
-def _normalize_ext_item(item: dict[str, Any]) -> dict[str, Any] | None:
-    d = dict(item or {})
-    txt = (
-        d.get("transcript")
-        or d.get("content")
-        or d.get("text")
-        or d.get("body")
-        or d.get("prepared_remarks")
-        or d.get("remarks")
-        or ""
-    )
-    payload = _extract_payload(str(txt or ""))
-    if not payload:
-        return None
-    date_s = str(
-        d.get("date")
-        or d.get("publishedDate")
-        or d.get("published_at")
-        or d.get("fiscalDateEnding")
-        or d.get("fiscal_date")
-        or d.get("datetime")
-        or ""
-    ).strip()[:10]
-    fy = d.get("year") or d.get("fiscalYear")
-    fq_raw = str(d.get("quarter") or d.get("fiscalQuarter") or "").strip().upper()
-    fq = f"Q{fq_raw}" if fq_raw.isdigit() else (fq_raw if fq_raw.startswith("Q") else "")
-    if (not fy or not fq) and date_s:
-        cy, cq = _fiscal_quarter(date_s)
-        fy = fy or cy
-        fq = fq or cq
-    title = str(
-        d.get("title")
-        or d.get("name")
-        or d.get("headline")
-        or payload.get("title")
-        or "Earnings Call Transcript"
-    ).strip()[:220]
-    source_url = str(
-        d.get("url")
-        or d.get("link")
-        or d.get("transcript_url")
-        or d.get("source_url")
-        or ""
-    ).strip()[:1200]
-    return {
-        "call_date": date_s,
-        "fiscal_year": int(fy) if str(fy or "").isdigit() else None,
-        "fiscal_quarter": fq[:8],
-        "title": title,
-        "source_url": source_url,
-        "excerpt": str(payload.get("excerpt") or ""),
-        "transcript_text": str(payload.get("transcript_text") or ""),
-        "char_count": int(payload.get("char_count") or 0),
-        "quality_score": float(payload.get("quality_score") or 0.0),
-        "is_partial": bool(payload.get("is_partial")),
-    }
-
-
-def _flatten_payload(obj: Any) -> list[dict[str, Any]]:
-    if isinstance(obj, list):
-        return [dict(x) for x in obj if isinstance(x, dict)]
-    if not isinstance(obj, dict):
-        return []
-    keys = (
-        "transcripts",
-        "earnings_call_transcripts",
-        "data",
-        "results",
-        "items",
-        "calls",
-        "history",
-    )
-    for k in keys:
-        v = obj.get(k)
-        if isinstance(v, list):
-            return [dict(x) for x in v if isinstance(x, dict)]
-    # sometimes payload itself is one record
-    if any(k in obj for k in ("transcript", "content", "text", "prepared_remarks")):
-        return [obj]
-    return []
-
-
-def _provider_items_fmp(ticker: str, limit: int) -> list[dict[str, Any]]:
-    key = str(os.getenv("FMP_API_KEY", "")).strip()
-    if not key:
-        return []
-    tk = urllib.parse.quote(_ticker(ticker))
-    lim = max(1, min(80, int(limit or 24)))
-    # Stable API flow:
-    # 1) get transcript dates by symbol
-    # 2) fetch transcript per (year, quarter)
-    # Docs show stable endpoints under /stable/*
-    date_urls = [
-        f"https://financialmodelingprep.com/stable/earning-call-transcript-dates?symbol={tk}&apikey={urllib.parse.quote(key)}",
-        f"https://financialmodelingprep.com/stable/transcripts-dates?symbol={tk}&apikey={urllib.parse.quote(key)}",
-    ]
-    date_rows: list[dict[str, Any]] = []
-    for u in date_urls:
-        try:
-            obj = _http_json(u)
-            rows = _flatten_payload(obj)
-            if rows:
-                date_rows = rows
-                break
-        except Exception:
-            continue
-    out: list[dict[str, Any]] = []
-    if date_rows:
-        pairs: list[tuple[int, int, str]] = []
-        for r in date_rows:
-            try:
-                y = int(r.get("year") or r.get("fiscalYear") or 0)
-                q = int(r.get("quarter") or r.get("fiscalQuarter") or 0)
-            except Exception:
-                continue
-            if y <= 0 or q not in {1, 2, 3, 4}:
-                continue
-            d = str(r.get("date") or r.get("publishedDate") or "")
-            pairs.append((y, q, d))
-        pairs.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
-        for y, q, _d in pairs[:lim]:
-            u = (
-                "https://financialmodelingprep.com/stable/earning-call-transcript"
-                f"?symbol={tk}&year={y}&quarter={q}&apikey={urllib.parse.quote(key)}"
-            )
-            try:
-                obj = _http_json(u)
-                rows = _flatten_payload(obj)
-                if rows:
-                    out.extend(rows[:1])
-            except Exception:
-                continue
-        if out:
-            return out[:lim]
-    # Final fallback: latest transcripts endpoint (if plan supports it)
-    latest_urls = [
-        f"https://financialmodelingprep.com/stable/earning-call-transcript-latest?apikey={urllib.parse.quote(key)}&limit={lim}",
-        f"https://financialmodelingprep.com/stable/latest-transcripts?apikey={urllib.parse.quote(key)}&limit={lim}",
-    ]
-    for u in latest_urls:
-        try:
-            obj = _http_json(u)
-            rows = _flatten_payload(obj)
-            if rows:
-                filtered = [r for r in rows if str(r.get('symbol') or r.get('ticker') or '').strip().upper() == _ticker(ticker)]
-                if filtered:
-                    return filtered[:lim]
-        except Exception:
-            continue
-    return []
-
-
-def _provider_items_finnhub(ticker: str, lookback_years: int) -> list[dict[str, Any]]:
-    key = finnhub_key()
-    if not key:
-        return []
-    tk = urllib.parse.quote(_ticker(ticker))
-    out: list[dict[str, Any]] = []
-    this_year = dt.date.today().year
-    min_year = max(2000, this_year - max(1, int(lookback_years)))
-    # Finnhub transcript API is typically year/quarter based.
-    for y in range(this_year, min_year - 1, -1):
-        for q in (4, 3, 2, 1):
-            u = (
-                "https://finnhub.io/api/v1/stock/transcripts?"
-                f"symbol={tk}&year={y}&quarter={q}&token={urllib.parse.quote(key)}"
-            )
-            try:
-                obj = _http_json(u)
-                rows = _flatten_payload(obj)
-                if rows:
-                    out.extend(rows)
-            except Exception:
-                continue
-    return out
-
-
 def _fallback_provider_rows(ticker: str, *, lookback_years: int, limit: int) -> list[tuple[str, dict[str, Any]]]:
-    out: list[tuple[str, dict[str, Any]]] = []
-    providers = [
-        ("fmp_api", _provider_items_fmp(ticker, limit)),
-        ("finnhub_api", _provider_items_finnhub(ticker, lookback_years)),
-    ]
-    for src, rows in providers:
-        for r in rows:
-            n = _normalize_ext_item(r)
-            if not n:
+    _ = (ticker, lookback_years, limit)
+    # Paid vendor fallback is intentionally disabled.
+    return []
+
+
+def _fetch_edgar_press_release(ticker: str, accession: str) -> str:
+    """Fetch the earnings press release (EX-99.1) for an 8-K via edgartools.
+
+    Returns the press release text, or empty string on failure.
+    SEC rate limit: ~10 req/s; this function is only called when local content is empty.
+    """
+    try:
+        import edgar as _edgar  # noqa: PLC0415
+        _edgar.set_identity("InvestorOS arda.solmaz@pileainvest.com")
+        company = _edgar.Company(str(ticker or "").upper())
+        target_acc = str(accession or "").replace("-", "").replace("_", "").lower()
+        # Use .head(20) to avoid pyarrow iteration issues with newer versions.
+        batch = company.get_filings(form="8-K").head(20)
+        for idx in range(len(batch)):
+            try:
+                f = batch[idx]
+            except Exception:
                 continue
-            out.append((src, n))
-    return out
+            acc = str(getattr(f, "accession_no", "") or "").replace("-", "").lower()
+            if acc == target_acc:
+                filing_obj = f.obj()
+                prs = getattr(filing_obj, "press_releases", None)
+                if prs:
+                    raw = str(prs[0])
+                    # Strip rich-text box-drawing characters from edgartools output.
+                    raw = re.sub(r"[│╭╰─╮╯╴╶╷╸╹╺╻╼╽╾╿┃━╔╗╚╝╠╣╦╩╬]+", " ", raw)
+                    return raw.strip()
+                break
+    except Exception:
+        pass
+    return ""
 
 
 def refresh_earnings_transcripts_from_sec(
@@ -404,7 +300,7 @@ def refresh_earnings_transcripts_from_sec(
             ORDER BY date DESC, id DESC
             LIMIT %s
             """,
-            (tk, list(_FORMS), cutoff, max(20, min(2000, int(max_filings)))),
+            (tk, list(_RELEASE_FORMS), cutoff, max(20, min(2000, int(max_filings)))),
         )
         rows = cur.fetchall() or []
     except Exception:
@@ -424,17 +320,19 @@ def refresh_earnings_transcripts_from_sec(
         accession = str(r[3] or "").strip()
         doc_url = str(r[4] or "").strip()
         path_s = str(r[5] or "").strip()
-        p = resolve_filing_path(path_s)
-        if p is None:
-            skipped += 1
-            continue
         try:
-            raw = read_filing_text(p, strip_html=True)
+            raw = read_filing_text_any(path_s, max_chars=220000)
         except Exception:
-            skipped += 1
-            continue
-        payload = _extract_payload(raw)
-        if not payload:
+            raw = ""
+        payload = _extract_payload(raw) if raw else None
+        # If local content is empty, boilerplate, or fails the payload check,
+        # fetch the earnings press release exhibit (EX-99.1) via edgartools.
+        if not payload and accession:
+            pr_raw = _fetch_edgar_press_release(tk, accession)
+            if pr_raw:
+                raw = pr_raw
+                payload = _extract_payload(raw)
+        if not raw or not payload:
             skipped += 1
             continue
         fy, fq = _fiscal_quarter(date_s)
@@ -445,7 +343,7 @@ def refresh_earnings_transcripts_from_sec(
             fiscal_quarter=fq,
             title=str(payload.get("title") or f"{form} earnings transcript"),
             source_type="sec_filing",
-            source_url=(doc_url or f"/filing?path={str(p)}"),
+            source_url=(doc_url or f"/filing?path={path_s}"),
             filing_id=filing_id,
             accession=accession,
             excerpt=str(payload.get("excerpt") or ""),
@@ -489,11 +387,11 @@ def refresh_earnings_transcripts_from_sec(
     current_rows = list_earnings_transcripts_pg(tk, limit=300)
     bad_ids: list[int] = []
     for r in current_rows:
-        txt = str((r or {}).get("transcript_text") or "").lower()
+        # Only remove rows with quality_score == 0.0 (old false positives with no score).
+        # Do NOT re-analyze text from excerpt alone — list query omits transcript_text.
+        score = float((r or {}).get("quality_score") or 0.0)
         ex = str((r or {}).get("excerpt") or "").lower()
-        ti = str((r or {}).get("title") or "").lower()
-        low = " ".join([ti, ex, txt[:4000]])
-        if _looks_like_sec_boilerplate(low) or (not _is_transcript_like(low)) or (not _is_earnings_context(low)):
+        if score == 0.0 and _looks_like_sec_boilerplate(ex):
             bad_ids.append(int(r.get("id") or 0))
     if bad_ids:
         removed = delete_earnings_transcripts_by_ids_pg(bad_ids)
@@ -557,12 +455,12 @@ def list_sec_earnings_releases(
         date_s = str(r[2] or "").strip()[:10]
         accession = str(r[3] or "").strip()
         doc_url = str(r[4] or "").strip()
-        p = resolve_filing_path(str(r[5] or "").strip())
-        if p is None:
-            continue
+        path_s = str(r[5] or "").strip()
         try:
-            raw = read_filing_text(p, strip_html=True)
+            raw = read_filing_text_any(path_s, max_chars=180000)
         except Exception:
+            continue
+        if not raw:
             continue
         payload = _extract_release_payload(raw)
         if not payload:
@@ -578,8 +476,8 @@ def list_sec_earnings_releases(
                 "call_date": date_s,
                 "title": f"{form} Earnings Release",
                 "source_type": "sec_filing",
-                "source_url": (doc_url or f"/filing?path={str(p)}"),
-                "path": str(p),
+                "source_url": (doc_url or f"/filing?path={path_s}"),
+                "path": path_s,
                 "accession": accession,
                 "excerpt": str(payload.get("excerpt") or ""),
                 "char_count": int(payload.get("char_count") or 0),

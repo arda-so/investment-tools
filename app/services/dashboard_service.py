@@ -161,8 +161,30 @@ def ask_ai_local(question: str) -> str:
         if live:
             return live
         return f"[LIVE] No fresh market snapshot found for {tk}."
+    # Gather live market context (macro snapshot + news for realtime queries)
+    live_parts: list[str] = []
     try:
-        out = ask_agent(q, n_results=6)
+        from app.services.web_search_service import (
+            get_live_macro_snapshot,
+            format_macro_snapshot_text,
+            is_realtime_query,
+            search_news,
+            format_news_text,
+        )
+        macro = get_live_macro_snapshot(timeout_sec=2.5)
+        macro_text = format_macro_snapshot_text(macro)
+        if macro_text:
+            live_parts.append(f"LIVE MARKET SNAPSHOT:\n{macro_text}")
+        if is_realtime_query(q):
+            headlines = search_news(q, 6)
+            news_text = format_news_text(headlines)
+            if news_text:
+                live_parts.append(f"RECENT NEWS HEADLINES:\n{news_text}")
+    except Exception:
+        pass
+    extra_ctx = "\n\n".join(live_parts)
+    try:
+        out = ask_agent(q, n_results=6, extra_context=extra_ctx)
         if out:
             return out
     except Exception as exc:

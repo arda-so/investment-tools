@@ -17,6 +17,7 @@ from app.routers.observability import router as observability_router
 from app.routers.organizer import router as organizer_router
 from app.routers.reports import router as reports_router
 from app.routers.supply_chain import router as supply_chain_router
+from app.routers.workspace_os import router as workspace_os_router
 from app.services.ai_orchestrator import ensure_ai_schema
 from app.services.ai_job_queue_service import ensure_ai_job_queue_schema, queue_backend
 from app.services.app_knowledge_service import ensure_app_knowledge_map
@@ -160,6 +161,12 @@ def create_app() -> FastAPI:
         ensure_debate_schema()
     except Exception:
         pass
+    # Unified Work OS schema
+    try:
+        from app.services.workspace_os_service import ensure_workspace_os_schema
+        ensure_workspace_os_schema()
+    except Exception:
+        pass
 
     refresh_stop = threading.Event()
     app.state.market_refresh_stop = refresh_stop
@@ -195,11 +202,12 @@ def create_app() -> FastAPI:
                 pass
             refresh_stop.wait(_OUTCOME_INTERVAL_SEC)
 
-    # Phase 3.1: SEC EDGAR poller (default every 6 hours, configurable via SEC_POLL_INTERVAL_SEC)
+    # Phase 3.1: SEC EDGAR poller (default every 24h — real-time detection handled by
+    # investor-edgar-watch-job Cloud Run job running every 15 min; this thread is the safety net)
     try:
-        _SEC_POLL_INTERVAL_SEC = max(300, int(str(os.getenv("SEC_POLL_INTERVAL_SEC", "21600")).strip() or "21600"))
+        _SEC_POLL_INTERVAL_SEC = max(300, int(str(os.getenv("SEC_POLL_INTERVAL_SEC", "86400")).strip() or "86400"))
     except Exception:
-        _SEC_POLL_INTERVAL_SEC = 21600
+        _SEC_POLL_INTERVAL_SEC = 86400
 
     def _sec_edgar_poll_loop() -> None:
         # Stagger by 90s so startup schema runs complete first.
@@ -228,6 +236,67 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
             refresh_stop.wait(_FORM4_POLL_INTERVAL_SEC)
+
+    @app.on_event("startup")
+    def _seed_market_caps_to_pg() -> None:
+        """Seed market caps from local JSON cache into Postgres on startup.
+
+        The JSON cache (baked into the Docker image) may have stale timestamps but
+        the raw market_cap values are still useful seeds. Postgres persists them
+        across container restarts so the company list sorts correctly by market cap.
+        Only seeds rows missing from Postgres; does not overwrite fresher values.
+        """
+        def _run() -> None:
+            try:
+                import json
+                from pathlib import Path
+                cache_path = Path(os.getenv("DATA_DIR", "/app/data")) / "cache" / "market_cap_cache.json"
+                if not cache_path.exists():
+                    return
+                raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    return
+                from app.services.postgres_core_service import pg_connect
+                con = pg_connect()
+                if con is None:
+                    return
+                try:
+                    cur = con.cursor()
+                    seeded = 0
+                    for tk, v in raw.items():
+                        if not isinstance(v, dict):
+                            continue
+                        val = v.get("market_cap") or 0
+                        try:
+                            val = int(float(val))
+                        except Exception:
+                            continue
+                        if val <= 0:
+                            continue
+                        tk_clean = str(tk or "").strip().upper()[:16]
+                        if not tk_clean:
+                            continue
+                        cur.execute(
+                            """
+                            INSERT INTO company_profile_cache_core(ticker, market_cap, updated_at)
+                            VALUES (%s, %s, NOW()::text)
+                            ON CONFLICT(ticker) DO UPDATE SET
+                                market_cap = EXCLUDED.market_cap
+                            WHERE company_profile_cache_core.market_cap IS NULL
+                            """,
+                            (tk_clean, val),
+                        )
+                        seeded += 1
+                    con.commit()
+                    if seeded:
+                        import logging
+                        logging.getLogger(__name__).info("[startup] seeded %d market caps to Postgres", seeded)
+                finally:
+                    con.close()
+            except Exception:
+                pass
+        import threading
+        threading.Thread(target=_run, name="mcap-seed", daemon=True).start()
 
     @app.on_event("startup")
     def _start_market_refresh_loop() -> None:
@@ -271,6 +340,7 @@ def create_app() -> FastAPI:
     app.include_router(company_file_router)
     app.include_router(ai_router)
     app.include_router(supply_chain_router)
+    app.include_router(workspace_os_router)
 
     return app
 

@@ -22,6 +22,8 @@ from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.postgres_core_service import (
     core_backend,
     insert_portfolio_transaction_pg,
+    list_compact_memories_pg,
+    list_earnings_calendar_snapshot_pg,
     list_portfolio_transactions_pg,
     list_recent_portfolio_transactions_pg,
     pg_connect,
@@ -29,6 +31,7 @@ from app.services.postgres_core_service import (
     query_report_facts_pg,
     strict_postgres_mode,
     summarize_investor_style_memory_pg,
+    upsert_compact_memory_pg,
     upsert_investor_style_memory_pg,
     upsert_watchlist_thesis_pg,
 )
@@ -521,7 +524,17 @@ def upsert_compact_memory(
         finally:
             con.close()
 
-    return dict(sqlite_retry(_write))
+    result = dict(sqlite_retry(_write))
+    # Mirror writes to Postgres
+    if pg_enabled():
+        try:
+            upsert_compact_memory_pg(
+                bucket=b, value=v, source=str(source or "chat_turn")[:64],
+                reliability=rel, memory_key=k, status=st, conflict_of=cf_of,
+            )
+        except Exception:
+            pass
+    return result
 
 
 def remember_compact_memory(text: str, bucket: str = "preference", source: str = "chat_turn", reliability: float = 0.85) -> dict[str, Any]:
@@ -581,7 +594,7 @@ def _memory_freshness_weight(updated_at: str) -> float:
 
 def list_compact_memories(query: str = "", bucket: str = "", limit: int = 30, include_archived: bool = False) -> list[dict[str, Any]]:
     if pg_enabled():
-        return []  # memory_compact not yet migrated to Postgres; skip gracefully
+        return list_compact_memories_pg(query=query, bucket=bucket, limit=limit, include_archived=include_archived)
     ensure_portfolio_memory_schema()
     q = str(query or "").strip().lower()
     b = str(bucket or "").strip().lower()
@@ -3311,6 +3324,17 @@ def inject_runtime_context(context: dict[str, Any] | None, query: str = "") -> d
         except Exception:
             company_context = {"ticker": company_ticker}
 
+    # Macro snapshot — pre-warmed by background thread in web_search_service.
+    # Cache hit is instant; cold fetch needs ~1.5s (parallel yfinance for 18 tickers).
+    # Timeout raised from 0.5s → 2.5s to survive cold starts.
+    macro_snapshot_text = ""
+    try:
+        from app.services.web_search_service import get_live_macro_snapshot, format_macro_snapshot_text
+        snap = get_live_macro_snapshot(timeout_sec=2.5)
+        macro_snapshot_text = format_macro_snapshot_text(snap)
+    except Exception:
+        macro_snapshot_text = ""
+
     ctx["runtime"] = {
         "asof": dt.datetime.now().isoformat(timespec="seconds"),
         "current_path": path,
@@ -3329,6 +3353,7 @@ def inject_runtime_context(context: dict[str, Any] | None, query: str = "") -> d
             limit=10,
         ),
         "company_context": company_context,
+        "macro_snapshot_text": macro_snapshot_text,
     }
     with _RUNTIME_CACHE_LOCK:
         _RUNTIME_CACHE[cache_key] = (now_ts, json.loads(json.dumps(ctx["runtime"], ensure_ascii=True)))
@@ -3370,7 +3395,7 @@ def _extract_morning_intel_bullets(max_bullets: int = 4) -> list[str]:
             for s in sentences[:1]:
                 s = s.strip()
                 if len(s) > 40:
-                    bullets.append(f"Overnight: {s[:200]}")
+                    bullets.append(f"Overnight: {s[:400]}")
                     break
             in_section = False
         elif section_num == 2 and line.startswith("- "):
@@ -3379,12 +3404,116 @@ def _extract_morning_intel_bullets(max_bullets: int = 4) -> list[str]:
                 label, rest = clean.split(":", 1)
                 rest = rest.strip()
                 if len(rest) > 20:
-                    bullets.append(f"{label.strip()[:60]}: {rest[:160]}")
+                    # Truncate at sentence boundary up to 400 chars; never mid-word
+                    if len(rest) > 400:
+                        cut = rest[:400]
+                        # Walk back to last sentence end or word boundary
+                        m_end = re.search(r"[.!?]\s+\S", cut)
+                        last_sent = cut.rfind(". ")
+                        rest = cut[: last_sent + 1] if last_sent > 80 else cut.rsplit(" ", 1)[0]
+                    bullets.append(f"{label.strip()[:60]}: {rest}")
             elif len(clean) > 30:
-                bullets.append(f"Markets: {clean[:160]}")
+                cut = clean[:400]
+                if len(clean) > 400:
+                    cut = cut.rsplit(" ", 1)[0]
+                bullets.append(f"Markets: {cut}")
         if len(bullets) >= max_bullets:
             break
     return bullets
+
+
+def _fallback_macro_and_earnings_bullets(top_tickers: list[str], max_bullets: int = 4) -> list[str]:
+    """Cloud-safe fallback when morning_intelligence file bullets are unavailable."""
+    out: list[str] = []
+    try:
+        from tools.macro_watchdog import build_macro_watchdog_payload, _fmt_pct, _safe_float
+
+        mw = build_macro_watchdog_payload() or {}
+        headline = str(mw.get("headline") or "").strip()
+        if headline:
+            out.append(f"Macro: {headline[:160]}")
+        s = (mw.get("series") or {}) if isinstance(mw.get("series"), dict) else {}
+        sup = (mw.get("cpi_surprise") or {}) if isinstance(mw.get("cpi_surprise"), dict) else {}
+        all_mom = _fmt_pct(_safe_float(((s.get("all_items") or {}) if isinstance(s.get("all_items"), dict) else {}).get("mom_pct")))
+        core_mom = _fmt_pct(_safe_float(((s.get("core") or {}) if isinstance(s.get("core"), dict) else {}).get("mom_pct")))
+        if all_mom != "-" or core_mom != "-":
+            out.append(f"Macro: CPI MoM all-items {all_mom}, core {core_mom}.")
+        all_vs = _fmt_pct(_safe_float(sup.get("all_items_mom_vs_consensus")))
+        core_vs = _fmt_pct(_safe_float(sup.get("core_mom_vs_consensus")))
+        if all_vs != "-" or core_vs != "-":
+            out.append(f"Risk: CPI surprise vs consensus all-items {all_vs}, core {core_vs}.")
+    except Exception:
+        pass
+
+    try:
+        today = dt.date.today()
+        week_end = today + dt.timedelta(days=7)
+        rows = list_earnings_calendar_snapshot_pg(today.isoformat(), week_end.isoformat(), limit=600) or []
+        tk_set = {str(t).strip().upper() for t in list(top_tickers or []) if str(t).strip()}
+        upcoming = []
+        for r in rows:
+            sym = str((r or {}).get("symbol") or "").strip().upper()
+            evd = str((r or {}).get("date") or "").strip()[:10]
+            status = str((r or {}).get("event_status") or "upcoming").strip().lower()
+            if not sym or sym not in tk_set:
+                continue
+            if status in {"reported", "done", "completed"}:
+                continue
+            upcoming.append((evd, sym, str((r or {}).get("time") or "-").strip()))
+        upcoming.sort()
+        if upcoming:
+            chunks = [f"{sym} {evd}" for evd, sym, _tm in upcoming[:3]]
+            out.append(f"Catalyst: Upcoming earnings in your holdings: {', '.join(chunks)}.")
+    except Exception:
+        pass
+
+    return out[: max(1, int(max_bullets or 4))]
+
+
+def render_morning_brief_bullets(
+    brief: dict[str, Any] | None,
+    *,
+    max_bullets: int = 7,
+    allow_runtime_fallback: bool = True,
+) -> list[str]:
+    """Shared renderer for morning brief bullets across dashboard and workspace feed."""
+    lim = max(1, min(12, int(max_bullets or 7)))
+    payload = dict(brief or {})
+    bullets = [str(x or "").strip() for x in list(payload.get("bullets") or []) if str(x or "").strip()]
+    top_tickers = [str(t or "").strip().upper() for t in list(payload.get("top_holdings") or []) if str(t or "").strip()]
+    if not top_tickers:
+        try:
+            holds = get_holdings(limit=5)
+            top_tickers = [str(h.get("ticker") or "").strip().upper() for h in list(holds or []) if str(h.get("ticker") or "").strip()]
+        except Exception:
+            top_tickers = []
+
+    if allow_runtime_fallback and len(bullets) < 3:
+        extra = _extract_morning_intel_bullets(max_bullets=lim)
+        if not extra:
+            extra = _fallback_macro_and_earnings_bullets(top_tickers=top_tickers, max_bullets=lim)
+        seen = {b.lower() for b in bullets}
+        for e in extra:
+            ee = str(e or "").strip()
+            if not ee or ee.lower() in seen:
+                continue
+            bullets.append(ee)
+            seen.add(ee.lower())
+            if len(bullets) >= lim:
+                break
+
+    if allow_runtime_fallback and len(bullets) < 3:
+        seen = {b.lower() for b in bullets}
+        for e in _fallback_macro_and_earnings_bullets(top_tickers=top_tickers, max_bullets=lim):
+            ee = str(e or "").strip()
+            if not ee or ee.lower() in seen:
+                continue
+            bullets.append(ee)
+            seen.add(ee.lower())
+            if len(bullets) >= lim:
+                break
+
+    return bullets[:lim]
 
 
 def _synthesize_morning_brief_llm(
@@ -3426,7 +3555,7 @@ def _synthesize_morning_brief_llm(
             f"- Prioritize direct impact on my holdings above all else\n"
             f"- Include macro shifts only if they affect my sectors\n"
             f"- Be specific with numbers and names\n"
-            f"- Each bullet max 160 characters\n"
+            f"- Each bullet 1-2 complete sentences; always end at a full stop\n"
             f"- Prefix each with: Portfolio:, Macro:, Risk:, Watch:, or Catalyst:\n"
             f"- Output ONLY the bullet lines, one per line, no numbering or dashes"
         )
@@ -3519,7 +3648,17 @@ def get_morning_brief(limit_holdings: int = 5) -> dict[str, Any]:
 
     # Macro & market context from morning intelligence report
     macro_bullets = _extract_morning_intel_bullets(max_bullets=4)
+    if not macro_bullets:
+        macro_bullets = _fallback_macro_and_earnings_bullets(top_tickers=top_tickers, max_bullets=4)
     bullets.extend(macro_bullets)
+
+    # Guardrail: avoid degraded one-line brief in cloud.
+    if len(bullets) < 3:
+        for fb in _fallback_macro_and_earnings_bullets(top_tickers=top_tickers, max_bullets=5):
+            if fb not in bullets:
+                bullets.append(fb)
+            if len(bullets) >= 5:
+                break
 
     if not bullets:
         bullets = ["No critical anomalies detected in the latest scan."]
@@ -3543,6 +3682,31 @@ def save_morning_brief_snapshot(limit_holdings: int = 5, source: str = "schedule
     try:
         morning_path = _latest_report_path(("morning_intelligence_", "terminal_daily_brief_"))
         morning_intel_txt = _read_text_file(morning_path)
+        # Fallback: on cloud the file-based morning intelligence doesn't exist.
+        # Generate a lightweight macro context from the BLS macro watchdog directly.
+        if not morning_intel_txt:
+            try:
+                from tools.macro_watchdog import build_macro_watchdog_payload, _fmt_pct, _safe_float
+                mw = build_macro_watchdog_payload()
+                s = mw.get("series") or {}
+                a = s.get("all_items") or {}
+                c = s.get("core") or {}
+                sup = mw.get("cpi_surprise") or {}
+                morning_intel_txt = (
+                    f"## 1. Macro Snapshot ({mw.get('asof_utc', '')})\n"
+                    f"{mw.get('headline', '')}\n"
+                    f"CPI release today: {'yes' if mw.get('cpi_release_today') else 'no'}\n\n"
+                    f"## 2. Market / CPI Data\n"
+                    f"- All-items CPI MoM: {_fmt_pct(_safe_float(a.get('mom_pct')))} "
+                    f"| YoY: {_fmt_pct(_safe_float(a.get('yoy_pct')))} "
+                    f"| Month: {a.get('latest_month', '-')}\n"
+                    f"- Core CPI MoM: {_fmt_pct(_safe_float(c.get('mom_pct')))} "
+                    f"| YoY: {_fmt_pct(_safe_float(c.get('yoy_pct')))}\n"
+                    f"- All-items vs consensus: {_fmt_pct(_safe_float(sup.get('all_items_mom_vs_consensus')))}\n"
+                    f"- Core vs consensus: {_fmt_pct(_safe_float(sup.get('core_mom_vs_consensus')))}\n"
+                )
+            except Exception:
+                pass
         if morning_intel_txt and brief.get("top_holdings") and brief.get("bullets"):
             synthesized = _synthesize_morning_brief_llm(
                 raw_bullets=brief["bullets"],

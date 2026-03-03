@@ -50,7 +50,7 @@ from app.services.portfolio_memory_service import get_holdings
 from app.services.price_metrics_service import refresh_price_metrics
 from app.services.mini_statements_service import refresh_mini_statements, fetch_historical_financials, compute_financial_deltas
 from app.services.company_intel_service import refresh_company_intel
-from app.services.earnings_transcript_service import refresh_earnings_transcripts_from_sec
+from app.services.postgres_core_service import insert_earnings_call_ingest_run_pg
 from app.services.sec_ingest_pipeline_service import ingest_sec_facts_for_ticker
 from app.services.sec_edgar_poller_service import poll_ticker, poll_and_ingest_tickers
 
@@ -877,23 +877,44 @@ def company_transcripts_refresh(
         if is_hx_request(request):
             return _render_company_detail(request, ticker=tk, message=msg)
         return _back_to_ticker(tk, msg)
-    out = refresh_earnings_transcripts_from_sec(tk, max_filings=500, lookback_years=10)
-    ok = bool(int(out.get("ok") or 0))
-    if ok:
-        fb = int(out.get("fallback_saved") or 0)
-        rm = int(out.get("removed_bad") or 0)
-        msg = (
-            f"Earnings calls refreshed. "
-            f"scanned={int(out.get('scanned') or 0)} "
-            f"saved={int(out.get('saved') or 0)} "
-            f"skipped={int(out.get('skipped') or 0)}"
+    run_key = dt.datetime.now().strftime("%Y%m%dT%H%M%S%f")
+    sec_key = f"{tk}:sec_refresh:{run_key}"
+    queued_sec = insert_earnings_call_ingest_run_pg(
+        ticker=tk,
+        event_datetime="",
+        idempotency_key=sec_key,
+        stage="sec_refresh",
+        status="queued",
+        attempt=0,
+        error_text="",
+        detail={"requested_by": "company_file_ui"},
+        next_retry_at="",
+    )
+    audio_enabled = str(os.getenv("ENABLE_IR_AUDIO_TRANSCRIBE", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    queued_audio = False
+    if audio_enabled:
+        audio_key = f"{tk}:ir_audio_transcribe:{run_key}"
+        queued_audio = insert_earnings_call_ingest_run_pg(
+            ticker=tk,
+            event_datetime="",
+            idempotency_key=audio_key,
+            stage="ir_audio_transcribe",
+            status="queued",
+            attempt=0,
+            error_text="",
+            detail={"requested_by": "company_file_ui"},
+            next_retry_at="",
         )
-        if fb > 0:
-            msg += f" fallback_saved={fb}"
-        if rm > 0:
-            msg += f" removed_bad={rm}"
+    if queued_sec and queued_audio:
+        msg = "Transcript refresh queued (SEC + IR audio->text). Background worker will process shortly."
+    elif queued_sec:
+        msg = "SEC transcript refresh queued."
+        if audio_enabled:
+            msg = "SEC transcript refresh queued, but IR audio->text queueing failed."
+    elif queued_audio:
+        msg = "IR audio->text queued, but SEC transcript refresh queueing failed."
     else:
-        msg = f"Could not refresh earnings calls: {str(out.get('error') or 'unknown_error')}"
+        msg = "Could not queue transcript refresh jobs."
     if is_hx_request(request):
         return _render_company_detail(request, ticker=tk, message=msg)
     return _back_to_ticker(tk, msg)
@@ -1444,3 +1465,34 @@ def company_file_reminder_delete(
     if is_hx_request(request):
         return _render_company_detail(request, ticker=ticker, message=msg)
     return _back_to_ticker(ticker, msg)
+
+
+@router.post("/api/admin/ir-registry")
+async def admin_upsert_ir_registry(request: Request):
+    """Admin endpoint: upsert an IR source registry entry in Postgres.
+    Accepts JSON body with ticker + registry fields.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    ticker = str(body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return JSONResponse({"ok": False, "error": "ticker_required"}, status_code=400)
+    try:
+        from app.services.postgres_core_service import upsert_ir_source_registry_pg
+        ok = upsert_ir_source_registry_pg(
+            ticker=ticker,
+            ir_home_url=str(body.get("ir_home_url") or "").strip(),
+            provider=str(body.get("provider") or "").strip(),
+            rss_url=str(body.get("rss_url") or "").strip(),
+            last_good_audio_pattern=str(body.get("last_good_audio_pattern") or "").strip(),
+            last_good_event_url=str(body.get("last_good_event_url") or "").strip(),
+            active=bool(body.get("active", True)),
+            meta=body.get("meta") or {},
+        )
+        return JSONResponse({"ok": ok, "ticker": ticker})
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error("admin_upsert_ir_registry error: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
