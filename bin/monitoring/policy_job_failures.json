@@ -1,0 +1,34 @@
+{
+  "displayName": "InvestorOS: Cloud Run job task failure",
+  "documentation": {
+    "content": "A **Cloud Run job task failed**. Monitored jobs:\n- `investor-daily-job` — market scanner, macro\n- `investor-sec-nightly-job` — SEC EDGAR sync\n- `investor-agent-worker` — proactive AI monitor\n- `investor-morning-job` — morning brief\n- `investor-signals-job` — signal tracker\n- `investor-earnings-job` — earnings radar\n- `investor-tools-worker-job` — AI job queue\n\nInvestigate:\n```\ngcloud run jobs executions list --project=onyx-terminal-487613 --region=europe-west1 --format=\"table(name,status,completionTime)\" | head -20\n```",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "Cloud Run job task failure (any job)",
+      "conditionThreshold": {
+        "filter": "resource.type=\"cloud_run_job\" AND metric.type=\"run.googleapis.com/job/completed_task_attempt_count\" AND metric.labels.result=\"failed\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "3600s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": ["resource.labels.job_name"]
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "86400s"
+  },
+  "combiner": "OR",
+  "notificationChannels": ["__CHANNEL__"]
+}

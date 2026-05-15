@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.solmaz.insider.intraday</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/solmaz/Investment_Tools/automations/insider_intraday.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OPENAI_API_KEY</key>
+    <string>__SET_IN_USER_ENV__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/solmaz/Investment_Tools/logs/launchd_insider_intraday.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/solmaz/Investment_Tools/logs/launchd_insider_intraday_err.log</string>
+
+  <key>StartInterval</key>
+  <integer>21600</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

@@ -1,0 +1,1108 @@
+{% extends "base.html" %}
+{% block title %}Lab — {{ ticker }}{% endblock %}
+
+{% block head_extra %}
+<style>
+/* ── Lab — single column focused layout ─────────────────────────────── */
+.lab-page { color: var(--text); max-width: 960px; margin: 0 auto; padding: 0 16px 80px; }
+
+/* Header */
+.lab-hdr {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 16px 0 12px; border-bottom: none; margin-bottom: 18px;
+}
+.lab-hdr-ticker { font-size: 24px; font-weight: 900; letter-spacing: -.02em; }
+.lab-hdr-name { font-size: 13px; color: var(--muted); }
+.lab-hdr-pills { display: flex; flex-wrap: wrap; gap: 5px; }
+.lab-pill {
+  display: inline-block; background: var(--panel2); border: none;
+  border-radius: 999px; padding: 3px 12px; font-size: 11px; font-weight: 700; white-space: nowrap;
+}
+.lab-pill-green { color: var(--up-ink, #22c55e); }
+.lab-pill-red { color: var(--down-ink, #ef4444); }
+.lab-back {
+  margin-left: auto; font-size: 12px; color: var(--muted); text-decoration: none;
+  border: none; border-radius: 10px; padding: 8px 16px; flex-shrink: 0;
+  background: var(--panel2); font-weight: 700; transition: all .15s;
+}
+.lab-back:hover { background: var(--accent); color: #fff; }
+
+/* ── Verdict Bar ─────────────────────────────────────────────────── */
+.lab-verdict {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px;
+  margin-bottom: 20px;
+}
+.lab-verdict-card {
+  background: var(--panel); border: none; border-radius: 14px;
+  padding: 16px 18px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  transition: all .15s;
+}
+.lab-verdict-card:hover { box-shadow: 0 4px 12px rgba(99,102,241,.08); }
+.lab-verdict-label { font-size: 11px; font-weight: 700; text-transform: none; letter-spacing: -.01em; color: var(--muted); margin-bottom: 4px; }
+.lab-verdict-val { font-size: 22px; font-weight: 900; }
+.lab-verdict-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+/* ── Collapsible sections ────────────────────────────────────────── */
+.lab-section {
+  border: none; border-radius: 14px; margin-bottom: 14px;
+  background: var(--panel); overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.lab-section-hdr {
+  display: flex; align-items: center; gap: 8px; padding: 14px 18px;
+  cursor: pointer; user-select: none; font-size: 14px; font-weight: 800;
+}
+.lab-section-hdr:hover { background: var(--panel2); }
+.lab-section-hdr .chevron {
+  font-size: 10px; color: var(--muted); transition: transform .2s; flex-shrink: 0;
+}
+.lab-section-hdr .chevron.open { transform: rotate(90deg); }
+.lab-section-hdr .badge {
+  font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+  border: none; margin-left: auto;
+}
+.lab-section-hdr .badge.pass { background: rgba(34,197,94,.12); color: #22c55e; }
+.lab-section-hdr .badge.fail { background: rgba(239,68,68,.12); color: #ef4444; }
+.lab-section-hdr .badge.neutral { background: var(--panel2); color: var(--muted); }
+.lab-section-body { padding: 0 16px 16px; }
+.lab-section.collapsed .lab-section-body { display: none; }
+.lab-section.collapsed .chevron { transform: rotate(0deg); }
+
+/* ── DCF Engine ──────────────────────────────────────────────────── */
+.lab-implied-big {
+  font-size: 3rem; font-weight: 900; text-align: center;
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace; letter-spacing: -.02em;
+  color: var(--accent); margin: 8px 0 2px; transition: color .3s, text-shadow .3s;
+}
+.lab-implied-big.val-good { color: #22c55e; text-shadow: 0 0 30px rgba(34,197,94,.25); }
+.lab-implied-big.val-fair { color: #eab308; text-shadow: 0 0 30px rgba(234,179,8,.2); }
+.lab-implied-big.val-rich { color: #ef4444; text-shadow: 0 0 30px rgba(239,68,68,.25); }
+.lab-implied-sub { text-align: center; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+
+.lab-inputs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+@media (max-width: 600px) { .lab-inputs { grid-template-columns: 1fr; } }
+.lab-input-group label { display: block; font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 3px; }
+.lab-input-group input {
+  width: 100%; padding: 9px 12px; font-size: 13px; border: none;
+  border-radius: 10px; background: var(--panel2); color: var(--text); box-sizing: border-box;
+  transition: box-shadow .15s;
+}
+.lab-input-group input:focus { outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+
+.lab-slider-group { margin-bottom: 12px; }
+.lab-slider-group label {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 4px;
+}
+.lab-slider-group label span { color: var(--accent); font-size: 13px; font-weight: 800; }
+.lab-slider-group input[type="range"] {
+  width: 100%; height: 6px; -webkit-appearance: none; appearance: none;
+  background: var(--panel2); border-radius: 3px; outline: none;
+}
+.lab-slider-group input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); cursor: pointer; border: 2px solid var(--panel);
+}
+.lab-slider-group input[type="range"]::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); cursor: pointer; border: 2px solid var(--panel);
+}
+
+/* ── Expectation Gap bars ── */
+.lab-expectation-gap { padding: 14px; background: var(--panel2); border: none; border-radius: 14px; margin-bottom: 14px; }
+.lab-gap-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.lab-gap-label { font-size: 11px; font-weight: 600; width: 70px; text-align: right; color: var(--muted); }
+.lab-gap-track { flex: 1; height: 14px; background: var(--panel); border-radius: 3px; overflow: hidden; }
+.lab-gap-fill { height: 100%; border-radius: 3px; transition: width .4s; }
+.lab-gap-fill.implied { background: linear-gradient(90deg, var(--accent), #8b5cf6); }
+.lab-gap-fill.historical { background: #22c55e; }
+.lab-gap-val { font-size: 11px; font-weight: 700; min-width: 50px; }
+.lab-gap-verdict { font-size: 11px; font-weight: 700; text-align: center; margin-top: 4px; }
+
+/* ── Result cards ── */
+.lab-result-card { background: var(--panel2); border: none; border-radius: 14px; padding: 16px 18px; margin-bottom: 12px; }
+.lab-result-title { font-size: 12px; font-weight: 800; color: var(--muted); margin-bottom: 6px; text-transform: none; letter-spacing: -.01em; }
+.lab-result-big { font-size: 24px; font-weight: 800; color: var(--accent); }
+.lab-result-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* ── Sensitivity table ── */
+.lab-sense-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+.lab-sense-table th, .lab-sense-table td { padding: 6px 10px; text-align: center; border: none; }
+.lab-sense-table th { background: transparent; font-weight: 700; color: var(--muted); }
+.lab-sense-table td { background: var(--panel); border-radius: 6px; }
+.lab-sense-table td.hi { background: rgba(34,197,94,.1); color: #22c55e; }
+.lab-sense-table td.lo { background: rgba(239,68,68,.1); color: #ef4444; }
+.lab-sense-table td.mid { background: rgba(234,179,8,.08); color: #eab308; }
+
+/* ── Checklist ── */
+.lab-check-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-bottom: none; font-size: 12px; background: var(--panel); border-radius: 12px; margin-bottom: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.04); transition: all .15s; }
+.lab-check-item:hover { box-shadow: 0 4px 12px rgba(99,102,241,.08); }
+.lab-check-item:last-child { border-bottom: none; }
+.lab-check-badge { flex-shrink: 0; font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 4px; margin-top: 2px; text-transform: uppercase; }
+.lab-check-badge.pass { background: rgba(34,197,94,.12); color: #22c55e; }
+.lab-check-badge.fail { background: rgba(239,68,68,.12); color: #ef4444; }
+.lab-check-label { font-weight: 700; color: var(--text); font-size: 12px; }
+.lab-check-detail { font-size: 10px; color: var(--muted); margin-top: 1px; }
+.lab-toggle-switch { position: relative; display: inline-block; width: 32px; height: 18px; margin-left: auto; flex-shrink: 0; }
+.lab-toggle-switch input { opacity: 0; width: 0; height: 0; }
+.lab-toggle-slider {
+  position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--muted); border-radius: 9px; transition: .3s;
+}
+.lab-toggle-slider:before {
+  content: ""; position: absolute; height: 14px; width: 14px; left: 2px; bottom: 2px;
+  background: var(--panel); border-radius: 50%; transition: .3s;
+}
+.lab-toggle-switch input:checked + .lab-toggle-slider { background: var(--accent); }
+.lab-toggle-switch input:checked + .lab-toggle-slider:before { transform: translateX(14px); }
+.lab-check-item.overridden .lab-check-label { text-decoration: line-through; opacity: .6; }
+
+/* ── Bar rows (waterfall) ── */
+.lab-bar-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.lab-bar-label { font-size: 10px; font-weight: 600; width: 80px; text-align: right; color: var(--muted); }
+.lab-bar { height: 14px; border-radius: 3px; min-width: 2px; }
+.lab-bar.green { background: #22c55e; } .lab-bar.red { background: #ef4444; }
+.lab-bar.blue { background: #3b82f6; } .lab-bar.gray { background: var(--muted); }
+.lab-bar-val { font-size: 10px; color: var(--text); font-weight: 700; }
+
+/* ── ROIC ── */
+.lab-roic-card { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.lab-roic-big { font-size: 22px; font-weight: 800; text-align: center; min-width: 60px; }
+.lab-roic-vs { font-size: 14px; font-weight: 700; color: var(--muted); }
+.lab-roic-spread { font-size: 12px; font-weight: 700; margin-top: 2px; }
+.lab-value-create { color: #22c55e; } .lab-value-destroy { color: #ef4444; }
+
+/* ── Insider ── */
+.lab-insider-label { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.lab-insider-bullish { background: rgba(34,197,94,.12); color: #22c55e; }
+.lab-insider-neutral { background: rgba(148,163,184,.12); color: var(--muted); }
+.lab-insider-bearish { background: rgba(239,68,68,.12); color: #ef4444; }
+.lab-insider-trade { font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.lab-insider-buy { color: #22c55e; font-weight: 700; } .lab-insider-sell { color: #ef4444; font-weight: 700; }
+
+/* ── Stress presets ── */
+.lab-preset-btn {
+  display: inline-block; padding: 6px 14px; font-size: 11px; font-weight: 700;
+  border: none; border-radius: 8px; background: var(--panel2);
+  color: var(--text); cursor: pointer; margin: 0 4px 6px 0; transition: all .15s;
+}
+.lab-preset-btn:hover { background: rgba(99,102,241,.1); color: var(--accent); }
+.lab-preset-btn.ai { background: rgba(99,102,241,.08); color: var(--accent); }
+.lab-preset-btn.ai:hover { background: var(--accent); color: #fff; }
+
+/* AI result card */
+.ai-result-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-top: 12px; }
+.ai-vuln-gauge { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ai-vuln-bar { flex: 1; height: 10px; background: var(--panel); border-radius: 5px; overflow: hidden; }
+.ai-vuln-fill { height: 100%; border-radius: 5px; transition: width .5s ease; }
+.ai-vuln-score { font-size: 22px; font-weight: 800; min-width: 36px; text-align: center; }
+.ai-shock-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.ai-shock-pill { display: inline-block; padding: 3px 10px; font-size: 10px; font-weight: 700; border-radius: 12px; background: var(--panel2); border: 1px solid var(--accent); color: var(--accent); }
+.ai-rationale { font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 10px; padding: 10px; background: var(--panel2); border-radius: 8px; border-left: 3px solid var(--accent); }
+
+/* ── Risk Diff ── */
+.lab-diff-add { background: rgba(34,197,94,.1); color: #22c55e; padding: 1px 3px; border-radius: 3px; }
+.lab-diff-del { background: rgba(239,68,68,.1); color: #ef4444; text-decoration: line-through; padding: 1px 3px; border-radius: 3px; opacity: .8; }
+.lab-diff-stats { display: flex; gap: 12px; padding: 8px 10px; margin-bottom: 10px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; font-size: 11px; font-weight: 700; flex-wrap: wrap; }
+.lab-diff-stats .stat-add { color: #22c55e; } .lab-diff-stats .stat-del { color: #ef4444; } .lab-diff-stats .stat-pct { color: var(--muted); }
+.lab-diff-toggle { display: flex; gap: 0; margin-bottom: 10px; }
+.lab-diff-toggle button { padding: 5px 12px; font-size: 11px; font-weight: 700; cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--muted); }
+.lab-diff-toggle button:first-child { border-radius: 6px 0 0 6px; }
+.lab-diff-toggle button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.lab-diff-toggle button.active { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+.lab-diff-view { max-height: 40vh; overflow-y: auto; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; line-height: 1.7; word-wrap: break-word; }
+.lab-diff-para { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.lab-diff-para:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+.lab-diff-change-block { margin: 6px 0; padding: 6px 10px; border-radius: 6px; border-left: 3px solid; }
+.lab-diff-change-block.added { background: rgba(34,197,94,.06); border-left-color: #22c55e; }
+.lab-diff-change-block.removed { background: rgba(239,68,68,.06); border-left-color: #ef4444; }
+.lab-diff-change-block.modified { background: rgba(234,179,8,.06); border-left-color: #eab308; }
+.lab-diff-ctx-collapsed { color: var(--muted); font-size: 10px; font-style: italic; cursor: pointer; padding: 3px 8px; margin: 4px 0; border-radius: 4px; background: var(--panel2); display: inline-block; }
+.lab-diff-ctx-collapsed:hover { background: var(--panel); }
+.lab-diff-change-marker { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin-bottom: 3px; opacity: .7; }
+.lab-diff-nav { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; }
+.lab-diff-nav button { padding: 3px 8px; font-size: 10px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--muted); }
+.lab-diff-nav button:hover { border-color: var(--accent); color: var(--accent); }
+.lab-diff-nav .diff-count { font-size: 10px; color: var(--muted); }
+.lab-diff-clean .lab-diff-new-phrase { background: rgba(34,197,94,.1); padding: 1px 2px; border-radius: 2px; }
+.lab-diff-clean { font-size: 11.5px; line-height: 1.7; }
+.lab-diff-omissions { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(239,68,68,.06); border: 1px solid rgba(239,68,68,.15); }
+.lab-diff-omissions-hdr { font-size: 10px; font-weight: 700; color: #ef4444; margin-bottom: 4px; letter-spacing: .03em; text-transform: uppercase; }
+.lab-diff-omissions-body { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.lab-diff-omission-item { padding: 3px 0; border-bottom: 1px solid rgba(239,68,68,.08); }
+.lab-diff-omission-item:last-child { border-bottom: none; }
+.lab-diff-ai-insight { padding: 10px 12px; margin-bottom: 10px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--border); }
+.lab-diff-ai-insight-hdr { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 11px; font-weight: 700; color: var(--accent); }
+.lab-diff-ai-insight-body { font-size: 11px; color: var(--muted); line-height: 1.6; }
+
+/* ── EPV ── */
+.lab-epv-indicator { font-size: 13px; font-weight: 700; margin-top: 4px; }
+.lab-epv-discount { color: #22c55e; } .lab-epv-premium { color: #ef4444; }
+
+/* ── Case studies ── */
+.lab-case-item { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.lab-case-item-title { font-weight: 700; color: var(--text); }
+.lab-case-item-meta { font-size: 10px; color: var(--muted); }
+.lab-btn { display: inline-block; padding: 6px 14px; font-size: 12px; font-weight: 700; border: none; border-radius: 6px; cursor: pointer; background: var(--accent); color: var(--panel); }
+.lab-btn:hover { opacity: .85; }
+.lab-btn-sm { padding: 3px 8px; font-size: 11px; }
+.lab-btn-danger { background: #ef4444; }
+
+/* ── Scenario input row ── */
+.lab-scenario-row { display: flex; gap: 8px; margin-top: 12px; }
+.lab-scenario-row input {
+  flex: 1; padding: 10px 14px; font-size: 13px; border: none;
+  border-radius: 10px; background: var(--panel2); color: var(--text);
+  transition: box-shadow .15s;
+}
+.lab-scenario-row input:focus { outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+.lab-sim-btn {
+  padding: 8px 18px; font-size: 12px; font-weight: 700; border: none; border-radius: 8px;
+  background: var(--accent); color: var(--panel); cursor: pointer; white-space: nowrap;
+}
+.lab-sim-btn:hover { opacity: .9; } .lab-sim-btn:disabled { opacity: .5; cursor: wait; }
+
+/* ── Sticky save bar ── */
+.lab-save-bar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+  display: flex; align-items: center; gap: 10px; padding: 10px 18px;
+  background: var(--panel); border-top: 1px solid var(--border);
+  box-shadow: 0 -2px 12px rgba(0,0,0,.1);
+}
+.lab-save-bar input {
+  flex: 1; max-width: 300px; padding: 7px 12px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); color: var(--text);
+}
+
+/* Ripple animation */
+@keyframes labPulse { 0% { box-shadow: 0 0 0 0 rgba(239,68,68,.4); } 70% { box-shadow: 0 0 0 10px rgba(239,68,68,0); } 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); } }
+.lab-ripple-pulse { animation: labPulse .8s ease-out 2; }
+
+/* ── Two-column grid for side-by-side sections ── */
+.lab-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 700px) { .lab-two-col { grid-template-columns: 1fr; } }
+
+/* ══════════════════════════════════════════════════════════════
+   Dark mode — Financial Lab
+   ══════════════════════════════════════════════════════════════ */
+body.theme-dark .lab-section-hdr .badge.pass { background:rgba(74,222,128,.1); color:#4ade80; }
+body.theme-dark .lab-section-hdr .badge.fail { background:rgba(248,113,113,.1); color:#f87171; }
+body.theme-dark .lab-implied-big.val-good { color:#4ade80; text-shadow:0 0 30px rgba(74,222,128,.2); }
+body.theme-dark .lab-implied-big.val-fair { color:#fbbf24; text-shadow:0 0 30px rgba(251,191,36,.15); }
+body.theme-dark .lab-implied-big.val-rich { color:#f87171; text-shadow:0 0 30px rgba(248,113,113,.2); }
+body.theme-dark .lab-gap-fill.historical { background:#4ade80; }
+body.theme-dark .lab-sense-table td.hi { background:rgba(74,222,128,.08); color:#4ade80; }
+body.theme-dark .lab-sense-table td.lo { background:rgba(248,113,113,.08); color:#f87171; }
+body.theme-dark .lab-pill-green { color:#4ade80; }
+body.theme-dark .lab-pill-red { color:#f87171; }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="lab-page">
+
+<!-- ══ Header ══════════════════════════════════════════════════════════ -->
+<div class="lab-hdr">
+  <span class="lab-hdr-ticker">${{ ticker }}</span>
+  <span class="lab-hdr-name">{{ company_name }}</span>
+  <div class="lab-hdr-pills" id="headerPills"></div>
+  <a href="/ticker/{{ ticker }}" class="lab-back">&larr; Back</a>
+</div>
+
+<!-- ══ Verdict Bar ════════════════════════════════════════════════════ -->
+<div class="lab-verdict" id="verdictBar"></div>
+
+<!-- ══ DCF Engine (always open, the hero) ════════════════════════════ -->
+<div class="lab-section" id="dcfSection">
+  <div class="lab-section-hdr" onclick="toggleSection('dcfSection')">
+    <span class="chevron open">&#9654;</span>
+    Reverse DCF Engine
+  </div>
+  <div class="lab-section-body">
+    <div class="lab-implied-big" id="impliedBig">&mdash;</div>
+    <div class="lab-implied-sub" id="impliedSub">Implied FCF growth rate to justify current price</div>
+
+    <div id="expectationGap"></div>
+
+    <div class="lab-inputs">
+      <div class="lab-input-group">
+        <label>Current Price ($)</label>
+        <input type="number" id="dcfPrice" step="0.01">
+      </div>
+      <div class="lab-input-group">
+        <label>Shares (M)</label>
+        <input type="number" id="dcfShares" step="0.1">
+      </div>
+      <div class="lab-input-group">
+        <label>Current FCF ($M)</label>
+        <input type="number" id="dcfFCF" step="0.1">
+      </div>
+    </div>
+
+    <div class="lab-slider-group">
+      <label>Discount Rate <span id="dcfDiscountVal">10.0%</span></label>
+      <input type="range" id="dcfDiscount" min="6" max="16" step="0.5" value="10">
+    </div>
+    <div class="lab-slider-group">
+      <label>Terminal Growth <span id="dcfTerminalVal">3.0%</span></label>
+      <input type="range" id="dcfTerminal" min="1" max="5" step="0.5" value="3">
+    </div>
+    <div class="lab-slider-group">
+      <label>Projection Years <span id="dcfYearsVal">10</span></label>
+      <input type="range" id="dcfYears" min="5" max="20" step="1" value="10">
+    </div>
+
+    <div id="dcfResult"></div>
+    <div id="dcfSensitivity"></div>
+    <div id="epvResult"></div>
+  </div>
+</div>
+
+<!-- ══ Stress Testing (collapsed by default) ═════════════════════════ -->
+<div class="lab-section collapsed" id="stressSection">
+  <div class="lab-section-hdr" onclick="toggleSection('stressSection')">
+    <span class="chevron">&#9654;</span>
+    Stress Testing
+    <span class="badge neutral">AI + Manual</span>
+  </div>
+  <div class="lab-section-body">
+    <div style="margin-bottom: 10px;">
+      <div style="font-size: 10px; font-weight: 700; color: var(--muted); margin-bottom: 6px;">AI SCENARIOS</div>
+      <button class="lab-preset-btn ai" onclick="setScenario('Fed rate hike +300bps')">Rate Hike +300bps</button>
+      <button class="lab-preset-btn ai" onclick="setScenario('Global supply chain crisis — major port shutdowns')">Supply Chain Crisis</button>
+      <button class="lab-preset-btn ai" onclick="setScenario('Taiwan military conflict and semiconductor embargo')">Taiwan Conflict</button>
+      <button class="lab-preset-btn ai" onclick="setScenario('Oil hits $150 per barrel')">Oil $150</button>
+      <button class="lab-preset-btn ai" onclick="setScenario('US imposes 60% tariffs on all Chinese imports')">60% Tariffs</button>
+      <button class="lab-preset-btn ai" onclick="setScenario('Major antitrust breakup of Big Tech companies')">Big Tech Breakup</button>
+    </div>
+    <div style="margin-bottom: 10px;">
+      <div style="font-size: 10px; font-weight: 700; color: var(--muted); margin-bottom: 6px;">MANUAL PRESETS (instant DCF update)</div>
+      <button class="lab-preset-btn" onclick="applyStressPreset(-20, 0, 0)">Recession (-20% rev)</button>
+      <button class="lab-preset-btn" onclick="applyStressPreset(0, -5, 0)">Margin Squeeze (-5pp)</button>
+      <button class="lab-preset-btn" onclick="applyStressPreset(0, 0, 2)">Rate Hike (+200bps)</button>
+      <button class="lab-preset-btn" onclick="applyStressPreset(-15, -3, 1)">Stagflation</button>
+    </div>
+    <div class="lab-scenario-row">
+      <input type="text" id="scenarioInput" placeholder="Type any scenario... e.g. 'Oil hits $150', '60% China tariffs'" onkeydown="if(event.key==='Enter')runAIScenario()">
+      <button class="lab-sim-btn" id="scenarioBtn" onclick="runAIScenario()">Simulate</button>
+    </div>
+    <div id="stressResult"></div>
+    <div id="aiScenarioResult"></div>
+  </div>
+</div>
+
+<!-- ══ Quality Checklist (collapsed) ═════════════════════════════════ -->
+<div class="lab-section collapsed" id="checklistSection">
+  <div class="lab-section-hdr" onclick="toggleSection('checklistSection')">
+    <span class="chevron">&#9654;</span>
+    Quality Checklist (Buffett / Munger)
+    <span class="badge neutral" id="checklistBadge">--</span>
+  </div>
+  <div class="lab-section-body">
+    <div id="checklistItems"></div>
+  </div>
+</div>
+
+<!-- ══ Capital & Insiders — two-column (collapsed) ═══════════════════ -->
+<div class="lab-section collapsed" id="capitalSection">
+  <div class="lab-section-hdr" onclick="toggleSection('capitalSection')">
+    <span class="chevron">&#9654;</span>
+    Capital Allocation & Insiders
+  </div>
+  <div class="lab-section-body">
+    <div class="lab-two-col">
+      <div>
+        <div style="font-size: 11px; font-weight: 800; color: var(--muted); text-transform: uppercase; margin-bottom: 8px;">ROIC vs WACC</div>
+        <div id="roicWaccContent" style="font-size: 11px; color: var(--muted);">Loading...</div>
+        <div style="font-size: 11px; font-weight: 800; color: var(--muted); text-transform: uppercase; margin: 14px 0 8px;">FCF Waterfall</div>
+        <div id="allocWaterfall" style="font-size: 11px; color: var(--muted);">Loading...</div>
+      </div>
+      <div>
+        <div style="font-size: 11px; font-weight: 800; color: var(--muted); text-transform: uppercase; margin-bottom: 8px;">Insider Conviction</div>
+        <div id="insiderConviction" style="font-size: 11px; color: var(--muted);">Loading...</div>
+        <div style="font-size: 11px; font-weight: 800; color: var(--muted); text-transform: uppercase; margin: 14px 0 8px;">Segments</div>
+        <div id="segmentsInfo" style="font-size: 11px; color: var(--muted);">Loading...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Risk Factor Diff (collapsed) ══════════════════════════════════ -->
+<div class="lab-section collapsed" id="riskDiffSection">
+  <div class="lab-section-hdr" onclick="toggleSection('riskDiffSection')">
+    <span class="chevron">&#9654;</span>
+    SEC Risk Factors Diff
+    <span class="badge neutral" id="riskDiffBadge">loading</span>
+  </div>
+  <div class="lab-section-body">
+    <div id="riskDiffContent" style="color: var(--muted); font-size: 12px;">Loading...</div>
+  </div>
+</div>
+
+<!-- ══ Saved Studies (collapsed) ═════════════════════════════════════ -->
+<div class="lab-section collapsed" id="casesSection">
+  <div class="lab-section-hdr" onclick="toggleSection('casesSection')">
+    <span class="chevron">&#9654;</span>
+    Saved IC Memos
+    <span class="badge neutral" id="casesBadge">0</span>
+  </div>
+  <div class="lab-section-body">
+    <div id="savedCasesList" style="font-size: 11px; color: var(--muted);">Loading...</div>
+  </div>
+</div>
+
+</div><!-- end .lab-page -->
+
+<!-- ══ Sticky Save Bar ════════════════════════════════════════════════ -->
+<div class="lab-save-bar">
+  <input type="text" id="caseTitle" placeholder="IC Memo title...">
+  <button class="lab-btn" onclick="saveCaseStudy()">Save IC Memo</button>
+  <div style="flex:1;"></div>
+  <span style="font-size:11px;color:var(--muted);" id="saveStatus"></span>
+</div>
+
+<script>
+(function(){
+  var CTX = {{ ctx | tojson }};
+  var CHECKLIST = {{ checklist | tojson }};
+  var TICKER = {{ ticker | tojson }};
+
+  /* ── Helpers ── */
+  function fmt(v, dec) { return v != null ? Number(v).toFixed(dec ?? 1) : '\u2014'; }
+  function fmtM(v) {
+    if (v == null) return '\u2014';
+    var a = Math.abs(v);
+    if (a >= 1e12) return '$' + (v/1e12).toFixed(1) + 'T';
+    if (a >= 1e9)  return '$' + (v/1e9).toFixed(1) + 'B';
+    if (a >= 1e6)  return '$' + (v/1e6).toFixed(1) + 'M';
+    if (a >= 1e3)  return '$' + (v/1e3).toFixed(0) + 'K';
+    return '$' + v.toFixed(0);
+  }
+  function fmtPct(v) { return v != null ? (v >= 0 ? '+' : '') + Number(v).toFixed(1) + '%' : '\u2014'; }
+  function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+  /* ── Section toggle ── */
+  window.toggleSection = function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('collapsed');
+    var chev = el.querySelector('.chevron');
+    if (chev) chev.classList.toggle('open', !el.classList.contains('collapsed'));
+  };
+
+  /* ═══ HEADER PILLS ═══ */
+  (function() {
+    var pills = [];
+    if (CTX.current_price != null) pills.push({t: '$' + fmt(CTX.current_price, 2)});
+    if (CTX.market_cap != null) pills.push({t: fmtM(CTX.market_cap)});
+    if (CTX.fcf_per_share != null) pills.push({t: 'FCF/sh $' + fmt(CTX.fcf_per_share, 2)});
+    if (CTX.pe_ratio != null) pills.push({t: 'P/E ' + fmt(CTX.pe_ratio, 1) + 'x'});
+    if (CTX.debt_to_equity != null) pills.push({t: 'D/E ' + fmt(CTX.debt_to_equity, 2)});
+    if (CTX.rev_cagr_5yr != null) pills.push({t: '5yr CAGR ' + fmt(CTX.rev_cagr_5yr, 1) + '%'});
+    var pr = CTX.price || {};
+    if (pr.ytd_return != null) pills.push({t: 'YTD ' + fmtPct(pr.ytd_return), cls: pr.ytd_return >= 0 ? 'lab-pill-green' : 'lab-pill-red'});
+    if (pr.m12_return != null) pills.push({t: '12M ' + fmtPct(pr.m12_return), cls: pr.m12_return >= 0 ? 'lab-pill-green' : 'lab-pill-red'});
+    if (pr.y5_return != null) pills.push({t: '5Y ' + fmtPct(pr.y5_return), cls: pr.y5_return >= 0 ? 'lab-pill-green' : 'lab-pill-red'});
+    var html = '';
+    pills.forEach(function(p) { html += '<span class="lab-pill' + (p.cls ? ' ' + p.cls : '') + '">' + p.t + '</span>'; });
+    document.getElementById('headerPills').innerHTML = html;
+  })();
+
+  /* ═══ VERDICT BAR ═══ */
+  (function() {
+    var items = CHECKLIST.items || [];
+    var valid = items.filter(function(it) { return it.pass != null && !(it.detail && it.detail.indexOf('N/A') === 0); });
+    var score = valid.filter(function(it) { return it.pass; }).length;
+    var max = valid.length;
+    var pct = max > 0 ? Math.round(score / max * 100) : 0;
+    var checkColor = pct >= 70 ? '#22c55e' : pct >= 40 ? '#eab308' : '#ef4444';
+
+    var rw = CTX.roic_wacc || {};
+    var roicText = rw.roic != null ? rw.roic.toFixed(1) + '%' : '\u2014';
+    var roicColor = rw.creates_value ? '#22c55e' : rw.roic != null ? '#ef4444' : 'var(--muted)';
+    var spreadText = rw.spread != null ? (rw.spread >= 0 ? '+' : '') + rw.spread.toFixed(1) + 'pp' : '';
+
+    var ic = CTX.insider_conviction || {};
+    var icColor = ic.label === 'Bullish' ? '#22c55e' : ic.label === 'Bearish' ? '#ef4444' : 'var(--muted)';
+
+    document.getElementById('verdictBar').innerHTML =
+      '<div class="lab-verdict-card"><div class="lab-verdict-label">Quality</div>' +
+      '<div class="lab-verdict-val" style="color:' + checkColor + ';">' + score + '/' + max + '</div>' +
+      '<div class="lab-verdict-sub">' + pct + '% pass rate</div></div>' +
+
+      '<div class="lab-verdict-card"><div class="lab-verdict-label">ROIC</div>' +
+      '<div class="lab-verdict-val" style="color:' + roicColor + ';">' + roicText + '</div>' +
+      '<div class="lab-verdict-sub">' + spreadText + ' vs WACC</div></div>' +
+
+      '<div class="lab-verdict-card"><div class="lab-verdict-label">Insiders</div>' +
+      '<div class="lab-verdict-val" style="color:' + icColor + ';">' + (ic.label || '\u2014') + '</div>' +
+      '<div class="lab-verdict-sub">' + (ic.summary || 'No data') + '</div></div>' +
+
+      '<div class="lab-verdict-card"><div class="lab-verdict-label">Implied Growth</div>' +
+      '<div class="lab-verdict-val" id="verdictImplied" style="color:var(--accent);">\u2014</div>' +
+      '<div class="lab-verdict-sub" id="verdictImpliedSub">Run DCF below</div></div>';
+
+    // Update checklist badge
+    var badge = document.getElementById('checklistBadge');
+    badge.textContent = score + '/' + max;
+    badge.className = 'badge ' + (pct >= 70 ? 'pass' : pct >= 40 ? 'neutral' : 'fail');
+  })();
+
+  /* ═══ PRE-FILL DCF INPUTS ═══ */
+  if (CTX.current_price) document.getElementById('dcfPrice').value = CTX.current_price.toFixed(2);
+  if (CTX.shares_outstanding) document.getElementById('dcfShares').value = (CTX.shares_outstanding / 1e6).toFixed(1);
+  if (CTX.latest_fcf) document.getElementById('dcfFCF').value = (CTX.latest_fcf / 1e6).toFixed(1);
+
+  /* ═══ CHECKLIST WITH TOGGLE SWITCHES ═══ */
+  window._checklistOverrides = {};
+  var _origChecklistItems = JSON.parse(JSON.stringify(CHECKLIST.items || []));
+
+  function renderChecklist() {
+    var items = _origChecklistItems;
+    var html = '';
+    var score = 0, maxScore = 0;
+    items.forEach(function(it, idx) {
+      if (it.pass == null || (it.detail && (it.detail === 'N/A' || it.detail.indexOf('N/A') === 0))) return;
+      maxScore++;
+      var overridden = !!window._checklistOverrides[idx];
+      var effective = overridden ? !it.pass : it.pass;
+      if (effective) score++;
+      var badge = effective ? '<span class="lab-check-badge pass">PASS</span>' : '<span class="lab-check-badge fail">FAIL</span>';
+      var cls = overridden ? ' overridden' : '';
+      html += '<div class="lab-check-item' + cls + '">' + badge +
+        '<div style="flex:1;"><div class="lab-check-label">' + it.label + '</div>' +
+        '<div class="lab-check-detail">' + it.detail + '</div></div>' +
+        '<label class="lab-toggle-switch"><input type="checkbox" ' + (overridden ? 'checked' : '') +
+        ' onchange="toggleOverride(' + idx + ')"><span class="lab-toggle-slider"></span></label></div>';
+    });
+    document.getElementById('checklistItems').innerHTML = html;
+    var badge = document.getElementById('checklistBadge');
+    var pct = maxScore > 0 ? Math.round(score / maxScore * 100) : 0;
+    badge.textContent = score + '/' + maxScore;
+    badge.className = 'badge ' + (pct >= 70 ? 'pass' : pct >= 40 ? 'neutral' : 'fail');
+    applyConvictionRipple(pct);
+  }
+
+  window.toggleOverride = function(idx) {
+    window._checklistOverrides[idx] = !window._checklistOverrides[idx];
+    if (!window._checklistOverrides[idx]) delete window._checklistOverrides[idx];
+    renderChecklist();
+  };
+
+  var _baseDiscountRate = parseFloat(document.getElementById('dcfDiscount').value) || 10;
+  function applyConvictionRipple(conviction) {
+    var nudge = 0;
+    if (conviction < 60) nudge = Math.ceil((60 - conviction) / 10) * 0.5;
+    var newRate = _baseDiscountRate + nudge;
+    var el = document.getElementById('dcfDiscount');
+    if (parseFloat(el.value) !== newRate) {
+      el.value = newRate.toFixed(1);
+      document.getElementById('dcfDiscountVal').textContent = newRate.toFixed(1) + '%';
+      var dcfCard = document.getElementById('dcfResult');
+      dcfCard.classList.remove('lab-ripple-pulse');
+      void dcfCard.offsetWidth;
+      dcfCard.classList.add('lab-ripple-pulse');
+      if (typeof window.runDCF === 'function' && CTX.current_price && CTX.shares_outstanding && CTX.latest_fcf) runDCF();
+    }
+  }
+  renderChecklist();
+
+  /* ═══ INSIDER CONVICTION ═══ */
+  (function() {
+    var ic = CTX.insider_conviction || {};
+    var el = document.getElementById('insiderConviction');
+    if (!ic.trades || !ic.trades.length) { el.innerHTML = '<div>No insider trade data</div>'; return; }
+    var labelCls = ic.label === 'Bullish' ? 'lab-insider-bullish' : (ic.label === 'Bearish' ? 'lab-insider-bearish' : 'lab-insider-neutral');
+    var html = '<div style="margin-bottom:4px;"><span class="lab-insider-label ' + labelCls + '">' + ic.label + ' (' + ic.score + ')</span></div>';
+    html += '<div style="font-size:10px;color:var(--muted);margin-bottom:4px;">' + (ic.summary || '') + '</div>';
+    ic.trades.slice(0, 5).forEach(function(t) {
+      var txCls = t.tx_type === 'BUY' ? 'lab-insider-buy' : 'lab-insider-sell';
+      html += '<div class="lab-insider-trade"><span style="color:var(--muted);">' + (t.date||'').slice(0,10) + '</span> ' +
+        '<span class="' + txCls + '">' + t.tx_type + '</span> <strong>' + (t.owner||'') + '</strong>' +
+        (t.net_shares ? ' ' + Math.abs(t.net_shares).toLocaleString() + ' shs' : '') + '</div>';
+    });
+    el.innerHTML = html;
+  })();
+
+  /* ═══ ROIC vs WACC ═══ */
+  (function() {
+    var rw = CTX.roic_wacc || {};
+    var el = document.getElementById('roicWaccContent');
+    if (rw.roic == null || rw.wacc == null) { el.innerHTML = '<div>No ROIC/WACC data</div>'; return; }
+    var d = rw.details || {};
+    var spreadColor = rw.creates_value ? 'lab-value-create' : 'lab-value-destroy';
+    el.innerHTML =
+      '<div class="lab-roic-card">' +
+      '<div><div class="lab-roic-big" style="color:' + (rw.roic > rw.wacc ? '#22c55e' : '#ef4444') + ';">' + rw.roic.toFixed(1) + '%</div><div style="font-size:10px;color:var(--muted);text-align:center;">ROIC</div></div>' +
+      '<div class="lab-roic-vs">vs</div>' +
+      '<div><div class="lab-roic-big" style="color:var(--muted);">' + rw.wacc.toFixed(1) + '%</div><div style="font-size:10px;color:var(--muted);text-align:center;">WACC</div></div>' +
+      '<div style="flex:1;min-width:100px;">' +
+      '<div class="lab-roic-spread ' + spreadColor + '">Spread: ' + (rw.spread >= 0 ? '+' : '') + rw.spread.toFixed(1) + '%</div>' +
+      '<div style="font-size:10px;color:var(--muted);">Ke:' + (d.cost_of_equity||'?') + '% Kd:' + (d.cost_of_debt||'?') + '%</div></div></div>';
+  })();
+
+  /* ═══ FCF WATERFALL ═══ */
+  (function() {
+    var fin = CTX.financials || {};
+    var fcf = fin.free_cf || [], ocf = fin.operating_cf || [], capex = fin.capex || [];
+    var latestFCF = fcf.length ? fcf[fcf.length-1] : null;
+    var latestOCF = ocf.length ? ocf[ocf.length-1] : null;
+    var latestCapex = capex.length ? capex[capex.length-1] : null;
+    var buyback = (CTX.intel || {}).buyback || {};
+    var ttmBuyback = buyback.ttm_value || 0;
+    if (latestFCF != null) {
+      var maxVal = Math.max(Math.abs(latestOCF||0), Math.abs(latestFCF||0), Math.abs(ttmBuyback||0), 1);
+      var scale = 120 / maxVal;
+      document.getElementById('allocWaterfall').innerHTML =
+        barRow('Oper CF', latestOCF, scale, 'green') + barRow('Capex', latestCapex, scale, 'red') +
+        barRow('Free CF', latestFCF, scale, 'blue') + barRow('Buybacks', -ttmBuyback, scale, 'gray');
+    } else {
+      document.getElementById('allocWaterfall').innerHTML = '<div style="color:var(--muted);">No cash flow data</div>';
+    }
+  })();
+  function barRow(label, val, scale, color) {
+    var w = Math.abs((val||0) * scale);
+    return '<div class="lab-bar-row"><div class="lab-bar-label">' + label + '</div>' +
+      '<div class="lab-bar ' + color + '" style="width:' + Math.max(w,2) + 'px;"></div>' +
+      '<div class="lab-bar-val">' + fmtM(val) + '</div></div>';
+  }
+
+  /* ═══ SEGMENTS ═══ */
+  (function() {
+    var segs = (CTX.intel || {}).segments || {};
+    var html = '';
+    (segs.product || []).forEach(function(s) { html += '<div>' + (s.name||'?') + ': ' + (s.pct_revenue||0).toFixed(0) + '%</div>'; });
+    if (!html) html = '<div>No segment data</div>';
+    document.getElementById('segmentsInfo').innerHTML = html;
+  })();
+
+  /* ═══ REVERSE DCF ENGINE ═══ */
+  function computeImpliedGrowth(price, fcfM, sharesM, discountPct, terminalPct, years) {
+    var mktCap = price * sharesM;
+    var lo = -30, hi = 80;
+    for (var i = 0; i < 100; i++) {
+      var mid = (lo + hi) / 2;
+      var val = dcfValue(fcfM, mid/100, discountPct/100, terminalPct/100, years);
+      if (val < mktCap) lo = mid; else hi = mid;
+      if (Math.abs(hi - lo) < 0.01) break;
+    }
+    return (lo + hi) / 2;
+  }
+  function dcfValue(fcf, g, r, tg, n) {
+    var total = 0, cf = fcf;
+    for (var y = 1; y <= n; y++) { cf = cf * (1 + g); total += cf / Math.pow(1 + r, y); }
+    var tv = cf * (1 + tg) / (r - tg);
+    total += tv / Math.pow(1 + r, n);
+    return total;
+  }
+
+  var _dcfDebounce = null;
+  function onSliderInput() {
+    document.getElementById('dcfDiscountVal').textContent = document.getElementById('dcfDiscount').value + '%';
+    document.getElementById('dcfTerminalVal').textContent = document.getElementById('dcfTerminal').value + '%';
+    document.getElementById('dcfYearsVal').textContent = document.getElementById('dcfYears').value;
+    clearTimeout(_dcfDebounce);
+    _dcfDebounce = setTimeout(function() { runDCF(); }, 50);
+  }
+  document.getElementById('dcfDiscount').addEventListener('input', onSliderInput);
+  document.getElementById('dcfTerminal').addEventListener('input', onSliderInput);
+  document.getElementById('dcfYears').addEventListener('input', onSliderInput);
+  document.getElementById('dcfPrice').addEventListener('change', function() { runDCF(); });
+  document.getElementById('dcfShares').addEventListener('change', function() { runDCF(); });
+  document.getElementById('dcfFCF').addEventListener('change', function() { runDCF(); });
+
+  window.runDCF = function() {
+    var price = parseFloat(document.getElementById('dcfPrice').value) || 0;
+    var shares = parseFloat(document.getElementById('dcfShares').value) || 0;
+    var fcf = parseFloat(document.getElementById('dcfFCF').value) || 0;
+    var disc = parseFloat(document.getElementById('dcfDiscount').value) || 10;
+    var term = parseFloat(document.getElementById('dcfTerminal').value) || 3;
+    var yrs = parseInt(document.getElementById('dcfYears').value) || 10;
+
+    if (!price || !shares || !fcf) {
+      document.getElementById('impliedBig').textContent = '\u2014';
+      document.getElementById('impliedSub').textContent = 'Fill in price, shares, and FCF';
+      document.getElementById('dcfResult').innerHTML = '';
+      document.getElementById('dcfSensitivity').innerHTML = '';
+      document.getElementById('expectationGap').innerHTML = '';
+      return;
+    }
+
+    var implied = computeImpliedGrowth(price, fcf, shares, disc, term, yrs);
+    var histCAGR = CTX.rev_cagr_5yr;
+
+    var bigEl = document.getElementById('impliedBig');
+    bigEl.textContent = implied.toFixed(1) + '%';
+    bigEl.className = 'lab-implied-big';
+    if (histCAGR != null) {
+      var gap = implied - histCAGR;
+      if (gap < -3) bigEl.classList.add('val-good');
+      else if (gap > 5) bigEl.classList.add('val-rich');
+      else bigEl.classList.add('val-fair');
+    }
+    document.getElementById('impliedSub').textContent = 'Implied FCF growth at ' + disc + '% discount, ' + term + '% terminal, ' + yrs + 'yr';
+
+    // Update verdict bar
+    var vi = document.getElementById('verdictImplied');
+    if (vi) {
+      vi.textContent = implied.toFixed(1) + '%';
+      vi.style.color = bigEl.classList.contains('val-good') ? '#22c55e' : bigEl.classList.contains('val-rich') ? '#ef4444' : '#eab308';
+    }
+    var vis = document.getElementById('verdictImpliedSub');
+    if (vis && histCAGR != null) vis.textContent = 'vs ' + histCAGR.toFixed(1) + '% historical';
+
+    renderExpectationGap(implied, histCAGR);
+
+    var mosHtml = '';
+    if (histCAGR != null) {
+      var diff = implied - histCAGR;
+      if (diff > 3) mosHtml = '<div class="lab-result-sub" style="color:#ef4444;">Market expects ' + diff.toFixed(1) + 'pp ABOVE historical growth \u2014 low margin of safety</div>';
+      else if (diff < -3) mosHtml = '<div class="lab-result-sub" style="color:#22c55e;">Market expects ' + Math.abs(diff).toFixed(1) + 'pp BELOW historical growth \u2014 good margin of safety</div>';
+      else mosHtml = '<div class="lab-result-sub" style="color:#eab308;">Market expects growth roughly in line with history</div>';
+    }
+    document.getElementById('dcfResult').innerHTML =
+      '<div class="lab-result-card">' +
+      '<div class="lab-result-title">DCF Parameters</div>' +
+      '<div class="lab-result-sub">Discount: ' + disc + '% \u00b7 Terminal: ' + term + '% \u00b7 Years: ' + yrs + '</div>' +
+      (histCAGR != null ? '<div class="lab-result-sub">Historical 5yr Revenue CAGR: ' + histCAGR.toFixed(1) + '%</div>' : '') +
+      mosHtml + '</div>';
+
+    var discRates = [8, 9, 10, 11, 12];
+    var termRates = [2, 2.5, 3, 3.5, 4];
+    var html = '<div class="lab-result-card"><div class="lab-result-title">Sensitivity: Implied Growth (%)</div>';
+    html += '<table class="lab-sense-table"><thead><tr><th>Disc \\ Term</th>';
+    termRates.forEach(function(t) { html += '<th>' + t + '%</th>'; });
+    html += '</tr></thead><tbody>';
+    discRates.forEach(function(d) {
+      html += '<tr><th>' + d + '%</th>';
+      termRates.forEach(function(t) {
+        var ig = computeImpliedGrowth(price, fcf, shares, d, t, yrs);
+        var cls = ig > 20 ? 'lo' : ig < 8 ? 'hi' : 'mid';
+        html += '<td class="' + cls + '">' + ig.toFixed(1) + '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    document.getElementById('dcfSensitivity').innerHTML = html;
+
+    window._lastDCF = { params: {price:price, shares:shares, fcf:fcf, discount:disc, terminal:term, years:yrs}, result: {implied_growth: parseFloat(implied.toFixed(2))} };
+    computeEPV();
+  };
+
+  function renderExpectationGap(implied, histCAGR) {
+    var el = document.getElementById('expectationGap');
+    if (histCAGR == null) { el.innerHTML = ''; return; }
+    var maxRate = Math.max(Math.abs(implied), Math.abs(histCAGR), 1) * 1.2;
+    var impliedW = Math.max(Math.abs(implied) / maxRate * 100, 2);
+    var histW = Math.max(Math.abs(histCAGR) / maxRate * 100, 2);
+    var gap = implied - histCAGR;
+    var gapColor = gap > 3 ? '#ef4444' : gap < -3 ? '#22c55e' : '#eab308';
+    var gapText = gap > 3 ? 'Market expects above historical' : gap < -3 ? 'Priced below historical \u2014 potential opportunity' : 'Roughly in line with history';
+    el.innerHTML =
+      '<div class="lab-expectation-gap">' +
+      '<div class="lab-gap-row"><div class="lab-gap-label">Implied</div><div class="lab-gap-track"><div class="lab-gap-fill implied" style="width:' + impliedW + '%;"></div></div><div class="lab-gap-val" style="color:var(--accent);">' + implied.toFixed(1) + '%</div></div>' +
+      '<div class="lab-gap-row"><div class="lab-gap-label">Historical</div><div class="lab-gap-track"><div class="lab-gap-fill historical" style="width:' + histW + '%;"></div></div><div class="lab-gap-val" style="color:#22c55e;">' + histCAGR.toFixed(1) + '%</div></div>' +
+      '<div class="lab-gap-verdict" style="color:' + gapColor + ';">Gap: ' + (gap >= 0 ? '+' : '') + gap.toFixed(1) + 'pp \u2014 ' + gapText + '</div></div>';
+  }
+
+  function computeEPV() {
+    var fcfArr = (CTX.financials || {}).free_cf || [];
+    var discRate = parseFloat(document.getElementById('dcfDiscount').value) || 10;
+    var price = CTX.current_price, sharesOut = CTX.shares_outstanding;
+    var valid = fcfArr.filter(function(v) { return v != null; });
+    var last3 = valid.slice(-3);
+    if (last3.length < 1 || !sharesOut || !price) { document.getElementById('epvResult').innerHTML = ''; return; }
+    var normFCF = last3.reduce(function(a,b) { return a+b; }, 0) / last3.length;
+    var epv = normFCF / (discRate / 100);
+    var epvPerShare = epv / sharesOut;
+    var premDisc = ((price - epvPerShare) / epvPerShare) * 100;
+    var isDiscount = premDisc < 0;
+    var colorCls = isDiscount ? 'lab-epv-discount' : 'lab-epv-premium';
+    var label = isDiscount ? 'Discount' : 'Premium';
+    document.getElementById('epvResult').innerHTML =
+      '<div class="lab-result-card">' +
+      '<div class="lab-result-title">Earnings Power Value (EPV)</div>' +
+      '<div class="lab-result-big">$' + epvPerShare.toFixed(2) + '</div>' +
+      '<div class="lab-result-sub">EPV per share (normalized 3yr FCF at ' + discRate + '% discount)</div>' +
+      '<div class="lab-result-sub">Total EPV: ' + fmtM(epv) + ' \u00b7 Normalized FCF: ' + fmtM(normFCF) + '</div>' +
+      '<div class="lab-epv-indicator ' + colorCls + '">Current price $' + price.toFixed(2) + ' trades at ' + Math.abs(premDisc).toFixed(1) + '% ' + label + ' to EPV</div></div>';
+  }
+
+  if (CTX.current_price && CTX.shares_outstanding && CTX.latest_fcf) setTimeout(function() { runDCF(); }, 100);
+
+  /* ═══ STRESS TESTER ═══ */
+  window.applyStressPreset = function(revChg, marginChg, rateChg) {
+    var fin = CTX.financials || {};
+    var rev = fin.revenue || [], fcfArr = fin.free_cf || [];
+    var latestRev = rev.length ? rev[rev.length-1] : null;
+    var latestFCF = fcfArr.length ? fcfArr[fcfArr.length-1] : null;
+    if (!latestRev || !latestFCF) { document.getElementById('stressResult').innerHTML = '<div style="color:#ef4444;">Insufficient data for stress test.</div>'; return; }
+
+    var fcfMargin = latestFCF / latestRev;
+    var newRev = latestRev * (1 + revChg/100);
+    var newMargin = fcfMargin + marginChg/100;
+    var newFCF = newRev * newMargin;
+    var newDiscount = _baseDiscountRate + rateChg;
+
+    document.getElementById('dcfDiscount').value = Math.min(16, Math.max(6, newDiscount)).toFixed(1);
+    document.getElementById('dcfDiscountVal').textContent = document.getElementById('dcfDiscount').value + '%';
+    document.getElementById('dcfFCF').value = (newFCF / 1e6).toFixed(1);
+    runDCF();
+
+    var price = parseFloat(document.getElementById('dcfPrice').value) || CTX.current_price || 0;
+    var shares = parseFloat(document.getElementById('dcfShares').value) || (CTX.shares_outstanding ? CTX.shares_outstanding/1e6 : 0);
+    var term = parseFloat(document.getElementById('dcfTerminal').value) || 3;
+    var yrs = parseInt(document.getElementById('dcfYears').value) || 10;
+    var stressImplied = null, baseImplied = null;
+    if (price && shares && newFCF) stressImplied = computeImpliedGrowth(price, newFCF/1e6, shares, newDiscount, term, yrs);
+    if (price && shares && latestFCF) baseImplied = computeImpliedGrowth(price, latestFCF/1e6, shares, _baseDiscountRate, term, yrs);
+
+    var html = '<div class="lab-result-card"><div class="lab-result-title">Stress Result</div>';
+    html += '<table class="lab-sense-table"><thead><tr><th>Metric</th><th>Base</th><th>Stressed</th></tr></thead><tbody>';
+    html += '<tr><td>Revenue</td><td>' + fmtM(latestRev) + '</td><td>' + fmtM(newRev) + '</td></tr>';
+    html += '<tr><td>FCF Margin</td><td>' + (fcfMargin*100).toFixed(1) + '%</td><td>' + (newMargin*100).toFixed(1) + '%</td></tr>';
+    html += '<tr><td>FCF</td><td>' + fmtM(latestFCF) + '</td><td>' + fmtM(newFCF) + '</td></tr>';
+    html += '<tr><td>Discount</td><td>' + _baseDiscountRate.toFixed(1) + '%</td><td>' + newDiscount.toFixed(1) + '%</td></tr>';
+    if (baseImplied != null && stressImplied != null) html += '<tr><td><strong>Implied Growth</strong></td><td><strong>' + baseImplied.toFixed(1) + '%</strong></td><td><strong>' + stressImplied.toFixed(1) + '%</strong></td></tr>';
+    html += '</tbody></table></div>';
+    document.getElementById('stressResult').innerHTML = html;
+    window._lastStress = { params: {rev_change: revChg, margin_change: marginChg, rate_change: rateChg}, result: {base_implied: baseImplied, stress_implied: stressImplied, new_fcf: newFCF} };
+  };
+
+  window.setScenario = function(text) { document.getElementById('scenarioInput').value = text; runAIScenario(); };
+  window.runAIScenario = function() {
+    var scenario = document.getElementById('scenarioInput').value.trim();
+    if (!scenario) return;
+    var btn = document.getElementById('scenarioBtn');
+    var el = document.getElementById('aiScenarioResult');
+    btn.disabled = true; btn.textContent = 'Analyzing...';
+    el.innerHTML = '<div style="color:var(--accent);font-size:12px;padding:12px;">Analyzing ' + TICKER + '\'s exposure for "' + scenario.replace(/</g,'&lt;') + '"...</div>';
+    var fd = new FormData(); fd.append('scenario', scenario);
+    fetch('/api/lab/' + TICKER + '/simulate-scenario', {method:'POST', body:fd})
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        btn.disabled = false; btn.textContent = 'Simulate';
+        if (!data.ok) { el.innerHTML = '<div style="color:#ef4444;padding:8px;">' + (data.error || 'Analysis failed.') + '</div>'; return; }
+        renderAIScenario(data);
+        var ai = data.ai_assessment || {};
+        applyStressPreset(ai.revenue_impact_pct || 0, (ai.margin_compression_bps || 0) / 100, (ai.wacc_increase_bps || 0) / 100);
+      })
+      .catch(function() { btn.disabled = false; btn.textContent = 'Simulate'; el.innerHTML = '<div style="color:#ef4444;padding:8px;">Network error \u2014 please try again.</div>'; });
+  };
+
+  function renderAIScenario(data) {
+    var el = document.getElementById('aiScenarioResult');
+    var ai = data.ai_assessment || {};
+    var sf = data.stressed_financials || {};
+    var vuln = ai.vulnerability_score || 5;
+    var vulnColor = vuln <= 3 ? '#22c55e' : vuln <= 6 ? '#eab308' : '#ef4444';
+    var vulnLabel = vuln <= 3 ? 'Low Risk' : vuln <= 6 ? 'Moderate Risk' : 'High Risk';
+    var html = '<div class="ai-result-card">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><div style="font-size:12px;font-weight:700;">AI Risk Assessment</div><div style="font-size:10px;color:var(--muted);">' + (data.sector || '') + '</div></div>';
+    html += '<div class="ai-vuln-gauge"><div style="font-size:10px;font-weight:700;color:var(--muted);min-width:60px;">Vuln</div><div class="ai-vuln-bar"><div class="ai-vuln-fill" style="width:' + (vuln*10) + '%;background:' + vulnColor + ';"></div></div><div class="ai-vuln-score" style="color:' + vulnColor + ';">' + vuln + '<span style="font-size:10px;color:var(--muted);">/10</span></div><div style="font-size:10px;font-weight:600;color:' + vulnColor + ';">' + vulnLabel + '</div></div>';
+    var vectors = ai.shock_vectors || [];
+    if (vectors.length) { html += '<div class="ai-shock-pills">'; vectors.forEach(function(v) { html += '<span class="ai-shock-pill">' + v + '</span>'; }); html += '</div>'; }
+    html += '<table class="lab-sense-table" style="margin-bottom:10px;"><thead><tr><th>Impact</th><th>Value</th></tr></thead><tbody>';
+    html += '<tr><td>Revenue</td><td style="color:' + (ai.revenue_impact_pct >= 0 ? '#22c55e' : '#ef4444') + ';font-weight:700;">' + (ai.revenue_impact_pct >= 0 ? '+' : '') + (ai.revenue_impact_pct || 0).toFixed(1) + '%</td></tr>';
+    html += '<tr><td>Margin</td><td style="color:' + (ai.margin_compression_bps >= 0 ? '#22c55e' : '#ef4444') + ';font-weight:700;">' + (ai.margin_compression_bps >= 0 ? '+' : '') + (ai.margin_compression_bps || 0).toFixed(0) + ' bps</td></tr>';
+    html += '<tr><td>WACC</td><td style="color:' + (ai.wacc_increase_bps > 0 ? '#ef4444' : '#22c55e') + ';font-weight:700;">+' + (ai.wacc_increase_bps || 0).toFixed(0) + ' bps</td></tr>';
+    html += '</tbody></table>';
+    if (ai.rationale) html += '<div class="ai-rationale">' + ai.rationale.replace(/</g,'&lt;') + '</div>';
+    if (sf.base_revenue) {
+      html += '<table class="lab-sense-table"><thead><tr><th>Financial</th><th>Base</th><th>Stressed</th></tr></thead><tbody>';
+      html += '<tr><td>Revenue</td><td>' + fmtM(sf.base_revenue) + '</td><td>' + fmtM(sf.stressed_revenue) + '</td></tr>';
+      html += '<tr><td>FCF Margin</td><td>' + (sf.base_fcf_margin || 0).toFixed(1) + '%</td><td>' + (sf.stressed_fcf_margin || 0).toFixed(1) + '%</td></tr>';
+      html += '<tr><td>FCF</td><td>' + fmtM(sf.base_fcf) + '</td><td>' + fmtM(sf.stressed_fcf) + '</td></tr>';
+      html += '</tbody></table>';
+    }
+    html += '</div>';
+    el.innerHTML = html;
+  }
+
+  /* ═══ RISK FACTORS DIFF ═══ */
+  var _riskDiffCache = null, _riskDiffSection = 'risk_factors', _diffViewMode = 'clean';
+
+  function loadRiskFactors() {
+    if (_riskDiffCache) { renderRiskDiff(_riskDiffCache); return; }
+    document.getElementById('riskDiffContent').innerHTML = '<div style="color:var(--muted);">Loading risk factor diff...</div>';
+    fetch('/api/lab/' + TICKER + '/risk-diff')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        _riskDiffCache = data;
+        renderRiskDiff(data);
+        var badge = document.getElementById('riskDiffBadge');
+        if (data.available) {
+          var sec = data[_riskDiffSection] || {};
+          var pct = sec.pct_changed || 0;
+          badge.textContent = pct + '% changed';
+          badge.className = 'badge ' + (pct > 15 ? 'fail' : pct > 5 ? 'neutral' : 'pass');
+        } else {
+          badge.textContent = 'N/A'; badge.className = 'badge neutral';
+        }
+      })
+      .catch(function() { document.getElementById('riskDiffContent').innerHTML = '<div style="color:#ef4444;">Failed to load risk factor diff.</div>'; });
+  }
+
+  function renderRiskDiff(data) {
+    var el = document.getElementById('riskDiffContent');
+    if (!data.available) { el.innerHTML = '<div class="lab-result-card"><div class="lab-result-title">Risk Factors Diff</div><div style="color:var(--muted);">' + (data.reason || 'Unavailable') + '</div></div>'; return; }
+    var html = '';
+    var sec = data[_riskDiffSection] || {};
+    var added = sec.words_added || 0, removed = sec.words_removed || 0, pct = sec.pct_changed || 0;
+    var blocks = sec.diff_blocks || [];
+    var segments = blocks.length ? _buildDiffSegments(blocks) : [];
+
+    var insightParts = [];
+    if (added > removed * 1.5) insightParts.push('Management heavily expanded this section, adding ' + added + ' new words');
+    else if (removed > added * 1.5) insightParts.push('Management condensed this section, removing ' + removed + ' words');
+    else if (added > 50 || removed > 50) insightParts.push('Significant rewriting \u2014 ' + added + ' words added, ' + removed + ' removed');
+    else if (added > 0 || removed > 0) insightParts.push('Minor edits \u2014 ' + added + ' words added, ' + removed + ' removed');
+    if (pct > 15) insightParts.push('Major revision (' + pct + '% of total content changed)');
+    else if (pct > 5) insightParts.push('Moderate revision (' + pct + '% changed)');
+
+    var addedTexts = [], removedTexts = [];
+    segments.forEach(function(seg) { if (seg.type === 'context') return; (seg.parts || []).forEach(function(p) { if (p.type === 'insert' && p.text.length > 20) addedTexts.push(p.text); if (p.type === 'delete' && p.text.length > 20) removedTexts.push(p.text); }); });
+
+    html += '<div class="lab-diff-ai-insight"><div class="lab-diff-ai-insight-hdr">AI Insight</div><div class="lab-diff-ai-insight-body">' + (insightParts.length ? insightParts.join('. ') + '.' : 'No material changes detected.') + '</div></div>';
+    html += '<div style="font-size:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px;"><span style="padding:2px 6px;background:var(--panel2);border:1px solid var(--border);border-radius:4px;font-weight:600;">' + data.current.form + ' ' + data.current.date + '</span><span style="color:var(--muted);">vs</span><span style="padding:2px 6px;background:var(--panel2);border-radius:4px;">' + data.previous.form + ' ' + data.previous.date + '</span></div>';
+
+    html += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">';
+    html += '<div class="lab-diff-toggle" id="riskToggle"><button class="' + (_riskDiffSection === 'risk_factors' ? 'active' : '') + '" onclick="switchRiskSection(\'risk_factors\')">Risk Factors</button><button class="' + (_riskDiffSection === 'mda' ? 'active' : '') + '" onclick="switchRiskSection(\'mda\')">MD&A</button></div>';
+    html += '<div class="lab-diff-toggle"><button class="' + (_diffViewMode === 'clean' ? 'active' : '') + '" onclick="switchDiffView(\'clean\')">Clean</button><button class="' + (_diffViewMode === 'raw' ? 'active' : '') + '" onclick="switchDiffView(\'raw\')">Raw Diff</button></div>';
+    html += '<div class="lab-diff-stats" style="margin-bottom:0;"><span class="stat-add">+' + added + '</span><span class="stat-del">\u2212' + removed + '</span><span class="stat-pct">' + pct + '%</span></div>';
+    html += '</div>';
+
+    if (!blocks.length) {
+      html += '<div class="lab-diff-view" style="color:var(--muted);">No content found for this section.</div>';
+    } else if (_diffViewMode === 'clean') {
+      html += '<div class="lab-diff-view lab-diff-clean" id="riskDiffView" style="max-height:300px;">';
+      segments.forEach(function(seg) {
+        if (seg.type === 'context') {
+          var words = seg.text.split(/\s+/);
+          if (words.length > 80) html += '<div class="lab-diff-para"><span>' + escHtml(words.slice(0,30).join(' ')) + ' </span><span style="color:var(--muted);font-size:10px;font-style:italic;">... ' + (words.length - 30) + ' unchanged words ...</span></div>';
+          else html += '<div class="lab-diff-para"><span>' + escHtml(seg.text) + '</span></div>';
+        } else {
+          var changePara = '';
+          (seg.parts || []).forEach(function(p) {
+            if (p.type === 'equal') changePara += escHtml(p.text) + ' ';
+            else if (p.type === 'insert') changePara += '<span class="lab-diff-new-phrase">' + escHtml(p.text) + '</span> ';
+          });
+          if (changePara.trim()) html += '<div class="lab-diff-para">' + changePara + '</div>';
+        }
+      });
+      html += '</div>';
+      if (removedTexts.length) {
+        html += '<div class="lab-diff-omissions"><div class="lab-diff-omissions-hdr">Notable Removals from Prior Filing</div><div class="lab-diff-omissions-body">';
+        removedTexts.slice().sort(function(a,b) { return b.length - a.length; }).slice(0, 5).forEach(function(t) {
+          html += '<div class="lab-diff-omission-item">\u201c' + escHtml(t.length > 150 ? t.slice(0,150) + '...' : t) + '\u201d</div>';
+        });
+        html += '</div></div>';
+      }
+    } else {
+      var changeCount = segments.filter(function(s) { return s.type !== 'context'; }).length;
+      html += '<div class="lab-diff-nav"><button onclick="diffJump(-1)">&#9650; Prev</button><button onclick="diffJump(1)">&#9660; Next</button><span class="diff-count">' + changeCount + ' change' + (changeCount !== 1 ? 's' : '') + '</span></div>';
+      html += '<div class="lab-diff-view" id="riskDiffView" style="max-height:300px;">';
+      var changeIdx = 0;
+      segments.forEach(function(seg) {
+        if (seg.type === 'context') {
+          var words = seg.text.split(/\s+/);
+          if (words.length > 60) {
+            var uid = 'diffCtx' + changeIdx;
+            html += '<div class="lab-diff-para"><span>' + escHtml(words.slice(0,20).join(' ')) + ' </span><span class="lab-diff-ctx-collapsed" onclick="this.style.display=\'none\';document.getElementById(\'' + uid + '\').style.display=\'inline\';">... ' + (words.length - 20) + ' words (expand)</span><span id="' + uid + '" style="display:none;">' + escHtml(words.slice(20).join(' ')) + '</span></div>';
+          } else html += '<div class="lab-diff-para"><span>' + escHtml(seg.text) + '</span></div>';
+        } else {
+          var cls = seg.type === 'added' ? 'added' : seg.type === 'removed' ? 'removed' : 'modified';
+          var label = seg.type === 'added' ? 'New language' : seg.type === 'removed' ? 'Removed' : 'Modified';
+          html += '<div class="lab-diff-change-block ' + cls + '" data-diff-change="' + changeIdx + '"><div class="lab-diff-change-marker">' + label + '</div>';
+          seg.parts.forEach(function(p) {
+            if (p.type === 'equal') html += '<span>' + escHtml(p.text) + ' </span>';
+            else if (p.type === 'insert') html += '<span class="lab-diff-add">' + escHtml(p.text) + ' </span>';
+            else if (p.type === 'delete') html += '<span class="lab-diff-del">' + escHtml(p.text) + ' </span>';
+          });
+          html += '</div>'; changeIdx++;
+        }
+      });
+      html += '</div>';
+    }
+    el.innerHTML = html;
+    window._diffChangeIdx = -1;
+  }
+
+  function _buildDiffSegments(blocks) {
+    var segments = [], i = 0;
+    while (i < blocks.length) {
+      if (blocks[i].type === 'equal') { segments.push({type:'context', text:blocks[i].text}); i++; }
+      else {
+        var parts = [], hasAdd = false, hasDel = false;
+        while (i < blocks.length && blocks[i].type !== 'equal') { parts.push(blocks[i]); if (blocks[i].type === 'insert') hasAdd = true; if (blocks[i].type === 'delete') hasDel = true; i++; }
+        segments.push({type: (hasAdd && hasDel) ? 'modified' : hasAdd ? 'added' : 'removed', parts: parts});
+      }
+    }
+    return segments;
+  }
+
+  window._diffChangeIdx = -1;
+  window.diffJump = function(dir) {
+    var view = document.getElementById('riskDiffView'); if (!view) return;
+    var changes = view.querySelectorAll('[data-diff-change]'); if (!changes.length) return;
+    window._diffChangeIdx += dir;
+    if (window._diffChangeIdx < 0) window._diffChangeIdx = changes.length - 1;
+    if (window._diffChangeIdx >= changes.length) window._diffChangeIdx = 0;
+    changes.forEach(function(c) { c.style.boxShadow = ''; });
+    var target = changes[window._diffChangeIdx];
+    target.style.boxShadow = '0 0 0 2px var(--accent)';
+    target.scrollIntoView({behavior:'smooth', block:'center'});
+  };
+
+  window.switchRiskSection = function(sec) { _riskDiffSection = sec; if (_riskDiffCache) renderRiskDiff(_riskDiffCache); };
+  window.switchDiffView = function(mode) { _diffViewMode = mode; if (_riskDiffCache) renderRiskDiff(_riskDiffCache); };
+  setTimeout(function() { loadRiskFactors(); }, 200);
+
+  /* ═══ CASE STUDIES ═══ */
+  function loadCases() {
+    fetch('/api/lab/' + TICKER + '/case-studies')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var cases = data.cases || [];
+        renderCaseList(cases, 'savedCasesList');
+        var badge = document.getElementById('casesBadge');
+        badge.textContent = cases.length;
+      });
+  }
+  function renderCaseList(cases, elId) {
+    var el = document.getElementById(elId);
+    if (!cases.length) { el.innerHTML = '<div style="color:var(--muted);font-size:11px;">No saved studies yet.</div>'; return; }
+    var html = '';
+    cases.forEach(function(c) {
+      html += '<div class="lab-case-item"><div class="lab-case-item-title">' + c.title + '</div>' +
+        '<div class="lab-case-item-meta">' + c.module + ' \u00b7 ' + (c.created_at||'').slice(0,10) + '</div>' +
+        (c.notes ? '<div style="font-size:10px;color:var(--text);margin-top:2px;">' + c.notes + '</div>' : '') +
+        '<button class="lab-btn lab-btn-sm lab-btn-danger" style="margin-top:3px;" onclick="deleteCase(' + c.id + ')">Delete</button></div>';
+    });
+    el.innerHTML = html;
+  }
+  window.saveCaseStudy = function() {
+    var title = document.getElementById('caseTitle').value.trim();
+    if (!title) { alert('Please enter a title.'); return; }
+    var mod = 'dcf', params = {}, result = {};
+    if (window._lastDCF) { params = window._lastDCF.params; result = window._lastDCF.result; }
+    if (window._lastStress) { mod = 'stress'; params = window._lastStress.params; result = window._lastStress.result; }
+    var fd = new FormData();
+    fd.append('title', title); fd.append('module', mod);
+    fd.append('params_json', JSON.stringify(params)); fd.append('result_json', JSON.stringify(result)); fd.append('notes', '');
+    fetch('/api/lab/' + TICKER + '/case-study', {method:'POST', body:fd})
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.ok) { document.getElementById('caseTitle').value = ''; document.getElementById('saveStatus').textContent = 'Saved!'; setTimeout(function() { document.getElementById('saveStatus').textContent = ''; }, 2000); loadCases(); }
+        else alert('Error: ' + (data.error || 'Unknown'));
+      });
+  };
+  window.deleteCase = function(id) {
+    if (!confirm('Delete this case study?')) return;
+    fetch('/api/lab/' + TICKER + '/case-study/' + id, {method:'DELETE'}).then(function(r) { return r.json(); }).then(function() { loadCases(); });
+  };
+  loadCases();
+
+})();
+</script>
+{% endblock %}

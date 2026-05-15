@@ -1,0 +1,24 @@
+{
+  "displayName": "InvestorOS: Stuck agent runs detected (>3)",
+  "documentation": {
+    "content": "The **agent worker found and cleaned >3 stuck agent runs**. Multiple agent runs were left in `running` state for >60 minutes before cleanup.\n\nThis usually means `run_event_driven_monitor()` or another agent crashed without calling `finish_agent_run()`. The cleanup auto-resolves it, but repeated occurrences indicate a systemic crash.\n\nInvestigate:\n```\n# Check health endpoint\ncurl -s https://investor-tools-app-gq4yi3pgoa-ew.a.run.app/api/health/data-integrity | python3 -m json.tool\n\n# Force cleanup of any remaining stuck runs\ncurl -X POST https://investor-tools-app-gq4yi3pgoa-ew.a.run.app/api/agent/runs/cleanup-stuck\n\n# Check agent worker logs\ngcloud run jobs executions list --job=investor-tools-worker-job --region=europe-west1\n```",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "Stuck agent runs log entry from worker",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_run_job\" AND jsonPayload.alert=\"stuck_agent_runs\"",
+        "labelExtractors": {}
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "86400s",
+    "notificationRateLimit": {
+      "period": "21600s"
+    }
+  },
+  "combiner": "OR",
+  "notificationChannels": ["__CHANNEL__"]
+}

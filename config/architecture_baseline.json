@@ -1,0 +1,11 @@
+{
+  "import_cycles": {
+    "max_cycle_groups": 0,
+    "enforce": 0
+  },
+  "structure": {
+    "max_files_over_1200": 16,
+    "max_functions_over_200": 34,
+    "enforce": 0
+  }
+}

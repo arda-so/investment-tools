@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+run_step() {
+  local label="$1"
+  shift
+  echo "[ontology-maintenance] starting: ${label}"
+  "$@"
+  echo "[ontology-maintenance] done: ${label}"
+}
+
+run_step "decay-refresh" "$ROOT/bin/run_decay_refresh_job"
+run_step "entity-canonicalization" "$ROOT/bin/run_entity_canonicalization_job"
+run_step "anti-reverify-enqueue" "$ROOT/bin/run_anti_reverify_enqueue_job"
+run_step "anti-reverify-worker" "$ROOT/bin/run_anti_reverify_worker_job"
+
+echo "[ontology-maintenance] complete"

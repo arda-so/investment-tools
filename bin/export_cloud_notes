@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+BASE_URL="${BASE_URL:-https://investor-tools-app-gq4yi3pgoa-ew.a.run.app}"
+LIMIT="${LIMIT:-800}"
+INCLUDE_SYSTEM="${INCLUDE_SYSTEM:-1}"
+
+TOKEN="${NOTES_EXPORT_BEARER:-}"
+if [ -z "$TOKEN" ]; then
+  TOKEN="$(gcloud auth print-identity-token)"
+fi
+
+ARGS=(--base-url "$BASE_URL" --out-dir "$ROOT/Notes" --limit "$LIMIT" --bearer "$TOKEN")
+if [ "$INCLUDE_SYSTEM" = "1" ]; then
+  ARGS+=(--include-system)
+fi
+
+python3 "$ROOT/tools/export_notes_to_markdown.py" "${ARGS[@]}"
+

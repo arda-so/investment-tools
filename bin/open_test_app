@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+PORT="${TEST_APP_PORT:-8877}"
+PATH_SUFFIX="${TEST_OPEN_PATH:-/dashboard}"
+NO_OPEN="${NO_OPEN:-0}"
+LOG_FILE="${ROOT}/logs/test_app_${PORT}.log"
+
+usage() {
+  cat <<'USAGE'
+Usage: bin/open_test_app [--port N] [--path /route] [--no-open]
+
+Starts LOCAL TEST app in background and opens the URL.
+Defaults:
+  --port 8877
+  --path /dashboard
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port)
+      PORT="${2:-}"
+      shift 2
+      ;;
+    --path)
+      PATH_SUFFIX="${2:-}"
+      shift 2
+      ;;
+    --no-open)
+      NO_OPEN="1"
+      shift 1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1"
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [ -z "${PORT}" ]; then
+  echo "Invalid port."
+  exit 2
+fi
+
+mkdir -p "${ROOT}/logs"
+
+if lsof -ti "tcp:${PORT}" >/dev/null 2>&1; then
+  kill -9 $(lsof -ti "tcp:${PORT}") >/dev/null 2>&1 || true
+  sleep 1
+fi
+
+nohup env APP_PORT="${PORT}" "${ROOT}/bin/run_test_app" >"${LOG_FILE}" 2>&1 &
+APP_PID=$!
+
+for _ in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:${PORT}/health/live" >/dev/null 2>&1; then
+    break
+  fi
+  if curl -fsS "http://127.0.0.1:${PORT}/health/ready" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+
+if ! curl -fsS "http://127.0.0.1:${PORT}/health/live" >/dev/null 2>&1 \
+   && ! curl -fsS "http://127.0.0.1:${PORT}/health/ready" >/dev/null 2>&1; then
+  echo "Failed to start local test app. Check log: ${LOG_FILE}"
+  if ps -p "${APP_PID}" >/dev/null 2>&1; then
+    kill -9 "${APP_PID}" >/dev/null 2>&1 || true
+  fi
+  exit 1
+fi
+
+URL="http://127.0.0.1:${PORT}${PATH_SUFFIX}"
+echo "Local TEST app ready (pid=${APP_PID})"
+echo "Open: ${URL}"
+echo "Log:  ${LOG_FILE}"
+
+if [ "${NO_OPEN}" != "1" ]; then
+  open "${URL}" >/dev/null 2>&1 || true
+fi
+

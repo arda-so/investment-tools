@@ -1,0 +1,28 @@
+<div id="companyHubRoot" class="deal-root">
+  {% if message %}
+  <div class="flash">{{ message }}</div>
+  {% endif %}
+
+  <section class="company-header" style="margin-bottom:10px;">
+    <div class="logo-box">{{ (detail.ticker or "H")[:1] }}</div>
+    <div>
+      <h1 class="co-name" style="font-size:30px;">{{ detail.ticker }} Ticker Hub</h1>
+      <div class="co-meta">{{ detail.name }} • Dedicated hub view</div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+        <a href="/company_file?t={{ detail.ticker|urlencode }}" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;background:var(--panel2);color:var(--text);font-size:12px;font-weight:700;border-radius:999px;text-decoration:none;border:1px solid var(--border);">Back to Company File</a>
+        <a href="/lab/{{ detail.ticker }}" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;background:var(--accent);color:#fff;font-size:12px;font-weight:700;border-radius:999px;text-decoration:none;">Financial Lab</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="canvas-sec">
+    <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--panel);">
+      <iframe
+        src="/workspace/ticker/{{ detail.ticker|urlencode }}?embed=1"
+        title="Ticker Hub {{ detail.ticker }}"
+        style="width:100%;height:calc(100vh - 220px);min-height:760px;border:0;"
+        loading="lazy"
+      ></iframe>
+    </div>
+  </section>
+</div>

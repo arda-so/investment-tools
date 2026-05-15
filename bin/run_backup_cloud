@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "PASS: $1"; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
+
+need_cmd pg_dump
+need_cmd tar
+need_cmd gcloud
+
+if [ -f ".env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source ./.env
+  set +a
+fi
+
+BUCKET="${BACKUP_BUCKET:-${CLOUD_FILES_BUCKET:-}}"
+PREFIX="${BACKUP_PREFIX:-backups}"
+TS="${BACKUP_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
+DELETE_LOCAL_ARCHIVES=0
+KEEP_LOCAL_DAYS="${KEEP_LOCAL_DAYS:-14}"
+
+for arg in "$@"; do
+  case "$arg" in
+    --delete-local-archives) DELETE_LOCAL_ARCHIVES=1 ;;
+    *) fail "unknown option: $arg" ;;
+  esac
+done
+
+[ -n "${POSTGRES_DSN:-}" ] || fail "POSTGRES_DSN is empty"
+[ -n "$BUCKET" ] || fail "BACKUP_BUCKET or CLOUD_FILES_BUCKET is required"
+[ "$BUCKET" != "your-gcs-bucket" ] || fail "BACKUP_BUCKET must be a real GCS bucket name, not the placeholder"
+[ "$BUCKET" != "<your_gcs_bucket>" ] || fail "BACKUP_BUCKET must be a real GCS bucket name, not the placeholder"
+
+if [[ "$POSTGRES_DSN" != *"password="* ]] && [ -z "${PGPASSWORD:-}" ]; then
+  fail "PGPASSWORD is not set and POSTGRES_DSN does not embed a password; pg_dump would block on a password prompt"
+fi
+
+echo "Checking GCS bucket access..."
+gcloud storage ls "gs://${BUCKET}" >/dev/null 2>&1 || fail "cannot access gs://${BUCKET}; verify bucket name and gcloud auth"
+pass "gcs bucket reachable: gs://${BUCKET}"
+
+echo "Checking Postgres connection..."
+PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-5}" pg_dump \
+  --dbname="$POSTGRES_DSN" \
+  --schema-only \
+  --no-owner \
+  --no-privileges \
+  --file=/dev/null \
+  >/dev/null 2>&1 || fail "pg_dump preflight failed; verify POSTGRES_DSN, PGPASSWORD, and database reachability"
+pass "postgres connection preflight ok"
+
+WORKDIR="$ROOT/backups/cloud_backup_${TS}"
+mkdir -p "$WORKDIR"
+
+DB_DUMP="$WORKDIR/postgres.dump"
+FILES_TAR="$WORKDIR/runtime_files.tar.gz"
+MANIFEST="$WORKDIR/manifest.txt"
+
+{
+  echo "timestamp_utc=${TS}"
+  echo "project_root=${ROOT}"
+  echo "bucket=${BUCKET}"
+  echo "prefix=${PREFIX}"
+  echo "git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "paths=data reports outputs filings filing_docs Notes config sql"
+} > "$MANIFEST"
+
+echo "Creating Postgres backup..."
+pg_dump \
+  --dbname="$POSTGRES_DSN" \
+  --format=custom \
+  --no-owner \
+  --no-privileges \
+  --file="$DB_DUMP"
+pass "postgres dump created: $DB_DUMP"
+
+echo "Creating runtime file archive..."
+ARCHIVE_PATHS=()
+for p in data reports outputs filings filing_docs Notes config sql; do
+  [ -e "$p" ] && ARCHIVE_PATHS+=("$p")
+done
+[ "${#ARCHIVE_PATHS[@]}" -gt 0 ] || fail "no runtime paths found to archive"
+
+tar \
+  --exclude='data/cache' \
+  --exclude='data/yf_cache' \
+  --exclude='logs' \
+  --exclude='frontend/node_modules' \
+  -czf "$FILES_TAR" \
+  "${ARCHIVE_PATHS[@]}"
+pass "file archive created: $FILES_TAR"
+
+DEST_PREFIX="${PREFIX%/}/${TS}"
+DB_URI="gs://${BUCKET}/${DEST_PREFIX}/postgres.dump"
+FILES_URI="gs://${BUCKET}/${DEST_PREFIX}/runtime_files.tar.gz"
+MANIFEST_URI="gs://${BUCKET}/${DEST_PREFIX}/manifest.txt"
+
+echo "Uploading backup artifacts to GCS..."
+gcloud storage cp "$DB_DUMP" "$DB_URI"
+gcloud storage cp "$FILES_TAR" "$FILES_URI"
+gcloud storage cp "$MANIFEST" "$MANIFEST_URI"
+pass "backup uploaded to gs://${BUCKET}/${DEST_PREFIX}/"
+
+echo "Verifying uploaded objects..."
+gcloud storage ls "$DB_URI" >/dev/null
+gcloud storage ls "$FILES_URI" >/dev/null
+gcloud storage ls "$MANIFEST_URI" >/dev/null
+pass "uploaded objects verified"
+
+if [ "$DELETE_LOCAL_ARCHIVES" = "1" ]; then
+  echo "Removing local backup archives after successful upload..."
+  rm -f "$DB_DUMP" "$FILES_TAR" "$MANIFEST"
+  rmdir "$WORKDIR" 2>/dev/null || true
+  pass "local backup artifacts removed"
+fi
+
+echo "Pruning local backup work directories older than ${KEEP_LOCAL_DAYS} days..."
+find "$ROOT/backups" -maxdepth 1 -type d -name 'cloud_backup_*' -mtime +"$KEEP_LOCAL_DAYS" -exec rm -rf {} +
+pass "local backup retention complete"
+
+echo
+echo "Backup complete."
+echo "Cloud location: gs://${BUCKET}/${DEST_PREFIX}/"
+echo "Important: do not delete local source data until you complete a restore test from this backup."

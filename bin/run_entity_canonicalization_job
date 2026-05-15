@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+if [ -x "$ROOT/.venv-memory/bin/python" ]; then
+  PY="$ROOT/.venv-memory/bin/python"
+else
+  PY="${PYTHON_BIN:-python3}"
+fi
+
+exec "$PY" "$ROOT/tools/run_entity_canonicalization.py" \
+  --scan-limit "${ONTOLOGY_CANON_SCAN_LIMIT:-5000}" \
+  --queue-limit "${ONTOLOGY_CANON_QUEUE_LIMIT:-2000}" \
+  --judge-limit "${ONTOLOGY_CANON_JUDGE_LIMIT:-200}" \
+  --process-judge \
+  --apply

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+# Prefer project virtualenv if present.
+if [ -x "$ROOT/.venv-memory/bin/python" ]; then
+  PY="$ROOT/.venv-memory/bin/python"
+else
+  PY="${PYTHON_BIN:-python3}"
+fi
+
+# Do not auto-source .env in cloud jobs; Cloud Run injects env/secrets.
+# Optional local override: SOURCE_DOTENV=1
+if [ "${SOURCE_DOTENV:-0}" = "1" ] && [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
+exec "$PY" "$ROOT/tools/refresh_relationship_decay_scores.py" --limit "${ONTOLOGY_DECAY_REFRESH_LIMIT:-500000}" --apply

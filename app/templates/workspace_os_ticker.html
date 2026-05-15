@@ -1,0 +1,2753 @@
+{% extends "base.html" %}
+{% block title %}{{ ticker }} — {{ company_name }} | Investor OS{% endblock %}
+{% block head_extra %}
+<style>
+/* ── Header ────────────────────────────────────────────────────────────── */
+.th-header {
+  padding: 14px 0 10px 0; border-bottom: none;
+  margin-bottom: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.th-ticker { font-size: 22px; font-weight: 900; letter-spacing: -.02em; color: var(--text); }
+.th-company { font-size: 13px; font-weight: 500; color: var(--muted); margin-top: 0; }
+.th-badge {
+  font-size: 11px; font-weight: 800; padding: 4px 12px; border-radius: 999px;
+  border: none; display: inline-block;
+}
+.th-badge.active { background: var(--up-soft); color: var(--up-ink); }
+.th-badge.inactive { background: var(--panel2); color: var(--muted); }
+.th-badge.position { background: var(--info-soft); color: var(--info-ink); }
+.th-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.th-actions .btn { font-size: 12px; border: none; background: var(--panel2); border-radius: 10px; padding: 8px 16px; font-weight: 700; color: var(--text); cursor: pointer; transition: all .15s; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.th-actions .btn:hover { background: var(--accent, #6366f1); color: #fff; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(99,102,241,.25); }
+
+/* ── Group Tabs (pill/segment style) ───────────────────────────────────── */
+.th-group-bar {
+  display: flex; gap: 6px; border-bottom: none;
+  margin-bottom: 0; padding: 4px; background: var(--panel2, #edf2f6);
+  border-radius: 12px; width: fit-content; margin-top: 8px;
+}
+.th-group-btn {
+  padding: 8px 20px; font-size: 13px; font-weight: 700; color: var(--muted);
+  cursor: pointer; border: none; background: transparent;
+  border-bottom: none; margin-bottom: 0; border-radius: 8px;
+  white-space: nowrap; transition: all .15s;
+  letter-spacing: -.01em;
+}
+.th-group-btn:hover { color: var(--text); background: rgba(0,0,0,.04); }
+.th-group-btn.active { color: var(--text); background: var(--panel, #fff); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.th-group-btn .g-count {
+  font-size: 10px; font-weight: 800; background: var(--panel2); border: none;
+  border-radius: 999px; padding: 1px 6px; margin-left: 4px; vertical-align: middle;
+}
+
+/* ── Sub-tabs (pill style) ────────────────────────────────────────────── */
+.th-sub-bar {
+  display: flex; gap: 4px; background: transparent; border-bottom: none;
+  padding: 8px 0; overflow-x: auto; -webkit-overflow-scrolling: touch;
+}
+.th-sub-btn {
+  padding: 6px 14px; font-size: 12px; font-weight: 700; color: var(--muted);
+  cursor: pointer; border: none; background: transparent;
+  border-bottom: none; margin-bottom: 0; border-radius: 8px;
+  white-space: nowrap; transition: all .15s;
+}
+.th-sub-btn:hover { color: var(--text); background: var(--panel2, #f1f5f9); }
+.th-sub-btn.active { color: #fff; background: var(--accent, #6366f1); }
+.th-sub-btn.active .tab-count { background: rgba(255,255,255,.2); color: #fff; border-color: transparent; }
+.th-sub-btn .tab-count {
+  font-size: 10px; font-weight: 800; background: var(--panel2); border: none;
+  border-radius: 999px; padding: 1px 5px; margin-left: 4px; vertical-align: middle;
+}
+.th-sub-bar[hidden] { display: none; }
+
+/* ── 2-column layout ──────────────────────────────────────────────────── */
+.th-layout {
+  display: grid; grid-template-columns: 1fr; gap: 0; margin-top: 14px;
+  align-items: start;
+}
+@media (min-width: 1100px) {
+  .th-layout { grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; }
+}
+.th-main { min-width: 0; }
+.th-sidebar {
+  display: none; position: sticky; top: 12px;
+}
+@media (min-width: 1100px) {
+  .th-sidebar { display: grid; gap: 14px; align-content: start; }
+}
+.th-sidebar-card {
+  background: var(--panel); border: none; border-radius: 14px;
+  padding: 16px 18px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.th-sidebar-card .sb-label {
+  font-size: 12px; font-weight: 800; letter-spacing: -.01em;
+  text-transform: none; color: var(--text); margin-bottom: 8px;
+}
+.th-sidebar-card textarea {
+  width: 100%; box-sizing: border-box; min-height: 60px; border: none;
+  border-radius: 10px; padding: 10px 12px; font-size: 12px; color: var(--text);
+  background: var(--panel2); resize: vertical; transition: box-shadow .15s;
+}
+.th-sidebar-card textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+.th-sidebar-card textarea.bull-ta { background: var(--panel2); }
+.th-sidebar-card textarea.bear-ta { background: var(--panel2); }
+
+/* ── Research Canvas ───────────────────────────────────────────────────── */
+.rc-input-wrap {
+  display: flex; gap: 0; margin-bottom: 10px;
+}
+.rc-input-wrap input {
+  flex: 1; border: none;
+  border-radius: 12px 0 0 12px; padding: 12px 16px; font-size: 13px;
+  background: var(--panel2); color: var(--text); font-family: inherit;
+  outline: none; transition: box-shadow .15s;
+}
+.rc-input-wrap input:focus { box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+.rc-input-wrap input::placeholder { color: var(--muted); }
+.rc-enter-btn {
+  border: none; border-radius: 0 12px 12px 0;
+  background: var(--accent, #6366f1); color: #fff; font-size: 16px;
+  padding: 0 16px; cursor: pointer; transition: all .15s;
+}
+.rc-enter-btn:hover { filter: brightness(1.1); }
+.rc-sentiment-bar {
+  display: flex; gap: 6px; align-items: center; margin-bottom: 10px;
+  padding: 6px 0;
+}
+.rc-sent-btn {
+  font-size: 11px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
+  border: none; background: var(--panel2); color: var(--muted);
+  cursor: pointer; transition: all .12s;
+}
+.rc-sent-btn:hover { background: rgba(99,102,241,.1); color: var(--text); }
+.rc-sent-btn.active { background: var(--accent); color: #fff; }
+.rc-filters {
+  display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.rc-filter {
+  font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px;
+  border: none; background: var(--panel2); color: var(--muted);
+  cursor: pointer; transition: all .12s;
+}
+.rc-filter:hover { background: rgba(99,102,241,.1); color: var(--text); }
+.rc-filter.active { background: rgba(99,102,241,.1); color: var(--accent, #6366f1); }
+.rc-filter span { font-weight: 800; margin-left: 2px; }
+
+/* Note card */
+.rc-note {
+  background: var(--panel); border: none; border-radius: 14px;
+  padding: 16px 18px; margin-bottom: 10px; transition: all .15s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.rc-note:hover { box-shadow: 0 4px 16px rgba(99,102,241,.1); transform: translateY(-1px); }
+.rc-note.pinned { border-left: none; border-top: 3px solid var(--accent); }
+.rc-note .rc-note-text {
+  font-size: 13px; color: var(--text); line-height: 1.55; margin-bottom: 8px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.rc-note .rc-note-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.rc-note .rc-sent-pill {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.rc-sent-pill.s-supports { background: var(--up-soft); color: var(--up-ink); border-color: transparent; border: none; }
+.rc-sent-pill.s-challenges { background: var(--down-soft, #fee2e2); color: var(--down-ink); border-color: transparent; border: none; }
+.rc-sent-pill.s-neutral { background: var(--panel2); color: var(--muted); border: none; }
+.rc-note .rc-date { font-size: 11px; color: var(--muted); }
+.rc-note .rc-actions {
+  margin-left: auto; display: flex; gap: 4px;
+}
+.rc-note .rc-act-btn {
+  font-size: 11px; color: var(--muted); background: none; border: none;
+  cursor: pointer; padding: 2px 5px; border-radius: 4px; transition: all .12s;
+}
+.rc-note .rc-act-btn:hover { color: var(--text); background: var(--panel2); }
+
+/* Score bar */
+.rc-score-bar { margin-top: 16px; margin-bottom: 4px; }
+.rc-score-track {
+  height: 4px; background: var(--panel2); border-radius: 999px; overflow: hidden;
+}
+.rc-score-fill {
+  height: 100%; background: var(--accent); border-radius: 999px; transition: width .3s;
+}
+.rc-score-label {
+  font-size: 11px; color: var(--muted); margin-top: 5px;
+  display: flex; gap: 10px; flex-wrap: wrap;
+}
+
+/* Inline thread expansion */
+.rc-thread-expand {
+  border-top: 1px solid var(--border); margin-top: 8px; padding-top: 10px;
+}
+.rc-thread-msg {
+  padding: 6px 0; font-size: 12px; color: var(--text); line-height: 1.5;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+.rc-thread-msg:last-of-type { border-bottom: none; }
+.rc-thread-msg .msg-date { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+.rc-thread-reply-wrap {
+  display: flex; gap: 6px; margin-top: 8px;
+}
+.rc-thread-reply-wrap input {
+  flex: 1; border: none; border-radius: 8px;
+  padding: 8px 12px; font-size: 12px; background: var(--panel2);
+  color: var(--text); font-family: inherit; outline: none; transition: box-shadow .15s;
+}
+.rc-thread-reply-wrap input:focus { box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+.rc-thread-reply-wrap button {
+  font-size: 11px; font-weight: 700; padding: 6px 14px; border-radius: 8px;
+  border: none; background: var(--accent); color: #fff;
+  cursor: pointer; transition: all .15s;
+}
+.rc-thread-reply-wrap button:hover { filter: brightness(1.1); }
+
+.th-pane { display: none; }
+.th-pane.active { display: block; }
+
+/* ── Overview cards ────────────────────────────────────────────────────── */
+.th-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+@media (max-width: 700px) { .th-grid { grid-template-columns: 1fr; } }
+.th-card {
+  background: var(--panel); border: none; border-radius: 14px;
+  padding: 18px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  transition: all .15s;
+}
+.th-card:hover { box-shadow: 0 4px 16px rgba(99,102,241,.08); }
+.th-card-label {
+  font-size: 13px; font-weight: 800; letter-spacing: -.01em;
+  text-transform: none; color: var(--text); margin-bottom: 8px;
+}
+.th-card-body { font-size: 13px; color: var(--text); line-height: 1.55; }
+.th-card-body .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.th-card.full { grid-column: 1 / -1; }
+.th-card.accent-left { border-left: none; border-top: 3px solid var(--accent); }
+.th-card.info-left { border-left: none; border-top: 3px solid var(--info); }
+.th-card.up-left { border-left: none; border-top: 3px solid var(--up); }
+.th-card.warn-left { border-left: none; border-top: 3px solid var(--warn, #f59e0b); }
+.th-kv { display: flex; gap: 18px; flex-wrap: wrap; }
+.th-kv-item { }
+.th-kv-item .label { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--muted); letter-spacing: .03em; }
+.th-kv-item .value { font-size: 16px; font-weight: 800; color: var(--text); margin-top: 2px; }
+
+/* ── Section headers ───────────────────────────────────────────────────── */
+.th-section-head {
+  font-size: 15px; font-weight: 800; color: var(--text); margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px; letter-spacing: -.01em;
+}
+.th-section-head .count {
+  font-size: 10px; font-weight: 700; background: rgba(99,102,241,.08); border: none;
+  border-radius: 999px; padding: 2px 8px; color: var(--accent, #6366f1);
+}
+
+/* ── List items (reusable) ─────────────────────────────────────────────── */
+.th-list-item {
+  display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px;
+  border: none; border-radius: 12px; margin-bottom: 8px;
+  background: var(--panel); cursor: pointer; transition: all .15s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.th-list-item:hover { box-shadow: 0 4px 16px rgba(99,102,241,.1); transform: translateY(-1px); }
+.th-list-item .emoji { font-size: 18px; flex: 0 0 24px; text-align: center; }
+.th-list-item .body { flex: 1; min-width: 0; }
+.th-list-item .title { font-size: 13px; font-weight: 700; color: var(--text); }
+.th-list-item .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.th-list-item .detail { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+.th-list-item .badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.th-item-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700;
+  border: none; background: var(--panel2); color: var(--muted);
+}
+.th-item-badge.up { background: var(--up-soft); color: var(--up-ink); }
+.th-item-badge.info { background: var(--info-soft); color: var(--info-ink); }
+.th-item-badge.warn { background: #fef3c7; color: #92400e; }
+.th-item-badge.down { background: var(--down-soft, #fee2e2); color: var(--down-ink); }
+
+/* ── Timeline ──────────────────────────────────────────────────────────── */
+.th-timeline { position: relative; padding-left: 20px; }
+.th-timeline::before {
+  content: ''; position: absolute; left: 11px; top: 0; bottom: 0;
+  width: 2px; background: linear-gradient(180deg, var(--accent, #6366f1), var(--panel2, #e2e8f0));
+}
+.th-tl-item { position: relative; margin-bottom: 12px; }
+.th-tl-dot {
+  position: absolute; left: -20px; top: 4px;
+  width: 18px; height: 18px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; background: var(--panel); border: 2px solid var(--accent, #6366f1);
+}
+.th-tl-card {
+  background: var(--panel); border: none; border-radius: 12px;
+  padding: 12px 14px; margin-left: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04); transition: all .15s;
+}
+.th-tl-card:hover { box-shadow: 0 4px 12px rgba(99,102,241,.08); }
+.th-tl-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.th-tl-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.th-tl-detail { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+
+/* ── Connections graph ─────────────────────────────────────────────────── */
+.th-conn-node {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+  border: none; border-radius: 10px; margin: 4px;
+  background: var(--panel); font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: all .15s; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.th-conn-node:hover { box-shadow: 0 4px 12px rgba(99,102,241,.12); transform: translateY(-1px); }
+.th-conn-node .conn-emoji { font-size: 16px; }
+.th-conn-node .conn-type {
+  font-size: 9px; font-weight: 800; text-transform: uppercase; color: var(--muted);
+  padding: 2px 6px; border-radius: 6px; background: var(--panel2); border: none;
+}
+
+/* ── Quick add ─────────────────────────────────────────────────────────── */
+.th-quick-add { display: flex; gap: 8px; margin-bottom: 14px; }
+.th-qa-input {
+  flex: 1; height: 40px; border: none; border-radius: 10px;
+  padding: 0 14px; font-size: 13px; background: var(--panel2); color: var(--text);
+  transition: box-shadow .15s;
+}
+.th-qa-input:focus { outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+.th-qa-select {
+  height: 40px; border: none; border-radius: 10px;
+  padding: 0 10px; font-size: 12px; background: var(--panel2); color: var(--text);
+}
+
+/* ── Empty state ───────────────────────────────────────────────────────── */
+.th-empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+
+/* ── Conviction Box ───────────────────────────────────────────────────── */
+.th-conv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+@media (max-width: 700px) { .th-conv-grid { grid-template-columns: 1fr; } }
+.th-conv-box {
+  border: none; border-radius: 14px; padding: 18px;
+  background: var(--panel); box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.th-conv-box.bull { border-top: 3px solid var(--up); }
+.th-conv-box.bear { border-top: 3px solid var(--down, #ef4444); }
+.th-conv-box h4 { margin: 0 0 10px; font-size: 14px; font-weight: 800; color: var(--text); }
+.th-conv-box textarea {
+  width: 100%; min-height: 100px; border: none; border-radius: 10px;
+  padding: 10px 12px; font-size: 13px; color: var(--text); background: var(--panel2);
+  resize: vertical; box-sizing: border-box; transition: box-shadow .15s;
+}
+.th-conv-box textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+.th-conv-box.bull textarea { background: var(--up-soft); }
+.th-conv-box.bear textarea { background: var(--down-soft, #fee2e2); }
+
+/* ── Valuation Gauge ──────────────────────────────────────────────────── */
+.th-gauge-wrap { margin-bottom: 18px; }
+.th-gauge-rail {
+  position: relative; height: 10px; border-radius: 999px;
+  background: linear-gradient(90deg, #d1fae5, #fef3c7, #fee2e2);
+  border: none; margin: 8px 0; box-shadow: inset 0 1px 2px rgba(0,0,0,.06);
+}
+.th-gauge-pin {
+  position: absolute; top: -4px; width: 16px; height: 16px; border-radius: 50%;
+  background: #1d4ed8; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.15);
+  transform: translateX(-50%);
+}
+.th-gauge-status { font-size: 12px; font-weight: 800; }
+.th-gauge-status.buy { color: var(--up); }
+.th-gauge-status.above { color: var(--muted); }
+
+/* ── Moat pill (editable) ─────────────────────────────────────────────── */
+.th-moat-pill { cursor: pointer; display: inline-block; }
+.th-moat-pill input[type=checkbox] { position: absolute; opacity: 0; width: 0; height: 0; }
+.th-moat-pill span {
+  display: inline-block; border: none; color: var(--muted);
+  background: var(--panel2); border-radius: 999px; padding: 6px 14px;
+  font-size: 12px; font-weight: 700; transition: all .12s ease;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.th-moat-pill input[type=checkbox]:checked + span {
+  border-color: #4338ca; background: #4f46e5; color: #fff;
+}
+
+/* ── Buyback bars ─────────────────────────────────────────────────────── */
+.th-buyback-bars { display: flex; align-items: flex-end; gap: 6px; height: 44px; }
+.th-buyback-bar {
+  width: 18px; background: #22c55e33; border: 1px solid #22c55e66;
+  border-radius: 4px 4px 0 0; min-height: 6px;
+}
+
+/* ── IR Email Modal ───────────────────────────────────────────────────── */
+.th-ir-modal {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 10001;
+}
+.th-ir-modal-inner {
+  max-width: 720px; margin: 8vh auto; background: var(--panel);
+  border: none; border-radius: 16px; padding: 20px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.3);
+}
+.th-ir-modal input, .th-ir-modal textarea, .th-ir-modal select {
+  width: 100%; box-sizing: border-box; border: none;
+  border-radius: 10px; padding: 10px 12px; font-size: 13px;
+  color: var(--text); background: var(--panel2); transition: box-shadow .15s;
+}
+.th-ir-modal input:focus, .th-ir-modal textarea:focus, .th-ir-modal select:focus {
+  outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,.1);
+}
+
+/* ── Insider trades ───────────────────────────────────────────────────── */
+.th-insider-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: none; border-radius: 12px; padding: 12px 14px;
+  background: var(--panel); margin-bottom: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04); transition: all .15s;
+}
+.th-insider-row:hover { box-shadow: 0 4px 12px rgba(99,102,241,.08); }
+
+/* ── AI insight ────────────────────────────────────────────────────────── */
+.th-ai-box {
+  background: linear-gradient(135deg, rgba(99,102,241,.08), rgba(139,92,246,.06));
+  border: none; border-radius: 14px;
+  padding: 16px 18px; margin-bottom: 16px;
+  position: relative; overflow: hidden;
+}
+.th-ai-box::after {
+  content: ''; position: absolute; top: -20px; right: -20px;
+  width: 80px; height: 80px; border-radius: 50%;
+  background: rgba(99,102,241,.06); pointer-events: none;
+}
+.th-ai-label {
+  font-size: 12px; font-weight: 800; letter-spacing: -.01em;
+  text-transform: none; color: var(--accent, #6366f1); margin-bottom: 6px;
+}
+.th-ai-text { font-size: 13px; color: var(--text); line-height: 1.5; }
+
+/* ══════════════════════════════════════════════════════════════
+   Dark mode — Ticker Hub
+   ══════════════════════════════════════════════════════════════ */
+body.theme-dark .th-actions .btn { background:var(--panel); box-shadow:0 1px 4px rgba(0,0,0,.2); }
+body.theme-dark .th-actions .btn:hover { background:var(--accent); box-shadow:0 4px 12px rgba(129,140,248,.25); }
+body.theme-dark .th-group-btn:hover { background:rgba(255,255,255,.04); }
+body.theme-dark .th-group-btn.active { background:var(--panel); box-shadow:0 1px 4px rgba(0,0,0,.3); }
+body.theme-dark .th-sidebar-card { box-shadow:0 1px 4px rgba(0,0,0,.2); }
+body.theme-dark .th-insider-row { box-shadow:0 1px 4px rgba(0,0,0,.2); }
+body.theme-dark .th-insider-row:hover { box-shadow:0 4px 12px rgba(0,0,0,.3); }
+body.theme-dark .th-ai-box { background:linear-gradient(135deg, rgba(129,140,248,.08), rgba(167,139,250,.06)); }
+body.theme-dark .th-ai-box::after { background:rgba(129,140,248,.06); }
+body.theme-dark .rc-card { background:var(--panel); box-shadow:0 1px 4px rgba(0,0,0,.2); }
+body.theme-dark .rc-card:hover { box-shadow:0 4px 12px rgba(0,0,0,.3); }
+body.theme-dark .rc-dot { box-shadow:0 0 8px rgba(0,0,0,.3); }
+body.theme-dark .th-tab-count { background:var(--panel2); }
+body.theme-dark .th-sub-btn:hover { background:var(--panel2); }
+body.theme-dark .rc-sent-btn:hover { background:rgba(129,140,248,.1); }
+body.theme-dark .rc-filter.active { background:var(--accent); }
+</style>
+{% endblock %}
+
+{% block body %}
+<script>
+var _TICKER = {{ ticker | tojson }};
+var _HUB = {{ hub | tojson }};
+_HUB.thesis = {{ (thesis or {})|tojson }};
+var _RESEARCH_NOTES = {{ (research_notes or [])|tojson }};
+var _TIMELINE_DATA = {{ timeline | tojson }};
+</script>
+
+<!-- ── Header — compact single-line ────────────────────────────────────── -->
+<div class="th-header">
+  <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+    <span class="th-ticker">${{ ticker }}</span>
+    <span id="thHeaderPrice" style="font-size:17px;font-weight:700;color:var(--text);">{{ hub.current_price or hub.profile.current_price or '' }}</span>
+    <span id="thHeaderChange" style="font-size:12px;font-weight:700;"></span>
+    <span class="th-company" style="margin-top:0;">{{ company_name }}</span>
+    {% if thesis %}
+      <span class="th-badge {% if thesis.status in ('active','watching') %}active{% else %}inactive{% endif %}">
+        {{ thesis.status or 'on file' }}
+      </span>
+    {% endif %}
+    {% if hub.position %}
+      <span class="th-badge position">Position</span>
+    {% endif %}
+    {% set cov = hub.data_coverage or {} %}
+    {% if cov.label %}
+      <span style="font-size:10px;font-weight:700;color:#fff;background:{{ cov.color or '#64748b' }};padding:3px 8px;border-radius:999px;">
+        {{ cov.label }}{% if cov.stale %} (stale){% endif %}
+      </span>
+    {% endif %}
+  </div>
+  <div class="th-actions">
+    <button class="btn" id="analyzeNowBtn" onclick="triggerAgentAnalysis()">Analyze Now</button>
+    <a href="/lab/{{ ticker }}" class="btn">Lab</a>
+  </div>
+</div>
+
+<!-- ── Flat Tab Bar ─────────────────────────────────────────────────────── -->
+<div class="th-sub-bar" id="sub-all">
+  <button class="th-sub-btn active" data-pane="overview" onclick="thSwitchTab('overview',this)">Dashboard</button>
+  <button class="th-sub-btn" data-pane="fundamentals" onclick="thSwitchTab('fundamentals',this)">Statements</button>
+  <button class="th-sub-btn" data-pane="filings" onclick="thSwitchTab('filings',this)">Filings <span class="tab-count" id="cntFilings">0</span></button>
+  <button class="th-sub-btn" data-pane="research" onclick="thSwitchTab('research',this)">Research <span class="tab-count" id="cntResearch">0</span></button>
+  <button class="th-sub-btn" data-pane="supplychain" onclick="thSwitchTab('supplychain',this)">Supply Chain</button>
+  <button class="th-sub-btn" data-pane="signals" onclick="thSwitchTab('signals',this)">Signals <span class="tab-count" id="cntSignals">0</span></button>
+  <button class="th-sub-btn" data-pane="lab" onclick="thSwitchTab('lab',this)">Lab <span class="tab-count" id="cntLab">0</span></button>
+</div>
+<!-- Hidden counters for compatibility -->
+<span id="cntEarnings" style="display:none">0</span>
+<span id="cntThinking" style="display:none">0</span>
+<span id="cntConnections" style="display:none">0</span>
+<span id="cntHistory" style="display:none">0</span>
+<span id="cntTransactions" style="display:none">0</span>
+<span id="cntNotes" style="display:none">0</span>
+<span id="cntAssumptions" style="display:none">0</span>
+
+<!-- ── 2-Column Layout ─────────────────────────────────────────────────── -->
+<div class="th-layout">
+<div class="th-main">
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Overview (Rich Summary)                                          -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane active" id="pane-overview">
+  <div class="bento-grid" id="bentoGrid"></div>
+  <div id="activeProposalBox" style="display:none;margin-bottom:18px;"></div>
+  <div id="overviewMiniFinancials" style="margin-bottom:18px;"></div>
+  <div id="overviewSignalsPreview" style="display:none;margin-bottom:18px;"></div>
+  <!-- Hidden compat elements -->
+  <div id="overviewGrid" style="display:none"></div>
+  <div id="positionCard" style="display:none"><div id="positionBody"></div></div>
+  <div id="profileCard" style="display:none"><div id="profileBody"></div></div>
+  <div id="statsKV" style="display:none"></div>
+  <div id="aiInsightText" style="display:none"></div>
+  <span id="cntTimeline" style="display:none">0</span>
+  <div id="overviewTimeline" style="display:none"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Research Canvas                                                   -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-research">
+
+  <!-- Quick Note Input -->
+  <div class="rc-input-wrap">
+    <input id="rcNoteInput" type="text" placeholder="Quick note about {{ ticker }}... press Enter to save" autocomplete="off"
+           onkeydown="if(event.key==='Enter'&&this.value.trim())saveQuickNote()">
+    <button class="rc-enter-btn" onclick="saveQuickNote()" title="Save note">&#x21B5;</button>
+  </div>
+
+  <!-- Sentiment selector (appears after typing) -->
+  <div id="rcSentimentBar" class="rc-sentiment-bar" style="display:none;">
+    <span style="font-size:11px;color:var(--muted);font-weight:600;">Tag:</span>
+    <button class="rc-sent-btn active" data-s="neutral" onclick="pickSentiment('neutral',this)">Neutral</button>
+    <button class="rc-sent-btn" data-s="supports" onclick="pickSentiment('supports',this)">Supports thesis</button>
+    <button class="rc-sent-btn" data-s="challenges" onclick="pickSentiment('challenges',this)">Challenges thesis</button>
+  </div>
+
+  <!-- Filter pills -->
+  <div class="rc-filters" id="rcFilters">
+    <button class="rc-filter active" data-f="all" onclick="filterNotes('all',this)">All <span id="rcCntAll">0</span></button>
+    <button class="rc-filter" data-f="supports" onclick="filterNotes('supports',this)">Supports <span id="rcCntSupports">0</span></button>
+    <button class="rc-filter" data-f="challenges" onclick="filterNotes('challenges',this)">Challenges <span id="rcCntChallenges">0</span></button>
+    <button class="rc-filter" data-f="neutral" onclick="filterNotes('neutral',this)">Neutral <span id="rcCntNeutral">0</span></button>
+    <button class="rc-filter" data-f="pinned" onclick="filterNotes('pinned',this)">Pinned <span id="rcCntPinned">0</span></button>
+  </div>
+
+  <!-- Notes feed -->
+  <div id="rcNotesFeed"></div>
+
+  <!-- Research Score -->
+  <div id="rcScoreBar" class="rc-score-bar" style="display:none;">
+    <div class="rc-score-track"><div id="rcScoreFill" class="rc-score-fill"></div></div>
+    <div id="rcScoreLabel" class="rc-score-label"></div>
+  </div>
+
+  <!-- Research Threads (inline expandable) -->
+  <div style="margin-top:20px;">
+    <div class="th-section-head" style="display:flex;align-items:center;justify-content:space-between;">
+      Research Threads
+      <button class="btn" style="font-size:10px;padding:3px 10px;" onclick="createResearchThread()">+ New Thread</button>
+    </div>
+    <div id="researchList"></div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Thinking                                                         -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-thinking">
+  <div class="th-section-head" style="display:flex;align-items:center;justify-content:space-between;">
+    Thinking Chains
+    <button class="btn" style="font-size:10px;padding:3px 10px;" onclick="createThinkingChain()">+ New Chain</button>
+  </div>
+  <div id="thinkingList"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: AI Signals (Proposals)                                           -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-signals">
+  <div class="th-section-head">AI Proposals</div>
+  <div id="signalsList"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Filings                                                          -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-filings">
+  <div class="th-section-head">SEC Filings</div>
+  <div id="filingsList"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Earnings                                                         -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-earnings">
+  <!-- Refresh buttons -->
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+    <button type="button" class="btn" onclick="doRefresh('/company_file/transcripts-refresh','{{ ticker }}',this)">Refresh Transcripts</button>
+    <button type="button" class="btn" onclick="doRefresh('/company_file/sec-facts-refresh','{{ ticker }}',this)">Refresh SEC Facts</button>
+  </div>
+
+  <!-- Earnings Brief -->
+  <div id="earningsBriefBox" style="margin-bottom:14px;"></div>
+
+  <div class="th-section-head">Earnings Analysis (AI)</div>
+  <div id="earningsList"></div>
+
+  <div class="th-section-head" style="margin-top:18px;">Earnings Calls (SEC)</div>
+  <div id="earningsCallsList"></div>
+
+  <div class="th-section-head" style="margin-top:18px;">Earnings Releases (SEC)</div>
+  <div id="earningsReleasesList"></div>
+
+  <div class="th-section-head" style="margin-top:18px;">Quarterly Result Signals (10-Q / 8-K / 10-K)</div>
+  <div id="quarterlySignalsList"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: History (Records)                                                -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-history">
+  <div class="th-quick-add">
+    <input id="thQaInput" class="th-qa-input" type="text"
+           placeholder="Add a thought, action, or decision for {{ ticker }}&hellip;" autocomplete="off">
+    <select id="thQaKind" class="th-qa-select">
+      <option value="thought">Thought</option>
+      <option value="action">Action</option>
+      <option value="decision">Decision</option>
+      <option value="event">Event</option>
+    </select>
+    <button class="btn" type="button" onclick="thAddRecord()">Add</button>
+  </div>
+  <div class="th-section-head">Records <span class="count" id="cntRecords">0</span></div>
+  <div id="historyList"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Connections (Work Graph)                                         -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-connections">
+  <div class="th-section-head">Connected Objects</div>
+  <div id="connectionsList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Fundamentals                                                     -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-fundamentals">
+  <!-- Refresh buttons row -->
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+    <form method="post" action="/company_file/mini-statements-refresh" id="refreshMiniForm"
+          style="display:inline;"><input type="hidden" name="ticker" value="{{ ticker }}">
+      <button type="button" class="btn" onclick="doRefresh('/company_file/mini-statements-refresh','{{ ticker }}',this)">Refresh Financials</button></form>
+    <form method="post" action="/company_file/intel-refresh" id="refreshIntelForm"
+          style="display:inline;"><input type="hidden" name="ticker" value="{{ ticker }}">
+      <button type="button" class="btn" onclick="doRefresh('/company_file/intel-refresh','{{ ticker }}',this)">Refresh Intel</button></form>
+    <form method="post" action="/company_file/price-metrics-refresh" id="refreshPriceForm"
+          style="display:inline;"><input type="hidden" name="ticker" value="{{ ticker }}">
+      <button type="button" class="btn" onclick="doRefresh('/company_file/price-metrics-refresh','{{ ticker }}',this)">Refresh Prices</button></form>
+  </div>
+
+  <div class="th-section-head">Price Metrics</div>
+  <div class="th-grid" id="priceMetricsGrid"></div>
+
+  <div class="th-section-head">5-Year Financials</div>
+  <div id="miniStatsDeltaSummary" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
+  <div id="miniStatementsBox"></div>
+
+  <div class="th-section-head" style="margin-top:18px;">Revenue Segments</div>
+  <div id="revenueSegmentsBox"></div>
+
+  <div class="th-section-head" style="margin-top:18px;">Share Buybacks (TTM)</div>
+  <div id="buybackBox"></div>
+
+  <div class="th-section-head" style="margin-top:18px;">Insider Trades (Form 4)</div>
+  <div id="insiderTradesBox"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Moats & Peers                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-moats">
+  <div class="th-section-head">Investment Thesis (Moat Tags)</div>
+  <form id="moatSaveForm" method="post" action="/company_file/moat-save" style="margin-bottom:18px;">
+    <input type="hidden" name="ticker" value="{{ ticker }}">
+    <div id="moatTagsBox" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;"></div>
+    <button type="submit" class="btn" id="moatSaveBtn">Save Thesis Tags</button>
+  </form>
+  <div class="th-section-head">Competitors</div>
+  <div id="competitorsList"></div>
+  <div class="th-section-head">Similar Companies</div>
+  <div id="similarList" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Supply Chain                                                     -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-supplychain">
+  <div class="th-section-head">Supply Chain Map</div>
+  <div id="supplyChainBox"></div>
+  <!-- Add relationship form -->
+  <div style="margin-top:14px;padding:16px;border:none;border-radius:14px;background:var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.04);">
+    <div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:8px;">Add Relationship</div>
+    <form id="scAddForm" style="display:grid;gap:8px;">
+      <input type="hidden" name="ticker" value="{{ ticker }}">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <input id="scTicker" name="counterparty_ticker" placeholder="Ticker (e.g. VRT)" required
+               style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;background:var(--panel);color:var(--text);">
+        <input id="scName" name="counterparty_name" placeholder="Company name (optional)"
+               style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;background:var(--panel);color:var(--text);">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <select id="scRelType" name="relationship_type"
+                style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;background:var(--panel);color:var(--text);">
+          <option value="supplier">Supplier</option>
+          <option value="customer">Customer</option>
+          <option value="partner">Partner</option>
+        </select>
+        <input id="scConf" name="confidence" type="number" min="0" max="1" step="0.05" value="0.70" placeholder="Confidence 0-1"
+               style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;background:var(--panel);color:var(--text);">
+      </div>
+      <textarea id="scEvidence" name="evidence" rows="2" placeholder="Evidence or note (optional)"
+                style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;background:var(--panel);color:var(--text);"></textarea>
+      <button type="submit" class="btn">Add Supply Link</button>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Notes & Tasks                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-notes">
+  <div class="th-section-head">Notes</div>
+  <div id="notesList"></div>
+  <div class="th-section-head" style="margin-top:18px;">Tasks</div>
+  <div id="tasksList"></div>
+  <div class="th-section-head" style="margin-top:18px;">Reminders</div>
+  <div id="remindersList"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Transactions                                                     -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-transactions">
+  <div class="th-section-head">Buy/Sell History</div>
+  <div id="transactionsList"></div>
+  <div class="th-section-head" style="margin-top:18px;">Decision Log</div>
+  <div id="decisionsList"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Lab / Case Studies                                               -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-lab">
+  <div class="th-section-head">Case Studies &amp; Analysis</div>
+  <div id="caseStudiesList"></div>
+  <div style="margin-top:12px;">
+    <a href="/lab/{{ ticker }}" class="btn">Open Full Financial Lab &rarr;</a>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Assumptions (Phase 4)                                            -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- Assumptions pane removed -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Conviction (Phase 4)                                             -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-conviction">
+  <div class="th-section-head">Conviction Score</div>
+  <div class="th-grid" id="convictionGrid"></div>
+  <div class="th-section-head" style="margin-top:18px;">Score Components</div>
+  <div class="th-grid" id="convictionComponents"></div>
+  <div class="th-section-head" style="margin-top:18px;">Conviction History</div>
+  <div id="convictionHistory"></div>
+  <div style="margin-top:12px;">
+    <button class="btn" onclick="refreshConviction()">Recalculate Now</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- TAB: Triggers (Phase 4)                                               -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="th-pane" id="pane-triggers">
+  <div class="th-section-head">Conditional Triggers</div>
+  <div style="margin-bottom:14px;padding:14px 16px;border:none;border-radius:14px;background:var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.04);">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;">
+      <div style="flex:1;min-width:180px;">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:3px;">Rule Name</div>
+        <input id="trgName" type="text" class="th-qa-input" placeholder="e.g. Review if price drops">
+      </div>
+      <div style="width:130px;">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:3px;">Type</div>
+        <select id="trgType" class="th-qa-select" style="width:100%;">
+          <option value="price_below">Price Below</option>
+          <option value="price_above">Price Above</option>
+          <option value="conviction_below">Conviction Below</option>
+          <option value="metric_check">Metric Check</option>
+        </select>
+      </div>
+      <div style="width:80px;">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:3px;">Threshold</div>
+        <input id="trgThreshold" type="number" class="th-qa-input" placeholder="150">
+      </div>
+      <div style="flex:1;min-width:150px;">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:3px;">Action</div>
+        <input id="trgAction" type="text" class="th-qa-input" placeholder="e.g. Review thesis, consider trimming">
+      </div>
+      <button class="btn" type="button" onclick="addTrigger()">Add</button>
+    </div>
+  </div>
+  <div id="triggersList"></div>
+</div>
+
+</div><!-- end .th-main -->
+
+<!-- Right sidebar removed — user preference -->
+
+</div><!-- end .th-layout -->
+
+<!-- ── IR Email Modal ──────────────────────────────────────────────────── -->
+<div id="irEmailModal" class="th-ir-modal">
+  <div class="th-ir-modal-inner">
+    <h3 style="margin:0 0 12px;">Email Investor Relations</h3>
+    <form method="post" action="/company_file/ir-email-send" style="display:grid;gap:10px;">
+      <input type="hidden" name="ticker" value="{{ ticker }}">
+      <select id="irPreset" style="height:36px;">
+        <option value="">Preset (optional)</option>
+        <option value="Inquiry from Long-Term Shareholder - {{ ticker }}"
+                data-body="Hi Investor Relations,&#10;&#10;I am a long-term shareholder of {{ company_name }} ({{ ticker }}).&#10;I have a few questions regarding:&#10;1) &#10;2) &#10;&#10;Thank you for your time.&#10;Best regards,">Long-Term Shareholder</option>
+        <option value="Request for brief investor relations call - {{ ticker }}"
+                data-body="Hi Investor Relations,&#10;&#10;I am a long-term shareholder and would appreciate a short call on:&#10;1) Current execution priorities&#10;2) Guidance assumptions&#10;3) Capital allocation framework&#10;&#10;Thank you.&#10;Best regards,">Meeting Request</option>
+      </select>
+      <input id="irTo" name="to_email" placeholder="To (e.g. ir@company.com)">
+      <input id="irSubject" name="subject" placeholder="Subject" value="Inquiry from Long-Term Shareholder - {{ ticker }}">
+      <textarea id="irBody" name="body" rows="8" placeholder="Write your email..."></textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button type="button" class="btn" onclick="document.getElementById('irEmailModal').style.display='none'" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);">Cancel</button>
+        <button type="submit" class="btn" style="background:var(--accent);color:#fff;">Send</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+/* ── Utilities ───────────────────────────────────────────────────────── */
+function escH(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtDate(s){ return s ? String(s).substring(0,10) : ''; }
+
+/* ── Group → pane mapping ────────────────────────────────────────────── */
+var _GROUP_PANES = {
+  overview: ['overview','earnings','signals','transactions'],
+  thesis: ['research','thinking'],
+  data: ['fundamentals','filings','lab','supplychain','moats','connections','notes','history']
+};
+function _paneToGroup(pane){ return 'all'; }
+
+/* ── Group switching (legacy compat) ──────────────────────────────── */
+function thSwitchGroup(group, btn){
+  thSwitchTab(group === 'overview' ? 'overview' : (group === 'thesis' ? 'research' : 'fundamentals'), null);
+}
+
+/* ── Tab switching (flat) ─────────────────────────────────────────── */
+function thSwitchTab(pane, btn){
+  document.querySelectorAll('.th-sub-btn').forEach(function(b){ b.classList.remove('active'); });
+  document.querySelectorAll('.th-pane').forEach(function(p){ p.classList.remove('active'); });
+  if(btn) btn.classList.add('active');
+  else {
+    var tabBtn = document.querySelector('.th-sub-btn[data-pane="'+pane+'"]');
+    if(tabBtn) tabBtn.classList.add('active');
+  }
+  var el = document.getElementById('pane-'+pane);
+  if(el) el.classList.add('active');
+  try{ localStorage.setItem('thub_tab_'+_TICKER, pane); }catch(_){}
+}
+
+/* ── Build overview (bento grid) ─────────────────────────────────────── */
+function buildOverview(){
+  var h = _HUB;
+  var grid = document.getElementById('bentoGrid');
+  if(!grid) return;
+  var html = '';
+  var pr = h.profile || {};
+
+  // Update tab counts
+  setText('cntResearch', (h.research_threads||[]).length);
+  setText('cntThinking', (h.thinking_chains||[]).length);
+  setText('cntSignals', (h.proposals||[]).length);
+  setText('cntFilings', (h.filings||[]).length);
+  setText('cntEarnings', (h.earnings||[]).length);
+  setText('cntHistory', (h.records||[]).length);
+  setText('cntConnections', (h.work_graph||[]).length);
+  setText('cntRecords', (h.records||[]).length);
+  setText('cntTimeline', (h.timeline||[]).length);
+  setText('cntLab', (h.lab_results||[]).length);
+
+  // --- Card 1: Company Profile (wide) ---
+  if(pr.sector || pr.industry || pr.market_cap || pr.description){
+    html += '<div class="bento-card bento-indigo wide">';
+    html += '<div class="bento-icon">🏢</div>';
+    html += '<div class="bento-title">Company Profile</div>';
+    var profileParts = [];
+    if(pr.sector) profileParts.push(escH(pr.sector));
+    if(pr.industry) profileParts.push(escH(pr.industry));
+    if(pr.market_cap) profileParts.push('MCap $'+Number(pr.market_cap).toLocaleString());
+    html += '<div class="bento-sub">'+profileParts.join(' · ')+'</div>';
+    if(pr.description) html += '<div class="bento-detail" style="opacity:.8;">'+escH(String(pr.description).substring(0,200))+(String(pr.description).length>200?'…':'')+'</div>';
+    html += '</div>';
+  }
+
+  // --- Card 2: Buffett Score (only if data exists) ---
+  var bc = h.buffett_checklist || {};
+  if(bc.score != null && bc.total){
+    var bcScore = bc.score || 0;
+    var bcTotal = bc.total || 10;
+    var bcPct = bcTotal > 0 ? Math.round((bcScore / bcTotal) * 100) : 0;
+    var bcColor = bcPct >= 70 ? 'bento-green' : (bcPct >= 40 ? 'bento-amber' : 'bento-red');
+    html += '<div class="bento-card '+bcColor+'" onclick="thSwitchTab(\'fundamentals\',null)">';
+    html += '<div class="bento-icon">✅</div>';
+    html += '<div class="bento-title">Buffett Checklist</div>';
+    html += '<div class="bento-value">'+bcPct+'%</div>';
+    html += '<div class="bento-sub">'+bcScore+' / '+bcTotal+' criteria met</div>';
+    html += '<div class="bento-footer">View details</div>';
+    html += '</div>';
+  }
+
+  // --- Card 3: Price Returns (from price_metrics) ---
+  var pm = h.price_metrics || {};
+  var ytd = parseFloat(pm.ytd_return) || 0;
+  var y1 = parseFloat(pm.m12_return) || 0;
+  var y5 = parseFloat(pm.y5_return) || 0;
+  var hasReturns = pm.ytd_return != null || pm.m12_return != null || pm.y5_return != null;
+  if(hasReturns){
+    var retColor = ytd >= 0 ? 'bento-green' : 'bento-red';
+    html += '<div class="bento-card '+retColor+'">';
+    html += '<div class="bento-icon">📈</div>';
+    html += '<div class="bento-title">Price Returns</div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">';
+    html += '<div><div style="font-size:11px;opacity:.7;">YTD</div><div style="font-size:18px;font-weight:800;">'+(ytd>=0?'+':'')+ytd.toFixed(1)+'%</div></div>';
+    html += '<div><div style="font-size:11px;opacity:.7;">12M</div><div style="font-size:18px;font-weight:800;">'+(y1>=0?'+':'')+y1.toFixed(1)+'%</div></div>';
+    html += '<div><div style="font-size:11px;opacity:.7;">5Y</div><div style="font-size:18px;font-weight:800;">'+(y5>=0?'+':'')+y5.toFixed(1)+'%</div></div>';
+    html += '</div></div>';
+  }
+
+  // --- Card 4: Financials ---
+  var ms = h.mini_statements || {};
+  var hasFinancials = ms && ms.years && ms.years.length > 0;
+  if(hasFinancials){
+    html += '<div class="bento-card bento-blue wide" onclick="thSwitchTab(\'fundamentals\',null)">';
+    html += '<div class="bento-icon">💰</div>';
+    html += '<div class="bento-title">5-Year Financials</div>';
+    html += '<div class="bento-sub">'+ms.years.join(' → ')+'</div>';
+    html += '<div class="bento-footer">View statements</div>';
+    html += '</div>';
+  }
+
+  // --- Card 5: SEC Filings ---
+  var filings = h.filings || [];
+  if(filings.length > 0){
+    var latest = filings[0];
+    html += '<div class="bento-card bento-slate" onclick="thSwitchTab(\'filings\',null)">';
+    html += '<div class="bento-icon">📑</div>';
+    html += '<div class="bento-title">SEC Filings</div>';
+    html += '<div class="bento-value">'+filings.length+'</div>';
+    html += '<div class="bento-sub">Latest: '+escH(latest.form_type||'Filing')+' · '+fmtDate(latest.filed_date||latest.filing_date)+'</div>';
+    html += '<div class="bento-footer">View all filings</div>';
+    html += '</div>';
+  }
+
+  // --- Card 6: Supply Chain ---
+  var sc = h.supply_chain || [];
+  if(sc.length > 0){
+    var topNames = sc.slice(0,3).map(function(s){ return escH(s.counterparty_ticker||s.name||''); }).join(', ');
+    html += '<div class="bento-card bento-teal" onclick="thSwitchTab(\'supplychain\',null)">';
+    html += '<div class="bento-icon">🔗</div>';
+    html += '<div class="bento-title">Supply Chain</div>';
+    html += '<div class="bento-value">'+sc.length+'</div>';
+    html += '<div class="bento-sub">'+topNames+'</div>';
+    html += '<div class="bento-footer">View map</div>';
+    html += '</div>';
+  }
+
+  // --- Card 7: AI Signals ---
+  var signals = h.proposals || [];
+  if(signals.length > 0){
+    var latestSig = signals[0];
+    html += '<div class="bento-card bento-purple" onclick="thSwitchTab(\'signals\',null)">';
+    html += '<div class="bento-icon">🤖</div>';
+    html += '<div class="bento-title">AI Signals</div>';
+    html += '<div class="bento-value">'+signals.length+'</div>';
+    html += '<div class="bento-sub">'+escH((latestSig.action_type||latestSig.headline||'').substring(0,50))+'</div>';
+    html += '<div class="bento-footer">View signals</div>';
+    html += '</div>';
+  }
+
+  // --- Card 8: Earnings ---
+  var earnings = h.earnings || [];
+  if(earnings.length > 0){
+    var nextEarning = earnings[0];
+    html += '<div class="bento-card bento-amber" onclick="thSwitchTab(\'earnings\',null)">';
+    html += '<div class="bento-icon">📊</div>';
+    html += '<div class="bento-title">Earnings</div>';
+    html += '<div class="bento-value">'+earnings.length+'</div>';
+    html += '<div class="bento-sub">Latest: '+fmtDate(nextEarning.report_date||nextEarning.date)+'</div>';
+    html += '<div class="bento-footer">View earnings</div>';
+    html += '</div>';
+  }
+
+  // --- Card 9: Thesis ---
+  var th = h.thesis || {};
+  html += '<div class="bento-card bento-indigo" onclick="openThesisModal()">';
+  html += '<div class="bento-icon">📝</div>';
+  html += '<div class="bento-title">Investment Thesis</div>';
+  if(th.thesis){
+    html += '<div class="bento-detail">'+escH(String(th.thesis).substring(0,120))+(String(th.thesis).length>120?'…':'')+'</div>';
+    if(th.target_price) html += '<div class="bento-sub" style="margin-top:4px;">Target: $'+Number(th.target_price).toFixed(2)+'</div>';
+  } else {
+    html += '<div class="bento-detail" style="opacity:.6;">No thesis written yet. Click to add one.</div>';
+  }
+  html += '<div class="bento-footer">'+(th.thesis?'Edit thesis':'Write thesis')+'</div>';
+  html += '</div>';
+
+  // --- Card 10: Position (if held) ---
+  if(h.position){
+    var p = h.position;
+    html += '<div class="bento-card bento-green">';
+    html += '<div class="bento-icon">💼</div>';
+    html += '<div class="bento-title">Position</div>';
+    if(p.market_value) html += '<div class="bento-value">$'+Number(p.market_value).toLocaleString()+'</div>';
+    var posDetails = [];
+    if(p.shares) posDetails.push(escH(p.shares)+' shares');
+    if(p.avg_cost) posDetails.push('Avg $'+Number(p.avg_cost).toFixed(2));
+    if(p.weight_pct) posDetails.push(Number(p.weight_pct).toFixed(1)+'% weight');
+    html += '<div class="bento-sub">'+posDetails.join(' · ')+'</div>';
+    html += '</div>';
+  }
+
+  // --- Card 11: Research ---
+  var threads = h.research_threads || [];
+  if(threads.length > 0){
+    html += '<div class="bento-card bento-purple" onclick="thSwitchTab(\'research\',null)">';
+    html += '<div class="bento-icon">🔬</div>';
+    html += '<div class="bento-title">Research</div>';
+    html += '<div class="bento-value">'+threads.length+'</div>';
+    html += '<div class="bento-sub">threads</div>';
+    html += '<div class="bento-footer">View research</div>';
+    html += '</div>';
+  }
+
+  grid.innerHTML = html;
+}
+
+function setText(id,v){ var e=document.getElementById(id); if(e) e.textContent=v; }
+
+/* ── Timeline renderer ───────────────────────────────────────────────── */
+function buildTimeline(container, items){
+  if(!items||!items.length){ container.innerHTML='<div class="th-empty">No activity yet.</div>'; return; }
+  var html = '';
+  items.forEach(function(e){
+    html += '<div class="th-tl-item">';
+    html += '<div class="th-tl-dot">'+escH(e.emoji||'')+'</div>';
+    html += '<div class="th-tl-card">';
+    html += '<div class="th-tl-title">'+escH(e.title)+'</div>';
+    html += '<div class="th-tl-meta">';
+    html += '<span>'+fmtDate(e.date)+'</span>';
+    html += ' <span class="th-item-badge">'+escH(e.type)+'</span>';
+    html += '</div>';
+    if(e.detail) html += '<div class="th-tl-detail">'+escH(e.detail)+'</div>';
+    html += '</div></div>';
+  });
+  container.innerHTML = html;
+}
+
+/* ── Research Canvas ─────────────────────────────────────────────────── */
+var _rcNotes = _RESEARCH_NOTES || [];
+var _rcSentiment = 'neutral';
+var _rcFilter = 'all';
+var _rcExpandedThread = null;
+
+function pickSentiment(s, btn){
+  _rcSentiment = s;
+  document.querySelectorAll('.rc-sent-btn').forEach(function(b){ b.classList.remove('active'); });
+  btn.classList.add('active');
+}
+
+function filterNotes(f, btn){
+  _rcFilter = f;
+  document.querySelectorAll('.rc-filter').forEach(function(b){ b.classList.remove('active'); });
+  btn.classList.add('active');
+  renderNotes();
+}
+
+function saveQuickNote(){
+  var inp = document.getElementById('rcNoteInput');
+  var text = inp.value.trim();
+  if(!text) return;
+  inp.value = '';
+  inp.disabled = true;
+  var fd = new FormData();
+  fd.append('ticker', _TICKER);
+  fd.append('note', text);
+  fd.append('sentiment', _rcSentiment);
+  fetch('/api/research-note', { method:'POST', body: fd })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      inp.disabled = false;
+      inp.focus();
+      if(d.ok && d.note){
+        _rcNotes.unshift(d.note);
+        renderNotes();
+      }
+    })
+    .catch(function(){ inp.disabled = false; });
+  // Reset sentiment to neutral
+  _rcSentiment = 'neutral';
+  document.querySelectorAll('.rc-sent-btn').forEach(function(b){ b.classList.remove('active'); });
+  document.querySelector('.rc-sent-btn[data-s="neutral"]').classList.add('active');
+  document.getElementById('rcSentimentBar').style.display = 'none';
+}
+
+function togglePin(noteId, currentlyPinned){
+  var fd = new FormData();
+  fd.append('pinned', currentlyPinned ? 'false' : 'true');
+  fetch('/api/research-note/'+noteId+'/update', { method:'POST', body: fd })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d.ok){
+        _rcNotes.forEach(function(n){ if(n.id===noteId) n.pinned = !currentlyPinned; });
+        // Re-sort: pinned first, then newest
+        _rcNotes.sort(function(a,b){
+          if(a.pinned && !b.pinned) return -1;
+          if(!a.pinned && b.pinned) return 1;
+          return new Date(b.created_at) - new Date(a.created_at);
+        });
+        renderNotes();
+      }
+    });
+}
+
+function changeSentiment(noteId, newSent){
+  var fd = new FormData();
+  fd.append('sentiment', newSent);
+  fetch('/api/research-note/'+noteId+'/update', { method:'POST', body: fd })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d.ok){
+        _rcNotes.forEach(function(n){ if(n.id===noteId) n.sentiment = newSent; });
+        renderNotes();
+      }
+    });
+}
+
+function deleteNote(noteId){
+  fetch('/api/research-note/'+noteId+'/delete', { method:'POST' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d.ok){
+        _rcNotes = _rcNotes.filter(function(n){ return n.id !== noteId; });
+        renderNotes();
+      }
+    });
+}
+
+function renderNotes(){
+  var feed = document.getElementById('rcNotesFeed');
+  var filtered = _rcNotes;
+  if(_rcFilter === 'pinned') filtered = _rcNotes.filter(function(n){ return n.pinned; });
+  else if(_rcFilter !== 'all') filtered = _rcNotes.filter(function(n){ return n.sentiment === _rcFilter; });
+
+  // Update counts
+  var all = _rcNotes.length;
+  var sup = _rcNotes.filter(function(n){ return n.sentiment==='supports'; }).length;
+  var chl = _rcNotes.filter(function(n){ return n.sentiment==='challenges'; }).length;
+  var neu = _rcNotes.filter(function(n){ return n.sentiment==='neutral'; }).length;
+  var pin = _rcNotes.filter(function(n){ return n.pinned; }).length;
+  document.getElementById('rcCntAll').textContent = all;
+  document.getElementById('rcCntSupports').textContent = sup;
+  document.getElementById('rcCntChallenges').textContent = chl;
+  document.getElementById('rcCntNeutral').textContent = neu;
+  document.getElementById('rcCntPinned').textContent = pin;
+
+  if(!filtered.length){
+    feed.innerHTML = '<div class="th-empty" style="padding:20px 0;">No notes yet. Start typing above to capture your research.</div>';
+  } else {
+    var html = '';
+    filtered.forEach(function(n){
+      var sentClass = 's-' + (n.sentiment || 'neutral');
+      var sentLabel = n.sentiment === 'supports' ? 'Supports thesis' : n.sentiment === 'challenges' ? 'Challenges thesis' : 'Neutral';
+      var d = new Date(n.created_at);
+      var dateStr = d.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+      html += '<div class="rc-note'+(n.pinned?' pinned':'')+'" data-id="'+n.id+'">';
+      html += '<div class="rc-note-text">'+(n.pinned?'<span title="Pinned" style="margin-right:4px;">&#x1f4cc;</span>':'')+escH(n.note)+'</div>';
+      html += '<div class="rc-note-meta">';
+      html += '<span class="rc-sent-pill '+sentClass+'">'+sentLabel+'</span>';
+      html += '<span class="rc-date">'+dateStr+'</span>';
+      html += '<span class="rc-actions">';
+      // Sentiment cycle
+      var nextSent = n.sentiment==='neutral'?'supports':n.sentiment==='supports'?'challenges':'neutral';
+      var nextLabel = nextSent==='supports'?'Mark supports':nextSent==='challenges'?'Mark challenges':'Mark neutral';
+      html += '<button class="rc-act-btn" onclick="changeSentiment('+n.id+',\''+nextSent+'\')" title="'+nextLabel+'">&#x1f3f7;</button>';
+      html += '<button class="rc-act-btn" onclick="togglePin('+n.id+','+(n.pinned?'true':'false')+')" title="'+(n.pinned?'Unpin':'Pin')+'">&#x1f4cc;</button>';
+      html += '<button class="rc-act-btn" onclick="deleteNote('+n.id+')" title="Delete">&times;</button>';
+      html += '</span></div></div>';
+    });
+    feed.innerHTML = html;
+  }
+
+  // Research score
+  var scoreBar = document.getElementById('rcScoreBar');
+  var threads = (_HUB.research_threads || []).length;
+  if(all > 0 || threads > 0){
+    scoreBar.style.display = 'block';
+    var score = Math.min(100, all * 8 + threads * 15);
+    document.getElementById('rcScoreFill').style.width = score + '%';
+    var parts = [];
+    parts.push(all + ' note' + (all!==1?'s':''));
+    parts.push(threads + ' thread' + (threads!==1?'s':''));
+    if(sup) parts.push(sup + ' support' + (sup!==1?'s':''));
+    if(chl) parts.push(chl + ' challenge' + (chl!==1?'s':''));
+    document.getElementById('rcScoreLabel').textContent = parts.join(' \u00b7 ');
+  } else {
+    scoreBar.style.display = 'none';
+  }
+}
+
+/* Show sentiment bar when input gets focus */
+(function(){
+  var inp = document.getElementById('rcNoteInput');
+  if(inp){
+    inp.addEventListener('focus', function(){ document.getElementById('rcSentimentBar').style.display = 'flex'; });
+  }
+})();
+
+/* ── Research Threads (inline expandable) ───────────────────────────── */
+function buildResearch(){
+  var threads = _HUB.research_threads || [];
+  var el = document.getElementById('researchList');
+  if(!threads.length){ el.innerHTML='<div class="th-empty">No research threads yet.</div>'; return; }
+  var html = '';
+  threads.forEach(function(t){
+    html += '<div class="th-list-item" style="display:block;cursor:pointer;" id="rcThread'+t.id+'">';
+    html += '<div onclick="toggleThread('+t.id+')" style="display:flex;gap:10px;align-items:flex-start;">';
+    html += '<div class="emoji">'+(t.emoji||'\uD83D\uDD2C')+'</div>';
+    html += '<div class="body" style="flex:1;min-width:0;">';
+    html += '<div class="title">'+escH(t.title||'Untitled Thread')+'</div>';
+    html += '<div class="sub">'+fmtDate(t.updated_at||t.created_at);
+    if(t.entry_count) html += ' &middot; '+t.entry_count+' messages';
+    html += '</div>';
+    if(t.thesis) html += '<div class="detail">'+escH(String(t.thesis).substring(0,120))+'</div>';
+    html += '</div>';
+    html += '<span style="font-size:12px;color:var(--muted);flex:0 0 auto;" id="rcThreadArrow'+t.id+'">&#x25B6;</span>';
+    html += '</div>';
+    html += '<div class="rc-thread-expand" id="rcThreadBody'+t.id+'" style="display:none;"></div>';
+    html += '</div>';
+  });
+  el.innerHTML = html;
+  renderNotes();
+}
+
+function toggleThread(threadId){
+  var body = document.getElementById('rcThreadBody'+threadId);
+  var arrow = document.getElementById('rcThreadArrow'+threadId);
+  if(body.style.display !== 'none'){
+    body.style.display = 'none';
+    arrow.innerHTML = '&#x25B6;';
+    _rcExpandedThread = null;
+    return;
+  }
+  // Collapse any other
+  if(_rcExpandedThread && _rcExpandedThread !== threadId){
+    var prev = document.getElementById('rcThreadBody'+_rcExpandedThread);
+    var prevA = document.getElementById('rcThreadArrow'+_rcExpandedThread);
+    if(prev) prev.style.display = 'none';
+    if(prevA) prevA.innerHTML = '&#x25B6;';
+  }
+  _rcExpandedThread = threadId;
+  arrow.innerHTML = '&#x25BC;';
+  body.style.display = 'block';
+  body.innerHTML = '<div style="padding:8px 0;color:var(--muted);font-size:12px;">Loading...</div>';
+  fetch('/workspace/thread/'+threadId)
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var t = d.thread || d;
+      var entries = (t.entries || d.entries || []).reverse();
+      var html = '';
+      if(!entries.length){
+        html += '<div style="padding:6px 0;font-size:12px;color:var(--muted);">No entries yet.</div>';
+      } else {
+        entries.forEach(function(e){
+          html += '<div class="rc-thread-msg">';
+          html += '<div class="msg-date">'+fmtDate(e.created_at)+' &middot; '+escH(e.kind||'note')+'</div>';
+          html += escH(e.content||'');
+          html += '</div>';
+        });
+      }
+      html += '<div class="rc-thread-reply-wrap">';
+      html += '<input id="rcReply'+threadId+'" type="text" placeholder="Add to thread..." onkeydown="if(event.key===\'Enter\')addThreadEntry('+threadId+')">';
+      html += '<button onclick="addThreadEntry('+threadId+')">Add</button>';
+      html += '</div>';
+      body.innerHTML = html;
+    })
+    .catch(function(){ body.innerHTML = '<div style="color:var(--muted);font-size:12px;">Failed to load thread.</div>'; });
+}
+
+function addThreadEntry(threadId){
+  var inp = document.getElementById('rcReply'+threadId);
+  var text = inp.value.trim();
+  if(!text) return;
+  inp.disabled = true;
+  var fd = new FormData();
+  fd.append('content', text);
+  fd.append('kind', 'note');
+  fetch('/workspace/thread/'+threadId+'/entry', { method:'POST', body: fd })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      inp.disabled = false;
+      if(d.ok || d.id){
+        inp.value = '';
+        toggleThread(threadId); // collapse
+        toggleThread(threadId); // re-expand to reload
+      }
+    })
+    .catch(function(){ inp.disabled = false; });
+}
+
+/* ── Thinking tab ────────────────────────────────────────────────────── */
+function buildThinking(){
+  var chains = _HUB.thinking_chains || [];
+  var el = document.getElementById('thinkingList');
+  if(!chains.length){ el.innerHTML='<div class="th-empty">No thinking chains linked to $'+_TICKER+'.</div>'; return; }
+  var html = '';
+  chains.forEach(function(c){
+    html += '<div class="th-list-item" onclick="window.location.href=\'/workspace?space=thinking&chain='+c.id+'\'">';
+    html += '<div class="emoji">'+(c.emoji||'\uD83D\uDCA1')+'</div>';
+    html += '<div class="body">';
+    html += '<div class="title">'+escH(c.title||'Untitled Chain')+'</div>';
+    html += '<div class="sub">'+escH(c.chain_type||'chain')+' &middot; '+fmtDate(c.updated_at||c.created_at)+'</div>';
+    if(c.notes) html += '<div class="detail">'+escH(String(c.notes).substring(0,200))+'</div>';
+    html += '<div class="badges">';
+    if(c.tags) html += '<span class="th-item-badge">'+escH(c.tags)+'</span>';
+    if(c.status) html += '<span class="th-item-badge '+(c.status==='active'?'up':'')+'">'+escH(c.status)+'</span>';
+    html += '</div></div></div>';
+  });
+  el.innerHTML = html;
+}
+
+/* ── Signals tab (proposals) ─────────────────────────────────────────── */
+function buildSignals(){
+  var proposals = _HUB.proposals || [];
+  var el = document.getElementById('signalsList');
+  if(!proposals.length){ el.innerHTML='<div class="th-empty">No AI proposals for $'+_TICKER+'.</div>'; return; }
+  var html = '';
+  proposals.forEach(function(p){
+    var conf = p.confidence ? (Number(p.confidence)*100).toFixed(0)+'%' : '';
+    var badgeCls = '';
+    if(p.status==='approved') badgeCls='up';
+    else if(p.status==='rejected'||p.status==='debate_rejected') badgeCls='down';
+    else if(p.status==='pending') badgeCls='info';
+
+    html += '<div class="th-list-item">';
+    html += '<div class="emoji">\uD83D\uDCA1</div>';
+    html += '<div class="body">';
+    html += '<div class="title">'+escH(p.headline||p.action_type||'Proposal')+'</div>';
+    html += '<div class="sub">'+escH(p.action_type||'')+' &middot; '+fmtDate(p.created_at)+'</div>';
+    if(p.reasoning) html += '<div class="detail">'+escH(String(p.reasoning).substring(0,250))+'</div>';
+    html += '<div class="badges">';
+    if(p.status) html += '<span class="th-item-badge '+badgeCls+'">'+escH(p.status)+'</span>';
+    if(conf) html += '<span class="th-item-badge">Confidence: '+conf+'</span>';
+    if(p.signal_type) html += '<span class="th-item-badge">'+escH(p.signal_type)+'</span>';
+    html += '</div></div></div>';
+  });
+  el.innerHTML = html;
+}
+
+/* ── Filing form filter ──────────────────────────────────────────────── */
+function _filterFilings(form, btn){
+  btn.parentNode.querySelectorAll('.rc-filter').forEach(function(b){ b.classList.remove('active'); });
+  btn.classList.add('active');
+  var inner = document.getElementById('filingsInner');
+  if(!inner) return;
+  inner.querySelectorAll('.th-list-item').forEach(function(item){
+    if(form === 'all') { item.style.display = ''; return; }
+    item.style.display = (item.getAttribute('data-filing-form') === form) ? '' : 'none';
+  });
+}
+
+/* ── Filings tab ─────────────────────────────────────────────────────── */
+function buildFilings(){
+  var filings = _HUB.filings || [];
+  var el = document.getElementById('filingsList');
+  if(!filings.length){ el.innerHTML='<div class="th-empty">No SEC filings tracked for $'+_TICKER+'.</div>'; return; }
+
+  // Toolbar with SEC Hub link and sync buttons
+  var html = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;">';
+  html += '<a class="btn" href="/company_file/sec?t='+encodeURIComponent(_TICKER)+'" style="background:linear-gradient(135deg,#6366f1,#818cf8);color:#fff;text-decoration:none;">SEC Hub ↗</a>';
+  html += '<button class="btn" onclick="doRefresh(\'/company_file/sec-sync\',\''+escH(_TICKER)+'\',this)">Sync</button>';
+  html += '<button class="btn" onclick="doRefresh(\'/company_file/sec-sync-full\',\''+escH(_TICKER)+'\',this)">Full Backfill</button>';
+  html += '</div>';
+
+  // Form type filter pills
+  var formCounts = {};
+  filings.forEach(function(f){ var fm = f.form||'Other'; formCounts[fm] = (formCounts[fm]||0)+1; });
+  html += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">';
+  html += '<button class="rc-filter active" onclick="_filterFilings(\'all\',this)">All ('+filings.length+')</button>';
+  Object.keys(formCounts).sort().forEach(function(fm){
+    html += '<button class="rc-filter" onclick="_filterFilings(\''+escH(fm)+'\',this)">'+escH(fm)+' ('+formCounts[fm]+')</button>';
+  });
+  html += '</div>';
+
+  // Filing list
+  html += '<div id="filingsInner">';
+  filings.forEach(function(f){
+    html += '<div class="th-list-item" style="cursor:pointer" data-filing-ticker="'+escH(_TICKER)+'" data-filing-accession="'+escH(f.accession||'')+'" data-filing-form="'+escH(f.form||'')+'">';
+    html += '<div class="emoji">\uD83D\uDCC4</div>';
+    html += '<div class="body">';
+    html += '<div class="title">SEC '+escH(f.form||'')+' Filing</div>';
+    html += '<div class="sub">'+fmtDate(f.filing_date||f.processed_at)+'</div>';
+    if(f.accession) html += '<div class="detail" style="font-size:11px;color:var(--muted);">'+escH(f.accession)+'</div>';
+    html += '<div class="badges">';
+    if(f.has_local==='1'||f.processed_at) html += '<span class="th-item-badge up">Downloaded</span>';
+    html += '<a class="th-item-badge info" href="'+(f.doc_url||'#')+'" target="_blank" rel="noopener" style="text-decoration:none;" onclick="event.stopPropagation()">SEC.gov</a>';
+    html += '</div></div></div>';
+  });
+  html += '</div>';
+  el.innerHTML = html;
+  // Click handler: open filing content in slide panel
+  el.addEventListener('click', function(e){
+    var item = e.target.closest('[data-filing-accession]');
+    if(!item) return;
+    var tk = item.getAttribute('data-filing-ticker') || '';
+    var acc = item.getAttribute('data-filing-accession') || '';
+    if(!acc) return;
+    if(typeof window.openSlidePanel === 'function'){
+      window.openSlidePanel('Loading filing...', '', '<div style="color:var(--muted);">Loading...</div>');
+      fetch('/api/filing/content?ticker='+encodeURIComponent(tk)+'&accession='+encodeURIComponent(acc))
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(!d.ok){ window.openSlidePanel('Error', '', '<div style="color:#ef4444;">'+(d.error||'Could not load')+'</div>'); return; }
+          window.openSlidePanel('SEC Filing', tk+' · '+acc, '<pre style="white-space:pre-wrap;font-family:inherit;margin:0;">'+escH(d.content||'')+'</pre>');
+        })
+        .catch(function(){ window.openSlidePanel('Error', '', '<div style="color:#ef4444;">Failed to load filing.</div>'); });
+    }
+  });
+}
+
+/* ── Earnings tab ────────────────────────────────────────────────────── */
+function buildEarnings(){
+  var h = _HUB;
+
+  // Earnings brief
+  var brief = h.earnings_sec_brief || {};
+  var briefEl = document.getElementById('earningsBriefBox');
+  if(briefEl && (brief.next_announced_date || brief.last_release_date || brief.last_result)){
+    var bhtml = '<div class="th-card full info-left">';
+    bhtml += '<div class="th-card-label">Earnings Brief</div>';
+    bhtml += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">';
+    bhtml += '<span class="th-item-badge info">Next: '+ escH(brief.next_announced_date||'Not found')+'</span>';
+    bhtml += '<span class="th-item-badge">Last: '+ escH(brief.last_release_date||'-')+'</span>';
+    bhtml += '<span class="th-item-badge">Result: '+ escH(brief.last_result||'Unknown')+'</span>';
+    bhtml += '</div>';
+    if(brief.brief) bhtml += '<div style="font-size:12px;color:var(--muted);">'+escH(brief.brief)+'</div>';
+    bhtml += '</div>';
+    briefEl.innerHTML = bhtml;
+  }
+
+  // AI Earnings analysis
+  var earnings = h.earnings || [];
+  var el = document.getElementById('earningsList');
+  if(!earnings.length){ el.innerHTML='<div class="th-empty">No AI earnings analysis for $'+_TICKER+'.</div>'; }
+  else {
+    var html = '';
+    earnings.forEach(function(e){
+      var dirCls = '';
+      if(e.guidance_direction==='raised') dirCls='up';
+      else if(e.guidance_direction==='lowered') dirCls='down';
+      else if(e.guidance_direction==='maintained') dirCls='info';
+      html += '<div class="th-list-item">';
+      html += '<div class="emoji">\uD83D\uDCCA</div><div class="body">';
+      html += '<div class="title">'+escH(e.quarter||'')+' '+escH(e.year||'')+' Earnings</div>';
+      html += '<div class="sub">'+fmtDate(e.created_at)+'</div>';
+      if(e.summary) html += '<div class="detail">'+escH(String(e.summary).substring(0,300))+'</div>';
+      html += '<div class="badges">';
+      if(e.guidance_direction) html += '<span class="th-item-badge '+dirCls+'">Guidance: '+escH(e.guidance_direction)+'</span>';
+      if(e.sentiment) html += '<span class="th-item-badge">Sentiment: '+escH(e.sentiment)+'</span>';
+      html += '</div></div></div>';
+    });
+    el.innerHTML = html;
+  }
+
+  // Earnings Calls (SEC)
+  var calls = h.earnings_calls || [];
+  var callsEl = document.getElementById('earningsCallsList');
+  if(!calls.length){ callsEl.innerHTML='<div class="th-empty">No earnings call transcripts indexed.</div>'; }
+  else {
+    var html = '';
+    calls.slice(0,12).forEach(function(tr){
+      html += '<div class="th-list-item" style="cursor:default;">';
+      html += '<div class="emoji">\uD83C\uDFA7</div><div class="body">';
+      html += '<div class="title">'+escH(tr.title||'Earnings Call')+'</div>';
+      html += '<div class="sub">'+escH(tr.call_date||'-');
+      if(tr.fiscal_year && tr.fiscal_quarter) html += ' \u00b7 '+escH(tr.fiscal_year)+' '+escH(tr.fiscal_quarter);
+      if(tr.char_count) html += ' \u00b7 '+escH(tr.char_count)+' chars';
+      html += '</div>';
+      if(tr.excerpt){
+        html += '<details class="detail" style="margin-top:4px;"><summary style="cursor:pointer;">'+escH(String(tr.excerpt).substring(0,150))+'... <span style="font-size:11px;font-weight:700;">Read More</span></summary>';
+        html += '<div style="margin-top:6px;white-space:pre-wrap;">'+escH(tr.excerpt)+'</div></details>';
+      }
+      if(tr.source_url) html += '<div class="badges"><a class="th-item-badge info" href="'+escH(tr.source_url)+'" target="_blank" style="text-decoration:none;">Source</a></div>';
+      html += '</div></div>';
+    });
+    callsEl.innerHTML = html;
+  }
+
+  // Earnings Releases
+  var rels = h.earnings_releases || [];
+  var relsEl = document.getElementById('earningsReleasesList');
+  if(!rels.length){ relsEl.innerHTML='<div class="th-empty">No SEC earnings releases extracted.</div>'; }
+  else {
+    var html = '';
+    rels.slice(0,12).forEach(function(tr){
+      html += '<div class="th-list-item" style="cursor:default;">';
+      html += '<div class="emoji">\uD83E\uDDFE</div><div class="body">';
+      html += '<div class="title">'+escH(tr.title||'Earnings Release')+'</div>';
+      html += '<div class="sub">'+escH(tr.call_date||'-');
+      if(tr.form) html += ' \u00b7 '+escH(tr.form);
+      if(tr.char_count) html += ' \u00b7 '+escH(tr.char_count)+' chars';
+      html += '</div>';
+      if(tr.excerpt){
+        html += '<details class="detail" style="margin-top:4px;"><summary style="cursor:pointer;">'+escH(String(tr.excerpt).substring(0,150))+'... <span style="font-size:11px;font-weight:700;">Read More</span></summary>';
+        html += '<div style="margin-top:6px;white-space:pre-wrap;">'+escH(tr.excerpt)+'</div></details>';
+      }
+      if(tr.source_url) html += '<div class="badges"><a class="th-item-badge info" href="'+escH(tr.source_url)+'" target="_blank" style="text-decoration:none;">Source</a></div>';
+      html += '</div></div>';
+    });
+    relsEl.innerHTML = html;
+  }
+
+  // Quarterly signals
+  var qsig = h.quarterly_signals || [];
+  var qsigEl = document.getElementById('quarterlySignalsList');
+  if(!qsig.length){ qsigEl.innerHTML='<div class="th-empty">No quarterly result signals yet.</div>'; }
+  else {
+    var html = '';
+    qsig.slice(0,8).forEach(function(s){
+      html += '<div class="th-list-item" style="cursor:default;">';
+      html += '<div class="emoji">\uD83D\uDCCC</div><div class="body">';
+      html += '<div class="title">'+escH(String(s.text||'').substring(0,150))+'</div>';
+      html += '<div class="sub">'+escH(s.date||'-');
+      if(s.source) html += ' \u00b7 '+escH(String(s.source).substring(0,80));
+      html += '</div></div></div>';
+    });
+    qsigEl.innerHTML = html;
+  }
+}
+
+/* ── History tab (records) ───────────────────────────────────────────── */
+var KIND_ICON = { event:'\u26A1', thought:'\uD83D\uDCAD', decision:'\u2705', action:'\uD83D\uDCCB',
+                  note:'\uD83D\uDCDD', task:'\u2705', question:'\u2753', reference:'\uD83D\uDCCE', inbox:'\uD83D\uDCEC' };
+
+function buildHistory(){
+  var records = _HUB.records || [];
+  var el = document.getElementById('historyList');
+  if(!records.length){ el.innerHTML='<div class="th-empty">No records for $'+_TICKER+'. Add your first note above.</div>'; return; }
+  var html = '';
+  records.forEach(function(r){
+    var kind = r.kind||'note';
+    var icon = KIND_ICON[kind]||'\uD83D\uDCDD';
+    html += '<div class="th-list-item" id="threc-'+r.id+'">';
+    html += '<div class="emoji">'+icon+'</div>';
+    html += '<div class="body">';
+    html += '<div class="title">'+escH(r.title||'(untitled)')+'</div>';
+    html += '<div class="sub">'+escH(kind)+' &middot; '+fmtDate(r.created_at)+'</div>';
+    if(r.body||r.content) html += '<div class="detail">'+escH(String(r.body||r.content||'').substring(0,200))+'</div>';
+    html += '<div class="badges">';
+    var sCls = r.status==='done'?'up':(r.status==='open'?'info':'');
+    html += '<span class="th-item-badge '+sCls+'">'+escH(r.status||'open')+'</span>';
+    html += ' <button class="th-item-badge" style="cursor:pointer;border-color:var(--up);" onclick="event.stopPropagation();thRecAction('+r.id+',\'done\',this)">Done</button>';
+    html += ' <button class="th-item-badge" style="cursor:pointer;color:var(--down-ink);" onclick="event.stopPropagation();thRecAction('+r.id+',\'delete\',this)">&times;</button>';
+    html += '</div></div></div>';
+  });
+  el.innerHTML = html;
+}
+
+/* ── Connections tab ─────────────────────────────────────────────────── */
+function buildConnections(){
+  var graph = _HUB.work_graph || [];
+  var el = document.getElementById('connectionsList');
+  if(!graph.length){ el.innerHTML='<div class="th-empty">No connections in work graph for $'+_TICKER+'.</div>'; return; }
+  var html = '';
+  var TYPE_URL = {
+    thread: function(id){ return '/workspace?space=research&thread='+id; },
+    chain: function(id){ return '/workspace?space=thinking&chain='+id; },
+    record: function(id){ return '#'; },
+    proposal: function(id){ return '#'; },
+    playbook: function(id){ return '/workspace?space=projects'; },
+    playbook_run: function(id){ return '/workspace?space=projects'; },
+    ticker: function(id){ return '/ticker/'+id; },
+  };
+  graph.forEach(function(g){
+    var ot = g.other_type||'';
+    var oid = g.other_id||'';
+    var title = g.other_title || (ot==='ticker' ? '$'+oid : ot+' #'+oid);
+    var emoji = g.other_emoji || '';
+    var rel = g.relation || 'related';
+    var url = (TYPE_URL[ot]||function(){return '#';})(oid);
+    html += '<a class="th-conn-node" href="'+url+'">';
+    html += '<span class="conn-emoji">'+escH(emoji)+'</span>';
+    html += '<span>'+escH(title)+'</span>';
+    html += '<span class="conn-type">'+escH(ot)+'</span>';
+    if(rel!=='related') html += '<span class="conn-type" style="background:var(--info-soft);">'+escH(rel)+'</span>';
+    html += '</a>';
+  });
+  el.innerHTML = html;
+}
+
+/* ── Record actions ──────────────────────────────────────────────────── */
+function thRecAction(id, action, btn){
+  if(action==='delete' && !confirm('Delete this record?')) return;
+  var fd = new FormData();
+  fd.append('source','record'); fd.append('id',id); fd.append('action',action);
+  fetch('/workspace/item-action',{method:'POST',body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(){
+      var row = document.getElementById('threc-'+id);
+      if(!row) return;
+      if(action==='delete') row.remove();
+      else { if(btn){ btn.disabled=true; btn.textContent='Done!'; } }
+    });
+}
+
+/* ── Quick add record ────────────────────────────────────────────────── */
+function thAddRecord(){
+  var inp = document.getElementById('thQaInput');
+  var title = inp.value.trim();
+  if(!title) return;
+  var kind = document.getElementById('thQaKind').value;
+  var fd = new FormData();
+  fd.append('kind',kind); fd.append('domain','work'); fd.append('title',title);
+  fd.append('ticker',_TICKER); fd.append('source','manual'); fd.append('created_by','user');
+  fetch('/workspace/record',{method:'POST',body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if(data.ok){
+        inp.value='';
+        var r={id:data.id, kind:kind, title:title, ticker:_TICKER, status:'open', body:'', created_at:new Date().toISOString()};
+        (_HUB.records||[]).unshift(r);
+        buildHistory();
+        var cnt = document.getElementById('cntHistory');
+        if(cnt) cnt.textContent = (_HUB.records||[]).length;
+        var cnt2 = document.getElementById('cntRecords');
+        if(cnt2) cnt2.textContent = (_HUB.records||[]).length;
+      }
+    });
+}
+
+/* ── Refresh helper ──────────────────────────────────────────────────── */
+function doRefresh(url, ticker, btn){
+  var orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Refreshing\u2026';
+  var fd = new FormData();
+  fd.append('ticker', ticker);
+  fetch(url,{method:'POST',body:fd})
+    .then(function(r){ btn.textContent = 'Done!'; setTimeout(function(){ btn.textContent=orig; btn.disabled=false; },2000); })
+    .catch(function(){ btn.textContent = 'Error'; setTimeout(function(){ btn.textContent=orig; btn.disabled=false; },2000); });
+}
+
+/* ── Sparkline SVG builder ──────────────────────────────────────────── */
+function buildSparkSVG(vals){
+  var nums = vals.filter(function(v){ return v !== null && v !== undefined && !isNaN(Number(v)); }).map(Number);
+  if(nums.length < 2) return '<svg width="82" height="20"></svg>';
+  var min = Math.min.apply(null,nums), max = Math.max.apply(null,nums);
+  var span = Math.max(1e-9, max-min), w=82, h=20;
+  var pts = nums.map(function(v,i){
+    var x = (i*(w-2))/Math.max(1,nums.length-1)+1;
+    var y = (h-2)-((v-min)/span)*(h-4)+1;
+    return x.toFixed(1)+' '+y.toFixed(1);
+  });
+  var color = nums[nums.length-1] >= nums[0] ? '#2563eb' : 'var(--down, #ef4444)';
+  return '<svg width="82" height="20" viewBox="0 0 82 20" preserveAspectRatio="none"><path d="M '+pts.join(' L ')+'" fill="none" stroke="'+color+'" stroke-width="1.8" vector-effect="non-scaling-stroke"/></svg>';
+}
+
+/* ── Donut chart builder ────────────────────────────────────────────── */
+function buildDonutCSS(rows){
+  var palette = ['#1e3a8a','#334155','#6366f1','#0f766e','#475569','#4338ca'];
+  var pcts = (rows||[]).map(function(r){ var v=parseFloat(String((r&&r.pct)||0)); return isNaN(v)?0:Math.max(0,v); });
+  var total = pcts.reduce(function(a,b){ return a+b; },0);
+  if(total <= 0) return 'background:var(--border)';
+  var cum=0, parts=[];
+  pcts.slice(0,6).forEach(function(v,i){ var s=cum; cum+=v; parts.push(palette[i%palette.length]+' '+s+'% '+cum+'%'); });
+  if(cum<100) parts.push('#cbd5e1 '+cum+'% 100%');
+  return 'background:conic-gradient('+parts.join(',')+')';
+}
+
+/* ── Fundamentals tab ────────────────────────────────────────────────── */
+function buildFundamentals(){
+  var h = _HUB;
+  // Price metrics
+  var pm = h.price_metrics || {};
+  var pmEl = document.getElementById('priceMetricsGrid');
+  if(pm && Object.keys(pm).length > 0){
+    var html = '';
+    var items = [
+      {l:'Market Cap', v:pm.market_cap},
+      {l:'Current Price', v:pm.current_price ? '$'+Number(pm.current_price).toFixed(2) : ''},
+      {l:'YTD Return', v:pm.ytd_return ? Number(pm.ytd_return).toFixed(1)+'%' : ''},
+      {l:'12M Return', v:pm.m12_return ? Number(pm.m12_return).toFixed(1)+'%' : ''},
+      {l:'5Y Return', v:pm.y5_return ? Number(pm.y5_return).toFixed(1)+'%' : ''},
+      {l:'52W High', v:pm.high_52w ? '$'+Number(pm.high_52w).toFixed(2) : ''},
+      {l:'52W Low', v:pm.low_52w ? '$'+Number(pm.low_52w).toFixed(2) : ''},
+      {l:'P/E Ratio', v:pm.pe_ratio},
+      {l:'Div Yield', v:pm.div_yield ? Number(pm.div_yield).toFixed(2)+'%' : ''},
+    ];
+    items.forEach(function(i){
+      if(!i.v) return;
+      html += '<div class="th-card"><div class="th-card-label">'+i.l+'</div><div class="th-card-body" style="font-size:16px;font-weight:700;">'+escH(i.v)+'</div></div>';
+    });
+    pmEl.innerHTML = html || '<div class="th-empty">No price metrics available.</div>';
+  } else {
+    pmEl.innerHTML = '<div class="th-empty">No price metrics available.</div>';
+  }
+
+  // YoY delta summary
+  var fd = h.financial_deltas || {};
+  var deltaEl = document.getElementById('miniStatsDeltaSummary');
+  if(deltaEl){
+    if(fd && fd.ok && fd.metrics){
+      var m = fd.metrics;
+      var parts = [];
+      if(m.revenue && m.revenue.delta && m.revenue.delta.pct != null) parts.push('Revenue '+fmtDelta(m.revenue.delta.pct));
+      if(m.free_cash_flow && m.free_cash_flow.delta && m.free_cash_flow.delta.pct != null) parts.push('FCF '+fmtDelta(m.free_cash_flow.delta.pct));
+      if(m.total_debt && m.total_debt.delta && m.total_debt.delta.pct != null) parts.push('Debt '+fmtDelta(m.total_debt.delta.pct));
+      if(parts.length){
+        var yr = '';
+        if(m.revenue && m.revenue.prev_year && m.revenue.cur_year) yr = 'YoY ('+m.revenue.prev_year+'\u2192'+m.revenue.cur_year+'): ';
+        deltaEl.textContent = yr + parts.join(', ');
+      }
+    }
+  }
+
+  // Mini statements (5Y financials) with sparklines
+  var ms = h.mini_statements || {};
+  var msEl = document.getElementById('miniStatementsBox');
+  if(ms && ms.years && ms.years.length > 0){
+    var tbl = '<div style="overflow-x:auto;"><table style="width:100%;font-size:12px;border-collapse:separate;border-spacing:0 6px;">';
+    tbl += '<tr><th style="text-align:left;padding:6px 12px;font-size:11px;font-weight:700;color:var(--muted);">Metric</th>';
+    ms.years.forEach(function(y){ tbl += '<th style="text-align:right;padding:6px 12px;font-size:11px;font-weight:700;color:var(--muted);">'+escH(y)+'</th>'; });
+    tbl += '<th style="text-align:right;padding:6px 12px;width:88px;font-size:11px;font-weight:700;color:var(--muted);">Trend</th></tr>';
+    var rows = [
+      {k:'revenue', l:'Revenue'}, {k:'gross_profit', l:'Gross Profit'},
+      {k:'operating_cash_flow', l:'Op. Cash Flow'}, {k:'capex', l:'CapEx'},
+      {k:'free_cash_flow', l:'Free Cash Flow'}, {k:'total_cash', l:'Cash'},
+      {k:'total_debt', l:'Total Debt'}, {k:'total_equity', l:'Total Equity'},
+    ];
+    rows.forEach(function(r){
+      var vals = ms[r.k] || [];
+      if(!vals.length) return;
+      tbl += '<tr style="box-shadow:0 1px 3px rgba(0,0,0,.03);border-radius:10px;"><td style="padding:10px 12px;font-weight:600;background:var(--panel);border-radius:10px 0 0 10px;">'+r.l+'</td>';
+      vals.forEach(function(v){
+        var fv = v !== null && v !== undefined ? fmtMoney(v) : '-';
+        tbl += '<td style="text-align:right;padding:10px 12px;background:var(--panel);">'+fv+'</td>';
+      });
+      tbl += '<td style="text-align:right;padding:10px 12px;background:var(--panel);border-radius:0 10px 10px 0;">'+buildSparkSVG(vals)+'</td>';
+      tbl += '</tr>';
+    });
+    tbl += '</table></div>';
+    if(ms.source || ms.asof) tbl += '<div style="font-size:11px;color:var(--muted);margin-top:6px;">Provenance: '+(ms.source||'-')+' \u00b7 asof '+(ms.asof||'-')+'</div>';
+    msEl.innerHTML = tbl;
+  } else {
+    msEl.innerHTML = '<div class="th-empty">No financial statements available. Click Refresh Financials above.</div>';
+  }
+
+  // Revenue segments with donut charts
+  var rs = h.revenue_segments || {};
+  var rsEl = document.getElementById('revenueSegmentsBox');
+  var product = rs.product || []; var geo = rs.geography || [];
+  if(product.length || geo.length){
+    var html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">';
+    // Product mix
+    html += '<div>';
+    html += '<div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px;">Product Mix</div>';
+    if(product.length){
+      html += '<div style="width:132px;height:132px;border-radius:999px;margin:2px auto 8px auto;border:none;box-shadow:inset 0 0 0 16px var(--panel);'+buildDonutCSS(product)+'"></div>';
+      product.slice(0,6).forEach(function(r){
+        html += '<div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-bottom:4px;"><span style="color:var(--text);max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(r.label||'-')+'</span><span style="font-weight:700;color:var(--text);">'+(Number(r.pct||0)).toFixed(1)+'%</span></div>';
+      });
+    } else { html += '<div class="th-empty" style="padding:8px 0;">No product segmentation.</div>'; }
+    html += '</div>';
+    // Geo mix
+    html += '<div>';
+    html += '<div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px;">Geographic Mix</div>';
+    if(geo.length){
+      html += '<div style="width:132px;height:132px;border-radius:999px;margin:2px auto 8px auto;border:none;box-shadow:inset 0 0 0 16px var(--panel);'+buildDonutCSS(geo)+'"></div>';
+      geo.slice(0,6).forEach(function(r){
+        html += '<div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-bottom:4px;"><span style="color:var(--text);max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(r.label||'-')+'</span><span style="font-weight:700;color:var(--text);">'+(Number(r.pct||0)).toFixed(1)+'%</span></div>';
+      });
+    } else { html += '<div class="th-empty" style="padding:8px 0;">No geographic segmentation.</div>'; }
+    html += '</div></div>';
+    rsEl.innerHTML = html;
+  } else {
+    rsEl.innerHTML = '<div class="th-empty">No segment data available. Click Refresh Intel above.</div>';
+  }
+}
+
+function fmtDelta(v){ var n=Number(v); return (n>=0?'+':'')+n.toFixed(1)+'%'; }
+
+/* ── Moats & Peers tab ──────────────────────────────────────────────── */
+function buildMoats(){
+  var h = _HUB;
+  // Moat tags are now rendered by buildMoatEditable()
+
+  // Competitors
+  var comps = h.competitors || [];
+  var compEl = document.getElementById('competitorsList');
+  if(comps.length){
+    var html = '';
+    comps.forEach(function(c){
+      html += '<div class="th-list-item" onclick="window.location.href=\'/ticker/'+escH(c.ticker||'')+'\'">';
+      html += '<div class="emoji">\u2694\uFE0F</div>';
+      html += '<div class="body">';
+      html += '<div class="title">'+escH(c.name||c.ticker||'Unknown')+'</div>';
+      html += '<div class="sub">$'+escH(c.ticker||'')+' &middot; '+escH(c.date||'')+'</div>';
+      if(c.evidence) html += '<div class="detail">'+escH(String(c.evidence).substring(0,200))+'</div>';
+      html += '</div></div>';
+    });
+    compEl.innerHTML = html;
+  } else {
+    compEl.innerHTML = '<div class="th-empty">No competitors identified.</div>';
+  }
+
+  // Similar companies
+  var sims = h.similar_companies || [];
+  var simEl = document.getElementById('similarList');
+  if(sims.length){
+    var html = '';
+    sims.forEach(function(s){
+      html += '<div style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--panel);margin-bottom:6px;">';
+      html += '<a href="/ticker/'+escH(s.ticker||'')+'" style="text-decoration:none;color:var(--text);font-weight:700;font-size:13px;">'+escH(s.ticker||'-')+'</a>';
+      html += '<span style="color:var(--muted);font-size:12px;">'+escH(s.name||'')+' \u00b7 '+escH(s.industry||'')+' \u00b7 '+escH(s.market_cap||'')+'</span>';
+      html += '<button class="btn" style="margin-left:auto;font-size:11px;padding:3px 8px;" onclick="addToWatchlist(\''+escH(s.ticker||'')+'\',this)">+ Watchlist</button>';
+      html += '</div>';
+    });
+    simEl.innerHTML = html;
+  } else {
+    simEl.innerHTML = '<div class="th-empty">No similar companies found.</div>';
+  }
+}
+
+/* ── Supply Chain tab ───────────────────────────────────────────────── */
+function buildSupplyChain(){
+  var sc = _HUB.supply_chain || {};
+  var el = document.getElementById('supplyChainBox');
+  var suppliers = sc.suppliers || [];
+  var customers = sc.customers || [];
+  var partners = sc.partners || [];
+  if(!suppliers.length && !customers.length && !partners.length){
+    el.innerHTML = '<div class="th-empty">No supply chain data for $'+_TICKER+'.</div>';
+    return;
+  }
+  var html = '';
+  function renderGroup(label, items, emoji){
+    if(!items.length) return '';
+    var h = '<div class="th-section-head" style="margin-top:10px;">'+label+' <span class="count">'+items.length+'</span></div>';
+    items.forEach(function(s){
+      h += '<div class="th-list-item" style="cursor:default;">';
+      h += '<div class="emoji">'+emoji+'</div><div class="body" style="flex:1;">';
+      h += '<div class="title"><a href="/ticker/'+escH(s.ticker||'')+'" style="text-decoration:none;color:inherit;">'+escH(s.ticker||'-')+'</a> <span style="color:var(--muted);font-weight:400;">\u00b7 '+escH(s.name||'-')+'</span></div>';
+      h += '<div class="sub">'+escH(s.industry||'-')+' \u00b7 '+escH(s.market_cap||'-')+'</div>';
+      if(s.evidence) h += '<div class="detail">'+escH(String(s.evidence).substring(0,200))+'</div>';
+      h += '<div class="badges">';
+      h += '<span class="th-item-badge info">Conf '+(Number(s.confidence||0)*100).toFixed(0)+'%</span>';
+      if(s.source) h += '<span class="th-item-badge">'+escH(s.source)+'</span>';
+      if(String(s.source)==='manual' && s.id){
+        h += ' <button class="th-item-badge" style="cursor:pointer;color:var(--down-ink);" onclick="event.stopPropagation();removeSupplyLink('+s.id+')">\u00d7 Remove</button>';
+      }
+      h += '</div></div></div>';
+    });
+    return h;
+  }
+  html += renderGroup('Suppliers', suppliers, '\uD83D\uDCE6');
+  html += renderGroup('Customers', customers, '\uD83C\uDFE2');
+  html += renderGroup('Partners', partners, '\uD83E\uDD1D');
+  el.innerHTML = html;
+}
+function removeSupplyLink(rowId){
+  if(!confirm('Remove this relationship?')) return;
+  var fd = new FormData();
+  fd.append('ticker',_TICKER); fd.append('row_id',rowId);
+  fetch('/company_file/supply-chain-remove',{method:'POST',body:fd})
+    .then(function(){ location.reload(); });
+}
+function initSupplyChainForm(){
+  var form = document.getElementById('scAddForm');
+  if(!form) return;
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var fd = new FormData(form);
+    fetch('/company_file/supply-chain-add',{method:'POST',body:fd})
+      .then(function(){ location.reload(); });
+  });
+}
+
+/* ── Notes & Tasks tab ──────────────────────────────────────────────── */
+function buildNotes(){
+  var h = _HUB;
+  // Notes
+  var notes = h.notes || [];
+  var notesEl = document.getElementById('notesList');
+  setText('cntNotes', notes.length + (h.tasks||[]).length + (h.reminders||[]).length);
+  if(notes.length){
+    var html = '';
+    notes.forEach(function(n){
+      html += '<div class="th-list-item"><div class="emoji">\uD83D\uDCDD</div><div class="body">';
+      html += '<div class="title">'+escH(n.action||'Note')+'</div>';
+      html += '<div class="sub">'+fmtDate(n.created_at)+'</div>';
+      html += '<div class="detail">'+escH(String(n.note||'').substring(0,300))+'</div>';
+      html += '</div></div>';
+    });
+    notesEl.innerHTML = html;
+  } else {
+    notesEl.innerHTML = '<div class="th-empty">No notes.</div>';
+  }
+
+  // Tasks
+  var tasks = h.tasks || [];
+  var tasksEl = document.getElementById('tasksList');
+  if(tasks.length){
+    var html = '';
+    tasks.forEach(function(t){
+      var sCls = t.status==='done'?'up':(t.status==='open'?'info':'');
+      html += '<div class="th-list-item"><div class="emoji">\u2705</div><div class="body">';
+      html += '<div class="title">'+escH(t.task)+'</div>';
+      html += '<div class="sub">'+escH(t.priority||'')+' &middot; '+fmtDate(t.created_at)+'</div>';
+      html += '<div class="badges"><span class="th-item-badge '+sCls+'">'+escH(t.status||'open')+'</span></div>';
+      html += '</div></div>';
+    });
+    tasksEl.innerHTML = html;
+  } else {
+    tasksEl.innerHTML = '<div class="th-empty">No tasks.</div>';
+  }
+
+  // Reminders
+  var rems = h.reminders || [];
+  var remsEl = document.getElementById('remindersList');
+  if(rems.length){
+    var html = '';
+    rems.forEach(function(r){
+      html += '<div class="th-list-item"><div class="emoji">\u23F0</div><div class="body">';
+      html += '<div class="title">'+escH(r.note||'Reminder')+'</div>';
+      html += '<div class="sub">'+escH(r.remind_at||'')+'</div>';
+      html += '<div class="badges"><span class="th-item-badge '+(r.status==='open'?'info':'')+'">'+escH(r.status||'open')+'</span></div>';
+      html += '</div></div>';
+    });
+    remsEl.innerHTML = html;
+  } else {
+    remsEl.innerHTML = '<div class="th-empty">No reminders.</div>';
+  }
+}
+
+/* ── Transactions tab ───────────────────────────────────────────────── */
+function buildTransactions(){
+  var h = _HUB;
+  // Buy/sell history
+  var txns = h.transactions || [];
+  var txEl = document.getElementById('transactionsList');
+  setText('cntTransactions', txns.length);
+  if(txns.length){
+    var html = '';
+    txns.forEach(function(t){
+      var isBuy = String(t.action||t.side||'').toLowerCase().indexOf('buy') >= 0;
+      html += '<div class="th-list-item"><div class="emoji">'+(isBuy?'\uD83D\uDFE2':'\uD83D\uDD34')+'</div><div class="body">';
+      html += '<div class="title">'+escH(t.action||t.side||'Trade')+' &middot; '+escH(t.shares||t.quantity||'')+' shares</div>';
+      html += '<div class="sub">$'+escH(Number(t.price||0).toFixed(2))+' &middot; '+fmtDate(t.trade_date||t.created_at)+'</div>';
+      if(t.notes||t.reason) html += '<div class="detail">'+escH(String(t.notes||t.reason||'').substring(0,200))+'</div>';
+      html += '</div></div>';
+    });
+    txEl.innerHTML = html;
+  } else {
+    txEl.innerHTML = '<div class="th-empty">No transactions recorded.</div>';
+  }
+
+  // Decision log
+  var decs = h.decisions || [];
+  var decEl = document.getElementById('decisionsList');
+  if(decs.length){
+    var html = '';
+    decs.forEach(function(d){
+      html += '<div class="th-list-item"><div class="emoji">\uD83C\uDFAF</div><div class="body">';
+      html += '<div class="title">'+escH(d.decision_type||d.action||'Decision')+'</div>';
+      html += '<div class="sub">'+fmtDate(d.created_at)+'</div>';
+      if(d.reasoning||d.notes) html += '<div class="detail">'+escH(String(d.reasoning||d.notes||'').substring(0,300))+'</div>';
+      html += '</div></div>';
+    });
+    decEl.innerHTML = html;
+  } else {
+    decEl.innerHTML = '<div class="th-empty">No decision log entries.</div>';
+  }
+}
+
+/* ── Lab / Case Studies tab ─────────────────────────────────────────── */
+function buildLab(){
+  var cases = _HUB.case_studies || [];
+  var el = document.getElementById('caseStudiesList');
+  setText('cntLab', cases.length);
+  if(cases.length){
+    var html = '';
+    cases.forEach(function(c){
+      html += '<div class="th-list-item" onclick="window.location.href=\'/lab/'+_TICKER+'\'">';
+      html += '<div class="emoji">\uD83E\uDDEA</div><div class="body">';
+      html += '<div class="title">'+escH(c.title||c.case_type||'Case Study')+'</div>';
+      html += '<div class="sub">'+escH(c.case_type||'')+' &middot; '+fmtDate(c.created_at)+'</div>';
+      if(c.summary||c.notes) html += '<div class="detail">'+escH(String(c.summary||c.notes||'').substring(0,250))+'</div>';
+      html += '</div></div>';
+    });
+    el.innerHTML = html;
+  } else {
+    el.innerHTML = '<div class="th-empty">No case studies yet. <a href="/lab/'+_TICKER+'">Open Financial Lab</a> to create one.</div>';
+  }
+}
+
+/* ── Assumptions tab (Phase 4) ───────────────────────────────────────── */
+function loadAssumptions(){
+  fetch('/api/assumptions?ticker='+_TICKER)
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var el = document.getElementById('assumptionsList');
+      setText('cntAssumptions', data.length);
+      if(!data.length){ el.innerHTML='<div class="th-empty">No assumptions defined for $'+_TICKER+'. Add your first above.</div>'; return; }
+      var html = '';
+      data.forEach(function(a){
+        var statusCls = a.status==='breached'?'down':(a.status==='active'?'up':'');
+        var impCls = a.importance==='core'?'warn':'';
+        html += '<div class="th-list-item" id="asm-'+a.id+'">';
+        html += '<div class="emoji">'+(a.status==='breached'?'\u26A0\uFE0F':'\u2705')+'</div>';
+        html += '<div class="body">';
+        html += '<div class="title">'+escH(a.assumption_text)+'</div>';
+        html += '<div class="sub">';
+        if(a.measurable_metric) html += escH(a.measurable_metric)+' '+escH(a.threshold_operator)+' '+escH(a.threshold_value||'');
+        if(a.current_value!==null && a.current_value!==undefined) html += ' (current: '+Number(a.current_value).toFixed(2)+')';
+        html += '</div>';
+        html += '<div class="badges">';
+        html += '<span class="th-item-badge '+statusCls+'">'+escH(a.status)+'</span>';
+        html += '<span class="th-item-badge '+impCls+'">'+escH(a.importance)+'</span>';
+        html += '<span class="th-item-badge">'+escH(a.condition_type)+'</span>';
+        html += ' <button class="th-item-badge" style="cursor:pointer;color:var(--down-ink);" onclick="event.stopPropagation();deleteAssumption('+a.id+')">&times;</button>';
+        html += '</div></div></div>';
+      });
+      el.innerHTML = html;
+    });
+}
+function addAssumption(){
+  var text = document.getElementById('asmText').value.trim();
+  if(!text) return;
+  var fd = new FormData();
+  fd.append('ticker', _TICKER);
+  fd.append('assumption_text', text);
+  fd.append('condition_type', document.getElementById('asmType').value);
+  fd.append('measurable_metric', document.getElementById('asmMetric').value.trim());
+  fd.append('threshold_operator', document.getElementById('asmOp').value);
+  fd.append('threshold_value', document.getElementById('asmThreshold').value);
+  fd.append('importance', document.getElementById('asmImportance').value);
+  fetch('/api/assumption',{method:'POST',body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if(d.ok){ document.getElementById('asmText').value=''; loadAssumptions(); } });
+}
+function deleteAssumption(id){
+  if(!confirm('Delete this assumption?')) return;
+  fetch('/api/assumption/'+id+'/delete',{method:'POST'})
+    .then(function(){ loadAssumptions(); });
+}
+
+/* ── Conviction tab (Phase 4) ───────────────────────────────────────── */
+function loadConviction(){
+  fetch('/api/conviction/'+_TICKER)
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var grid = document.getElementById('convictionGrid');
+      var compGrid = document.getElementById('convictionComponents');
+      var histEl = document.getElementById('convictionHistory');
+
+      if(data.current){
+        var c = data.current;
+        var score = Number(c.score||50);
+        var color = score >= 70 ? 'var(--up)' : (score >= 40 ? 'var(--info)' : 'var(--down)');
+        grid.innerHTML = '<div class="th-card full" style="border-top:3px solid '+color+';text-align:center;">'
+          +'<div style="font-size:48px;font-weight:900;color:'+color+';">'+score.toFixed(0)+'</div>'
+          +'<div style="font-size:13px;color:var(--muted);">Conviction Score (0-100)</div>'
+          +'<div style="font-size:12px;color:var(--muted);margin-top:4px;">Previous: '+(Number(c.previous_score||50)).toFixed(0)+'</div>'
+          +'</div>';
+
+        // Components
+        var comp = c.components;
+        if(comp && typeof comp === 'object'){
+          var html = '';
+          var compLabels = {
+            assumption_health:'Assumption Health',
+            debate_pass_rate:'Debate Pass Rate',
+            earnings_trajectory:'Earnings Trajectory',
+            research_freshness:'Research Freshness',
+            signal_engagement:'Signal Engagement',
+          };
+          Object.keys(comp).forEach(function(k){
+            var v = Number(comp[k]||50);
+            var cls = v >= 70 ? 'up-left' : (v >= 40 ? 'info-left' : 'warn-left');
+            html += '<div class="th-card '+cls+'"><div class="th-card-label">'+(compLabels[k]||k)+'</div>'
+              +'<div class="th-card-body" style="font-size:18px;font-weight:700;">'+v.toFixed(0)+'%</div></div>';
+          });
+          compGrid.innerHTML = html;
+        }
+      } else {
+        grid.innerHTML = '<div class="th-empty">No conviction data yet. Click Recalculate below.</div>';
+        compGrid.innerHTML = '';
+      }
+
+      // History
+      var hist = data.history || [];
+      if(hist.length){
+        var html = '';
+        hist.forEach(function(h){
+          var d = Number(h.delta||0);
+          var cls = d > 0 ? 'up' : (d < 0 ? 'down' : '');
+          html += '<div class="th-list-item"><div class="emoji">'+(d >= 0 ? '\uD83D\uDCC8' : '\uD83D\uDCC9')+'</div><div class="body">';
+          html += '<div class="title">Score: '+Number(h.score||0).toFixed(0)+' ('+(d >= 0 ? '+' : '')+d.toFixed(1)+')</div>';
+          html += '<div class="sub">'+escH(h.trigger_type||'')+' &middot; '+fmtDate(h.created_at)+'</div>';
+          if(h.trigger_event) html += '<div class="detail">'+escH(h.trigger_event)+'</div>';
+          html += '</div></div>';
+        });
+        histEl.innerHTML = html;
+      } else {
+        histEl.innerHTML = '<div class="th-empty">No conviction history yet.</div>';
+      }
+    });
+}
+function refreshConviction(){
+  fetch('/api/conviction/'+_TICKER+'/refresh',{method:'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ loadConviction(); });
+}
+
+/* ── Triggers tab (Phase 4) ─────────────────────────────────────────── */
+function loadTriggers(){
+  fetch('/api/triggers?ticker='+_TICKER)
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var el = document.getElementById('triggersList');
+      setText('cntTriggers', data.length);
+      if(!data.length){ el.innerHTML='<div class="th-empty">No triggers for $'+_TICKER+'. Add your first above.</div>'; return; }
+      var html = '';
+      data.forEach(function(t){
+        var sCls = t.status==='fired'?'down':(t.status==='active'?'up':'');
+        html += '<div class="th-list-item" id="trg-'+t.id+'">';
+        html += '<div class="emoji">'+(t.status==='fired'?'\uD83D\uDD14':'\u23F0')+'</div>';
+        html += '<div class="body">';
+        html += '<div class="title">'+escH(t.trigger_name)+'</div>';
+        html += '<div class="sub">'+escH(t.trigger_type)+': '+escH(t.condition_text||'')+' '+escH(t.comparison_op||'')+' '+escH(t.threshold_value||'')+'</div>';
+        if(t.action_text) html += '<div class="detail">Action: '+escH(t.action_text)+'</div>';
+        html += '<div class="badges">';
+        html += '<span class="th-item-badge '+sCls+'">'+escH(t.status)+'</span>';
+        if(t.fired_at) html += '<span class="th-item-badge down">Fired: '+fmtDate(t.fired_at)+'</span>';
+        html += ' <button class="th-item-badge" style="cursor:pointer;color:var(--down-ink);" onclick="event.stopPropagation();deleteTrigger('+t.id+')">&times;</button>';
+        html += '</div></div></div>';
+      });
+      el.innerHTML = html;
+    });
+}
+function addTrigger(){
+  var name = document.getElementById('trgName').value.trim();
+  if(!name) return;
+  var ttype = document.getElementById('trgType').value;
+  var fd = new FormData();
+  fd.append('ticker', _TICKER);
+  fd.append('trigger_name', name);
+  fd.append('trigger_type', ttype);
+  fd.append('threshold_value', document.getElementById('trgThreshold').value);
+  fd.append('action_text', document.getElementById('trgAction').value.trim());
+  // Auto-set comparison_op based on type
+  fd.append('comparison_op', ttype.indexOf('below') >= 0 ? '<' : '>');
+  fd.append('condition_text', ttype === 'metric_check' ? document.getElementById('trgThreshold').value : '');
+  fetch('/api/trigger',{method:'POST',body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if(d.ok){ document.getElementById('trgName').value=''; loadTriggers(); } });
+}
+function deleteTrigger(id){
+  if(!confirm('Delete this trigger?')) return;
+  fetch('/api/trigger/'+id+'/delete',{method:'POST'})
+    .then(function(){ loadTriggers(); });
+}
+
+/* ── Living Synthesis (Phase 4) — loads into overview ───────────────── */
+function loadSynthesis(){
+  fetch('/api/synthesis/'+_TICKER)
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(!d.synthesis_text) return;
+      var el = document.getElementById('overviewGrid');
+      var card = document.createElement('div');
+      card.className = 'th-card full accent-left';
+      card.innerHTML = '<div class="th-card-label">Living Synthesis</div>'
+        +'<div class="th-card-body" style="white-space:pre-wrap;font-size:12px;line-height:1.55;">'
+        +escH(d.synthesis_text).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+        +'</div>'
+        +'<div class="meta" style="margin-top:6px;">Generated: '+fmtDate(d.generated_at)+'</div>';
+      el.insertBefore(card, el.firstChild);
+    })
+    .catch(function(){});
+}
+
+/* ── Analyze Now (agent) ─────────────────────────────────────────────── */
+function triggerAgentAnalysis(){
+  var btn = document.getElementById('analyzeNowBtn');
+  if(!btn) return;
+  btn.disabled = true; btn.textContent = 'Running\u2026';
+  fetch('/api/agent/analyze',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ticker:_TICKER})
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    btn.textContent = d.ok ? 'Started \u2713' : 'Error';
+    setTimeout(function(){ btn.textContent='Analyze Now'; btn.disabled=false; }, 4000);
+  })
+  .catch(function(){ btn.textContent='Error'; setTimeout(function(){ btn.textContent='Analyze Now'; btn.disabled=false; },3000); });
+}
+
+/* ── Conviction Box (bull/bear) — localStorage ──────────────────────── */
+function initConvictionBox(){
+  var key = 'dealroom:' + _TICKER;
+  function save(){
+    var data = {
+      bull: (document.getElementById('thBullCase').value || ''),
+      bear: (document.getElementById('thBearCase').value || ''),
+      buy:  (document.getElementById('thBuyBelow').value || '')
+    };
+    try { localStorage.setItem(key, JSON.stringify(data)); } catch(_){}
+    refreshGauge();
+  }
+  function load(){
+    try {
+      var raw = localStorage.getItem(key);
+      if(!raw) return;
+      var d = JSON.parse(raw);
+      if(!d || typeof d !== 'object') return;
+      if(d.bull != null) document.getElementById('thBullCase').value = d.bull;
+      if(d.bear != null) document.getElementById('thBearCase').value = d.bear;
+      if(d.buy != null) document.getElementById('thBuyBelow').value = d.buy;
+    } catch(_){}
+  }
+  ['thBullCase','thBearCase','thBuyBelow'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(el) el.addEventListener('input', save);
+  });
+  load();
+  refreshGauge();
+}
+
+/* ── Valuation Gauge ────────────────────────────────────────────────── */
+function refreshGauge(){
+  var buyEl = document.getElementById('thBuyBelow');
+  var curEl = document.getElementById('thCurPxLabel');
+  var pin = document.getElementById('thGaugePin');
+  var st = document.getElementById('thGaugeStatus');
+  if(!pin || !st || !buyEl || !curEl) return;
+  var buy = parseFloat(String(buyEl.value||'').replace(/,/g,''));
+  var cur = parseFloat(String(curEl.textContent||'').replace(/[$,]/g,''));
+  if(isNaN(buy) || isNaN(cur) || buy <= 0){
+    pin.style.left = '50%';
+    st.className = 'th-gauge-status above';
+    st.textContent = 'Set a buy target to evaluate zone.';
+    return;
+  }
+  var pct = Math.min(100, Math.max(0, (cur / buy) * 100));
+  pin.style.left = pct + '%';
+  if(cur <= buy){
+    st.className = 'th-gauge-status buy';
+    st.textContent = 'BUY ZONE';
+  } else {
+    st.className = 'th-gauge-status above';
+    st.textContent = 'ABOVE BUY ZONE';
+  }
+}
+
+/* ── Active Proposal (Latest Insight) ───────────────────────────────── */
+function buildActiveProposal(){
+  var ap = _HUB.active_proposal;
+  if(!ap || !ap.title) return;
+  var box = document.getElementById('activeProposalBox');
+  if(!box) return;
+  var html = '<div class="th-card full accent-left">';
+  html += '<div class="th-card-label">Latest Fundamental Insight</div>';
+  html += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">';
+  html += escH((ap.status||'').toUpperCase()) + ' &middot; ' + escH(ap.kind||'');
+  if(ap.confidence) html += ' &middot; Conf ' + (Number(ap.confidence)*100).toFixed(0) + '%';
+  html += '</div>';
+  html += '<div style="font-weight:800;color:var(--text);margin-bottom:8px;">' + escH(ap.title) + '</div>';
+  if(ap.insights && ap.insights.length){
+    ap.insights.forEach(function(i){
+      html += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;background:var(--panel2);">';
+      html += '<div style="font-size:11px;color:var(--muted);font-weight:700;margin-bottom:3px;">' + escH(i.label||'Insight') + '</div>';
+      html += '<div style="font-size:13px;color:var(--text);line-height:1.35;">' + escH(i.text||'') + '</div>';
+      html += '</div>';
+    });
+  }
+  var rz = ap.reasoning || {};
+  if(typeof rz === 'object' && rz.actionable_proposal){
+    html += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;background:var(--panel2);">';
+    html += '<div style="font-size:11px;color:var(--muted);font-weight:700;margin-bottom:3px;">Key Takeaway</div>';
+    html += '<div style="font-size:13px;color:var(--text);line-height:1.35;">' + escH(rz.actionable_proposal) + '</div>';
+    html += '</div>';
+  }
+  if(ap.citations && ap.citations.length){
+    html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">';
+    ap.citations.forEach(function(c){
+      if(!c.url) return;
+      var tab = c.tab || '';
+      if(tab){
+        // Inline tab switch — stay in unified shell
+        html += '<a class="th-item-badge info" href="#" onclick="event.preventDefault();thSwitchTab(\''+escH(tab)+'\',document.querySelector(\'[data-pane='+escH(tab)+']\'));return false;" style="text-decoration:none;cursor:pointer;">' + escH(c.label||'Source') + '</a>';
+      } else if(c.url.indexOf('/ticker/') === 0 || c.url.match(/^\/ticker\//)){
+        // Ticker link — navigate within unified shell
+        html += '<a class="th-item-badge info" href="'+escH(c.url)+'" style="text-decoration:none;">' + escH(c.label||'Source') + '</a>';
+      } else {
+        html += '<a class="th-item-badge info" href="'+escH(c.url)+'" style="text-decoration:none;">' + escH(c.label||'Source') + '</a>';
+      }
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  box.innerHTML = html;
+  box.style.display = '';
+}
+
+/* ── Buyback (Fundamentals tab) ─────────────────────────────────────── */
+function buildBuybacks(){
+  var bb = _HUB.buyback || {};
+  var el = document.getElementById('buybackBox');
+  if(!el) return;
+  var quarters = bb.quarters || [];
+  var ttm = bb.ttm_value;
+  if(ttm == null && !quarters.length){
+    el.innerHTML = '<div class="th-empty">No buyback data available.</div>';
+    return;
+  }
+  var html = '<div class="th-card">';
+  html += '<div style="font-size:24px;font-weight:800;color:var(--text);">' + fmtMoney(ttm) + '</div>';
+  html += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Treasury stock acquired (TTM)</div>';
+  if(quarters.length){
+    var max = 0;
+    quarters.forEach(function(q){ var v = Math.abs(q.value||0); if(v > max) max = v; });
+    if(max > 0){
+      html += '<div class="th-buyback-bars">';
+      quarters.forEach(function(q){
+        var v = Math.abs(q.value||0);
+        var h = Math.max(6, Math.round((v/max)*44));
+        html += '<div class="th-buyback-bar" style="height:'+h+'px;" title="'+fmtMoney(q.value)+'"></div>';
+      });
+      html += '</div>';
+    }
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+/* ── Insider Trades (Fundamentals tab) ──────────────────────────────── */
+function buildInsiderTrades(){
+  var trades = _HUB.insider_trades || [];
+  var el = document.getElementById('insiderTradesBox');
+  if(!el) return;
+  if(!trades.length){
+    el.innerHTML = '<div class="th-empty">No recent Form 4 insider trades found.</div>';
+    return;
+  }
+  var html = '';
+  trades.slice(0,12).forEach(function(it){
+    var isBuy = (it.tx_type||'') === 'BUY';
+    var isSell = (it.tx_type||'') === 'SELL';
+    var color = isBuy ? 'var(--up-ink)' : (isSell ? 'var(--down-ink)' : 'var(--text)');
+    var sign = isBuy ? '+' : (isSell ? '-' : '');
+    var shares = Math.abs(Number(it.net_shares||0));
+    var val = Number(it.est_value||0);
+    html += '<div class="th-insider-row">';
+    html += '<div style="min-width:0;flex:1;">';
+    html += '<div style="font-size:12px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">';
+    html += escH(it.owner||it.title||'-');
+    if(it.title && it.owner && it.title !== it.owner) html += ' &middot; ' + escH(it.title);
+    html += '</div>';
+    if(it.signal_summary) html += '<div style="font-size:11px;color:var(--muted);">' + escH(it.signal_summary) + '</div>';
+    html += '<div style="font-size:11px;color:var(--muted);">' + escH(it.date||'-') + '</div>';
+    html += '</div>';
+    html += '<div style="text-align:right;">';
+    html += '<div style="font-size:12px;font-weight:700;color:'+color+';">';
+    if(shares > 0) html += sign + shares.toLocaleString() + ' shares';
+    html += ' ' + escH(it.tx_type||'');
+    html += '</div>';
+    if(val > 0) html += '<div style="font-size:11px;color:var(--muted);">~' + fmtMoney(val) + '</div>';
+    html += '</div></div>';
+  });
+  el.innerHTML = html;
+}
+
+/* ── Moat Tags (editable) ───────────────────────────────────────────── */
+function buildMoatEditable(){
+  var moatOptions = _HUB.moat_options || [];
+  var activeMoats = (_HUB.moats || []).map(function(m){ return m.key || m; });
+  var el = document.getElementById('moatTagsBox');
+  if(!el) return;
+  if(!moatOptions.length){
+    // Fallback: just show read-only badges
+    var moats = _HUB.moats || [];
+    if(moats.length){
+      var html = '';
+      moats.forEach(function(m){
+        html += '<span class="th-item-badge up" style="font-size:12px;padding:4px 10px;">'+escH(m.label||m.key||m)+'</span>';
+      });
+      el.innerHTML = html;
+    } else {
+      el.innerHTML = '<div class="th-empty" style="padding:8px 0;">No moat tags assigned.</div>';
+    }
+    var saveBtn = document.getElementById('moatSaveBtn');
+    if(saveBtn) saveBtn.style.display = 'none';
+    return;
+  }
+  var html = '';
+  moatOptions.forEach(function(m){
+    var checked = activeMoats.indexOf(m.key) >= 0 ? ' checked' : '';
+    html += '<label class="th-moat-pill">';
+    html += '<input type="checkbox" name="moat_keys" value="'+escH(m.key)+'"'+checked+'>';
+    html += '<span>'+escH(m.label)+'</span></label>';
+  });
+  el.innerHTML = html;
+}
+
+/* ── IR Email Preset ────────────────────────────────────────────────── */
+/* ── Moat Save Form ──────────────────────────────────────────────────── */
+function initMoatForm(){
+  var form = document.getElementById('moatSaveForm');
+  if(!form) return;
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var fd = new FormData(form);
+    fetch('/company_file/moat-save',{method:'POST',body:fd})
+      .then(function(r){ return r.text(); })
+      .then(function(){
+        var btn = document.getElementById('moatSaveBtn');
+        if(btn){ btn.textContent = 'Saved!'; setTimeout(function(){ btn.textContent = 'Save Thesis Tags'; }, 2000); }
+      });
+  });
+}
+
+function initIrEmail(){
+  var preset = document.getElementById('irPreset');
+  var subject = document.getElementById('irSubject');
+  var body = document.getElementById('irBody');
+  var modal = document.getElementById('irEmailModal');
+  if(preset && subject && body){
+    preset.addEventListener('change', function(){
+      var opt = preset.options[preset.selectedIndex];
+      if(opt && opt.value) subject.value = opt.value;
+      var b = opt ? (opt.getAttribute('data-body')||'') : '';
+      if(b) body.value = b;
+    });
+  }
+  if(modal){
+    modal.addEventListener('click', function(e){ if(e.target === modal) modal.style.display = 'none'; });
+  }
+}
+
+/* ── Add to Watchlist ────────────────────────────────────────────────── */
+function addToWatchlist(ticker, btn){
+  var fd = new FormData();
+  fd.append('ticker', ticker);
+  fd.append('reason', 'Added from Similar Companies');
+  btn.disabled = true; btn.textContent = 'Adding\u2026';
+  fetch('/my_universe/watchlist/add',{method:'POST',body:fd})
+    .then(function(){ btn.textContent = 'Added!'; })
+    .catch(function(){ btn.textContent = 'Error'; setTimeout(function(){ btn.textContent='+ Watchlist'; btn.disabled=false; },2000); });
+}
+
+function fmtMoney(v){
+  if(v == null) return '-';
+  var n = Number(v);
+  if(isNaN(n)) return '-';
+  n = Math.abs(n);
+  if(n >= 1e12) return '$'+(n/1e12).toFixed(1)+'T';
+  if(n >= 1e9) return '$'+(n/1e9).toFixed(1)+'B';
+  if(n >= 1e6) return '$'+(n/1e6).toFixed(1)+'M';
+  if(n >= 1e3) return '$'+(n/1e3).toFixed(1)+'K';
+  return '$'+n.toFixed(0);
+}
+
+/* ── Overview mini-previews ──────────────────────────────────────────── */
+function buildOverviewPreviews(){
+  // Mini financials preview (revenue + FCF sparkline)
+  var ms = _HUB.mini_statements || {};
+  var mfEl = document.getElementById('overviewMiniFinancials');
+  if(mfEl && ms.years && ms.years.length > 0){
+    var html = '<div class="th-card full" style="cursor:pointer;" onclick="thSwitchTab(\'fundamentals\',document.querySelector(\'[data-pane=fundamentals]\'))">';
+    html += '<div class="th-card-label">Financials Snapshot <span style="font-size:10px;color:var(--info-ink);font-weight:700;margin-left:6px;">View all &rarr;</span></div>';
+    html += '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">';
+    var rev = ms.revenue || []; var fcf = ms.free_cash_flow || [];
+    if(rev.length){
+      var last = rev[rev.length-1];
+      html += '<div><div style="font-size:11px;color:var(--muted);">Revenue</div><div style="font-size:16px;font-weight:800;">'+fmtMoney(last)+'</div></div>';
+      html += '<div>'+buildSparkSVG(rev)+'</div>';
+    }
+    if(fcf.length){
+      var lastF = fcf[fcf.length-1];
+      html += '<div style="margin-left:12px;"><div style="font-size:11px;color:var(--muted);">FCF</div><div style="font-size:16px;font-weight:800;">'+fmtMoney(lastF)+'</div></div>';
+      html += '<div>'+buildSparkSVG(fcf)+'</div>';
+    }
+    html += '</div></div>';
+    mfEl.innerHTML = html;
+  }
+
+  // Top 3 AI signals preview
+  var proposals = _HUB.proposals || [];
+  var spEl = document.getElementById('overviewSignalsPreview');
+  if(spEl && proposals.length){
+    var html = '<div class="th-section-head">Latest AI Signals <span class="count">'+proposals.length+'</span></div>';
+    proposals.slice(0,3).forEach(function(p){
+      var conf = p.confidence ? (Number(p.confidence)*100).toFixed(0)+'%' : '';
+      html += '<div class="th-list-item" style="cursor:pointer;" onclick="thSwitchTab(\'signals\',document.querySelector(\'[data-pane=signals]\'))">';
+      html += '<div class="emoji">\uD83D\uDCA1</div><div class="body">';
+      html += '<div class="title">'+escH(p.headline||p.action_type||'Proposal')+'</div>';
+      html += '<div class="sub">'+fmtDate(p.created_at);
+      if(conf) html += ' \u00b7 Conf '+conf;
+      html += '</div></div></div>';
+    });
+    spEl.innerHTML = html;
+  }
+}
+
+/* ── Header price + change ────────────────────────────────────────────── */
+function populateHeaderPrice(){
+  var pm = _HUB.price_metrics || _HUB.profile || {};
+  var price = pm.current_price;
+  var priceEl = document.getElementById('thHeaderPrice');
+  if(priceEl && price) priceEl.textContent = '$' + Number(price).toFixed(2);
+  var changeEl = document.getElementById('thHeaderChange');
+  if(changeEl && pm.day_change != null){
+    var d = Number(pm.day_change);
+    var pct = pm.day_change_pct != null ? Number(pm.day_change_pct).toFixed(2) + '%' : '';
+    var sign = d >= 0 ? '+' : '';
+    changeEl.textContent = sign + d.toFixed(2) + (pct ? ' (' + sign + pct + ')' : '');
+    changeEl.style.color = d >= 0 ? 'var(--up)' : 'var(--down, #ef4444)';
+  }
+}
+
+/* ── Sidebar population ─────────────────────────────────────────────── */
+function populateSidebar(){
+  // Earnings date
+  var brief = _HUB.earnings_sec_brief || {};
+  if(brief.next_announced_date){
+    var el = document.getElementById('sidebarEarnings');
+    var dt = document.getElementById('sidebarEarningsDate');
+    if(el && dt){ dt.textContent = brief.next_announced_date; el.style.display=''; }
+  }
+}
+function updateSidebarConviction(){
+  fetch('/api/conviction/'+_TICKER)
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if(data.current){
+        var score = Number(data.current.score||0);
+        var color = score >= 70 ? 'var(--up)' : (score >= 40 ? 'var(--info)' : 'var(--down, #ef4444)');
+        var el = document.getElementById('sidebarConvScore');
+        if(el){ el.textContent = score.toFixed(0); el.style.color = color; }
+      }
+    }).catch(function(){});
+}
+
+/* ── Init ────────────────────────────────────────────────────────────── */
+(function(){
+  buildOverview();
+  populateHeaderPrice();
+  buildActiveProposal();
+  initConvictionBox();
+  buildOverviewPreviews();
+  populateSidebar();
+  buildResearch();
+  buildThinking();
+  buildSignals();
+  buildFilings();
+  buildEarnings();
+  buildHistory();
+  buildConnections();
+  buildFundamentals();
+  buildBuybacks();
+  buildInsiderTrades();
+  buildMoatEditable();
+  buildMoats();
+  buildSupplyChain();
+  buildNotes();
+  buildTransactions();
+  buildLab();
+  initIrEmail();
+  initMoatForm();
+  initSupplyChainForm();
+  // Phase 4: lazy-load from API
+  loadAssumptions();
+  loadSynthesis();
+
+  // Restore last tab + group
+  try{
+    var last = localStorage.getItem('thub_tab_'+_TICKER);
+    if(last && last!=='overview'){
+      var group = _paneToGroup(last);
+      var grpBtn = document.querySelector('.th-group-btn[data-group="'+group+'"]');
+      if(grpBtn) thSwitchGroup(group, grpBtn);
+      var subBtn = document.querySelector('.th-sub-btn[data-pane="'+last+'"]');
+      if(subBtn) thSwitchTab(last, subBtn);
+    }
+  }catch(_){}
+
+  // Quick-add Enter key
+  var inp = document.getElementById('thQaInput');
+  if(inp) inp.addEventListener('keydown', function(e){ if(e.key==='Enter'){e.preventDefault();thAddRecord();} });
+
+  // AI insight
+  fetch('/workspace/ticker/'+_TICKER+'/ai-context')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var el = document.getElementById('aiInsightText');
+      if(el){ el.style.color=''; el.textContent=d.insight||'No insight available.'; }
+    })
+    .catch(function(){
+      var el = document.getElementById('aiInsightText');
+      if(el){ el.style.color=''; el.textContent='Insight unavailable.'; }
+    });
+})();
+
+/* ── Thesis Edit Modal ──────────────────────────────────────── */
+function openThesisModal(){
+  document.getElementById('thesisModalBg').style.display = 'flex';
+  // Pre-fill from existing data
+  var th = _HUB.thesis || {};
+  document.getElementById('tmThesisText').value = th.thesis || '';
+  document.getElementById('tmTarget').value = th.target_price || '';
+  document.getElementById('tmHorizon').value = th.time_horizon || '';
+  document.getElementById('tmInvalidation').value = th.invalidation_criteria || '';
+}
+function closeThesisModal(){ document.getElementById('thesisModalBg').style.display = 'none'; }
+function saveThesis(){
+  var data = {
+    thesis: document.getElementById('tmThesisText').value,
+    target_price: document.getElementById('tmTarget').value || null,
+    time_horizon: document.getElementById('tmHorizon').value,
+    invalidation_criteria: document.getElementById('tmInvalidation').value,
+    phase: 'holding'
+  };
+  fetch('/api/thesis/'+encodeURIComponent(_TICKER), {
+    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if(d.ok){ location.reload(); } else { alert('Error: '+(d.error||'unknown')); }
+  });
+}
+
+/* ── Create Research Thread ─────────────────────────────────── */
+function createResearchThread(){
+  document.getElementById('newThreadModalBg').style.display='flex';
+  var inp = document.getElementById('ntThreadTitle');
+  inp.value = _TICKER + ' Deep Dive';
+  setTimeout(function(){ inp.focus(); inp.select(); }, 80);
+}
+function submitNewThread(){
+  var title = document.getElementById('ntThreadTitle').value.trim();
+  if(!title) return;
+  document.getElementById('newThreadModalBg').style.display='none';
+  fetch('/workspace/thread', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({title:title, ticker:_TICKER, space:'research', thread_type:'research'})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if(d.ok && d.id){ window.location.href='/today?space=research&thread='+d.id; }
+    else { alert('Error creating thread'); }
+  });
+}
+
+/* ── Create Thinking Chain ──────────────────────────────────── */
+function createThinkingChain(){
+  document.getElementById('newChainModalBg').style.display='flex';
+  var inp = document.getElementById('ntChainTitle');
+  inp.value = _TICKER + ' — Investment thesis analysis';
+  setTimeout(function(){ inp.focus(); inp.select(); }, 80);
+}
+function submitNewChain(){
+  var title = document.getElementById('ntChainTitle').value.trim();
+  if(!title) return;
+  document.getElementById('newChainModalBg').style.display='none';
+  fetch('/workspace/thinking', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({title:title, ticker:_TICKER, chain_type:'thinking'})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if(d.ok && d.id){ window.location.href='/today?space=thinking&chain='+d.id; }
+    else { alert('Error creating chain'); }
+  });
+}
+</script>
+
+<!-- New Research Thread Modal -->
+<div id="newThreadModalBg" style="position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:80;display:none;align-items:center;justify-content:center;padding:14px;" onclick="if(event.target===this)this.style.display='none'">
+  <div style="width:min(460px,96vw);background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.22);">
+    <h4 style="margin:0 0 12px;font-size:16px;font-weight:800;">New Research Thread</h4>
+    <label style="display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px;">Title</label>
+    <input id="ntThreadTitle" type="text" placeholder="e.g. AAPL Deep Dive — Q1 2026" style="width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;background:var(--panel2);color:var(--text);font-family:inherit;" onkeydown="if(event.key==='Enter')submitNewThread()">
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+      <button class="btn" onclick="document.getElementById('newThreadModalBg').style.display='none'">Cancel</button>
+      <button class="btn" style="background:var(--accent);color:#fff;border-color:var(--accent);" onclick="submitNewThread()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Thinking Chain Modal -->
+<div id="newChainModalBg" style="position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:80;display:none;align-items:center;justify-content:center;padding:14px;" onclick="if(event.target===this)this.style.display='none'">
+  <div style="width:min(460px,96vw);background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.22);">
+    <h4 style="margin:0 0 12px;font-size:16px;font-weight:800;">New Thinking Chain</h4>
+    <label style="display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px;">Title</label>
+    <input id="ntChainTitle" type="text" placeholder="e.g. AAPL — Investment thesis analysis" style="width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;background:var(--panel2);color:var(--text);font-family:inherit;" onkeydown="if(event.key==='Enter')submitNewChain()">
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+      <button class="btn" onclick="document.getElementById('newChainModalBg').style.display='none'">Cancel</button>
+      <button class="btn" style="background:var(--accent);color:#fff;border-color:var(--accent);" onclick="submitNewChain()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Thesis Edit Modal -->
+<div id="thesisModalBg" style="position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:80;display:none;align-items:center;justify-content:center;padding:14px;" onclick="if(event.target===this)closeThesisModal()">
+  <div style="width:min(560px,96vw);background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.22);max-height:90vh;overflow-y:auto;">
+    <h4 style="margin:0 0 12px;font-size:16px;font-weight:800;">Edit Thesis: {{ ticker }}</h4>
+    <label style="display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px;">Investment Thesis</label>
+    <textarea id="tmThesisText" rows="4" placeholder="Why do you own/watch this? What's the core thesis?" style="width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;background:var(--panel2);color:var(--text);font-family:inherit;resize:vertical;min-height:80px;"></textarea>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
+      <div>
+        <label style="display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px;">Target Price ($)</label>
+        <input id="tmTarget" type="number" step="0.01" placeholder="e.g. 240" style="width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;background:var(--panel2);color:var(--text);">
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px;">Time Horizon</label>
+        <input id="tmHorizon" placeholder="e.g. 12-18 months" style="width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;background:var(--panel2);color:var(--text);">
+      </div>
+    </div>
+    <label style="display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px;margin-top:10px;">Invalidation Criteria</label>
+    <input id="tmInvalidation" placeholder="What would make you sell? e.g. FCF margin < 30% for 2 quarters" style="width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;background:var(--panel2);color:var(--text);">
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+      <button class="btn" onclick="closeThesisModal()">Cancel</button>
+      <button class="btn" style="background:var(--accent);color:#fff;border-color:var(--accent);" onclick="saveThesis()">Save</button>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+export CORE_DB_BACKEND="${CORE_DB_BACKEND:-postgres}"
+export CORE_DB_STRICT_POSTGRES="${CORE_DB_STRICT_POSTGRES:-1}"
+
+if [ -x "$ROOT/.venv-memory/bin/python" ]; then
+  PY="$ROOT/.venv-memory/bin/python"
+else
+  PY="python3"
+fi
+
+exec "$PY" "$ROOT/tools/upsert_ir_registry.py" "$@"
+

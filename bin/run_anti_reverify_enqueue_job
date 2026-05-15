@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+if [ -x "$ROOT/.venv-memory/bin/python" ]; then
+  PY="$ROOT/.venv-memory/bin/python"
+else
+  PY="${PYTHON_BIN:-python3}"
+fi
+
+exec "$PY" "$ROOT/tools/enqueue_stale_anti_relationships.py" --limit "${ONTOLOGY_ANTI_REVERIFY_LIMIT:-200000}" --apply

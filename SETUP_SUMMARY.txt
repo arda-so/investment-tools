@@ -1,0 +1,26 @@
+Investment Tools Setup Summary (Feb 11, 2026)
+
+What changed:
+- Consolidated all investment work under one root: /Users/solmaz/Investment_Tools
+- Moved prior folders into this root:
+  - /Users/solmaz/investment_research → now inside Investment_Tools as data/, filings/, logs/, outputs/exports/
+  - /Users/solmaz/Investment_Reports → now Investment_Tools/reports/
+- Updated code paths to use local project paths instead of ~/investment_research or ~/Investment_Reports
+- Updated LaunchAgents log paths to /Users/solmaz/Investment_Tools/logs/ and reloaded agents
+- Cleaned old path references in logs/exports (cosmetic)
+
+Bloomberg-style terminal features added:
+- /Users/solmaz/Investment_Tools/bin/ shortcuts:
+  - run_daily, run_weekly, run_monthly, run_quarterly
+  - run_morning, run_earnings, run_signals, run_redflag
+  - status (prints system status and writes DASHBOARD.md)
+- Added PATH entry in ~/.zshrc so shortcuts work anywhere
+- Live dashboard file: /Users/solmaz/Investment_Tools/DASHBOARD.md
+
+How to use:
+- status
+- run_daily
+- Reports are saved in: /Users/solmaz/Investment_Tools/reports/
+- Logs are saved in: /Users/solmaz/Investment_Tools/logs/
+
+If anything breaks, re-check LaunchAgents in /Users/solmaz/Library/LaunchAgents

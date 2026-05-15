@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Cloud Run job: 15-minute EDGAR watch
+# Detects new SEC filings for held/watchlist tickers and fires run_event_driven_monitor()
+# so proposals appear in the feed within ~15 minutes of the SEC filing.
+set -euo pipefail
+
+ROOT="${INVESTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT"
+
+export CORE_DB_BACKEND="postgres"
+export CORE_DB_GUARD_ENFORCE="1"
+export CORE_DB_STRICT_POSTGRES="1"
+export PHASE2_POSTGRES_ENABLED="${PHASE2_POSTGRES_ENABLED:-1}"
+export AI_QUEUE_BACKEND="${AI_QUEUE_BACKEND:-postgres}"
+export AI_QUEUE_STRICT_PROD="1"
+export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
+
+if [ -x "$ROOT/.venv-memory/bin/python" ]; then
+  PY="$ROOT/.venv-memory/bin/python"
+else
+  PY="python3"
+fi
+
+exec "$PY" "$ROOT/tools/edgar_watch.py"

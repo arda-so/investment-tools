@@ -1,0 +1,72 @@
+/* Lab Renderer Styles */
+.lab-section { margin-bottom:20px; }
+.lab-section-head {
+  font-size:13px; font-weight:800; text-transform:uppercase;
+  letter-spacing:.04em; color:var(--text); margin-bottom:10px;
+  display:flex; align-items:center; gap:8px;
+}
+.lab-empty {
+  color:var(--muted); font-size:12px; padding:12px;
+  border:1px dashed var(--border); border-radius:10px;
+  background:var(--panel2, #f1f5f9);
+}
+.lab-score-bar {
+  display:flex; align-items:center; gap:12px; margin-bottom:12px;
+  padding:12px; border:1px solid var(--border); border-radius:10px;
+  background:var(--panel);
+}
+.lab-score-num { font-size:28px; font-weight:900; }
+.lab-score-num.good { color:#10b981; }
+.lab-score-num.mid { color:#f59e0b; }
+.lab-score-num.bad { color:#ef4444; }
+.lab-score-label { font-size:12px; color:var(--muted); }
+.lab-checklist { display:grid; gap:6px; }
+.lab-check-row {
+  display:flex; gap:8px; padding:8px 10px;
+  border:1px solid var(--border); border-radius:8px;
+  background:var(--panel);
+}
+.lab-check-icon { font-size:14px; flex-shrink:0; margin-top:1px; }
+.lab-check-name { font-size:12px; font-weight:700; color:var(--text); }
+.lab-check-detail { font-size:11px; color:var(--muted); margin-top:2px; }
+.lab-scenario-form { display:flex; flex-direction:column; gap:8px; }
+.lab-scenario-input {
+  width:100%; box-sizing:border-box; border:1px solid var(--border);
+  border-radius:10px; padding:10px; font-size:12px;
+  background:var(--panel); color:var(--text); resize:vertical;
+}
+.lab-btn {
+  align-self:flex-start; padding:8px 16px; border:none;
+  border-radius:8px; background:var(--accent, #f47f5d);
+  color:#fff; font-size:12px; font-weight:700; cursor:pointer;
+}
+.lab-btn:disabled { opacity:.5; cursor:not-allowed; }
+.lab-btn-sm {
+  padding:3px 8px; border:1px solid var(--border);
+  border-radius:6px; background:var(--panel); color:var(--text);
+  font-size:10px; font-weight:700; cursor:pointer;
+}
+.lab-scenario-result { margin-top:8px; }
+.lab-scenario-output {
+  border:1px solid var(--border); border-radius:10px;
+  padding:12px; background:var(--panel);
+}
+.lab-scenario-text { font-size:12px; color:var(--text); line-height:1.5; white-space:pre-wrap; }
+.lab-cases-list { display:grid; gap:8px; }
+.lab-case-item {
+  border:1px solid var(--border); border-radius:8px;
+  padding:10px; background:var(--panel);
+}
+.lab-case-title { font-size:13px; font-weight:700; color:var(--text); }
+.lab-case-meta { font-size:10px; color:var(--muted); margin-top:2px; }
+.lab-case-notes { font-size:11px; color:var(--muted); margin-top:4px; }
+.lab-risk-diff { display:grid; gap:6px; }
+.lab-risk-item {
+  border:1px solid var(--border); border-radius:8px;
+  padding:8px 10px; background:var(--panel);
+}
+.lab-risk-type {
+  font-size:10px; font-weight:800; text-transform:uppercase;
+  color:var(--muted); letter-spacing:.04em; margin-bottom:3px;
+}
+.lab-risk-text { font-size:12px; color:var(--text); line-height:1.4; }

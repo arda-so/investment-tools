@@ -1,0 +1,229 @@
+{% set m = market["items"] if market and "items" in market else {} %}
+{% set sp = m.get("sp500", {}) %}
+{% set nd = m.get("nasdaq", {}) %}
+{% set dj = m.get("dow", {}) %}
+{% set r2 = m.get("russell2000", {}) %}
+{% set us2 = m.get("us2y", {}) %}
+{% set us5 = m.get("us5y", {}) %}
+{% set us10 = m.get("us10y", {}) %}
+{% set us30 = m.get("us30y", {}) %}
+{% set de10 = m.get("de10y", {}) %}
+{% set jp10 = m.get("jp10y", {}) %}
+{% set vix = m.get("vix", {}) %}
+{% set gold = m.get("gold", {}) %}
+{% set silver = m.get("silver", {}) %}
+{% set platinum = m.get("platinum", {}) %}
+{% set palladium = m.get("palladium", {}) %}
+{% set crude = m.get("crude", {}) %}
+{% set brent = m.get("brent", {}) %}
+{% set gas = m.get("natgas", {}) %}
+{% set copper = m.get("copper", {}) %}
+{% set aluminum = m.get("aluminum", {}) %}
+{% set heatoil = m.get("heatoil", {}) %}
+{% set gasoline = m.get("gasoline", {}) %}
+{% set corn = m.get("corn", {}) %}
+{% set wheat = m.get("wheat", {}) %}
+{% set soybeans = m.get("soybeans", {}) %}
+{% set ironore = m.get("ironore", {}) %}
+{% set lumber = m.get("lumber", {}) %}
+{% set cotton = m.get("cotton", {}) %}
+{% set sugar = m.get("sugar", {}) %}
+{% set coffee = m.get("coffee", {}) %}
+{% set cocoa = m.get("cocoa", {}) %}
+{% set dxy = m.get("dxy", {}) %}
+{% set eurusd = m.get("eurusd", {}) %}
+{% set eurgbp = m.get("eurgbp", {}) %}
+{% set usdjpy = m.get("usdjpy", {}) %}
+{% set gbpusd = m.get("gbpusd", {}) %}
+{% set usdcnh = m.get("usdcnh", {}) %}
+
+{% macro daypill(day) -%}
+  {% set ds = (day or "-") %}
+  {% set dn = (ds|string|replace('%', '')|float) %}
+  {% if (ds|string).startswith('+') or dn > 0 %}
+    <span class="chg-pill up">{{ ds }}</span>
+  {% elif (ds|string).startswith('-') or dn < 0 %}
+    <span class="chg-pill down">{{ ds }}</span>
+  {% else %}
+    <span class="chg-pill flat">{{ ds }}</span>
+  {% endif %}
+{%- endmacro %}
+
+<div class="mkt-shell">
+
+  <h1 class="mkt-page-title">Markets</h1>
+
+  {# ── Indices ── #}
+  <section class="idx-grid">
+    {% for label, row, extra in [("S&P 500", sp, ""), ("Nasdaq", nd, ""), ("Dow", dj, ""), ("Russell 2000", r2, "")] %}
+    <article class="idx-card js-index-card" data-index="{{ label }}" data-price="{{ row.price or '-' }}" data-day="{{ row.day or '-' }}">
+      <div class="idx-name">{{ label }}</div>
+      <div class="idx-price">{{ row.price or "-" }}</div>
+      <div class="idx-foot">{{ daypill(row.day) }}</div>
+    </article>
+    {% endfor %}
+  </section>
+
+  {# ── Tabs ── #}
+  <section class="dash-card">
+    <div class="mkt-tabs" style="margin-bottom:var(--space-16);">
+      <button type="button" class="mkt-tab-btn is-active" data-mkt-tab="rates">Rates & Risk</button>
+      <button type="button" class="mkt-tab-btn" data-mkt-tab="commodities">Commodities</button>
+      <button type="button" class="mkt-tab-btn" data-mkt-tab="currencies">Currencies</button>
+      <button type="button" class="mkt-tab-btn" data-mkt-tab="crossasset">Cross-Asset Transmission</button>
+    </div>
+
+    {# Rates #}
+    <div class="mkt-panel" data-mkt-panel="rates">
+      <div class="mkt-grid">
+        {% for label, row in [("US 2Y", us2), ("US 5Y", us5), ("US 10Y", us10), ("US 30Y", us30), ("German 10Y", de10), ("Japan 10Y", jp10), ("VIX", vix)] %}
+        <div class="mkt-item">
+          <div><div class="mkt-k">{{ label }}</div><div class="mkt-v">{{ row.price or "-" }}</div></div>
+          <div>{{ daypill(row.day) }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    {# Commodities #}
+    <div class="mkt-panel" data-mkt-panel="commodities" hidden>
+      <div class="mkt-grid">
+        {% for label, row in [
+          ("Crude Oil", crude), ("Brent Oil", brent), ("Nat Gas", gas),
+          ("Heating Oil", heatoil), ("Gasoline", gasoline), ("Lumber", lumber),
+          ("Gold", gold), ("Silver", silver), ("Platinum", platinum),
+          ("Palladium", palladium), ("Copper", copper), ("Aluminum", aluminum),
+          ("Iron Ore", ironore), ("Cotton", cotton), ("Sugar", sugar),
+          ("Coffee", coffee), ("Cocoa", cocoa), ("Wheat", wheat),
+          ("Corn", corn), ("Soybeans", soybeans)
+        ] %}
+        {% if row.price and row.price != "-" %}
+        <div class="mkt-item">
+          <div>
+            <div class="mkt-k">{{ label }}</div>
+            <div class="mkt-v{% if label == 'Nat Gas' and (row.day or '-')|string|first == '-' %} critical{% endif %}">{{ row.price }}</div>
+          </div>
+          <div>
+            {{ daypill(row.day) }}
+            <svg class="spark" viewBox="0 0 44 14" preserveAspectRatio="none" aria-hidden="true">
+              {% if (row.day or '-')|string|first == '-' %}
+              <polyline points="0,2 8,3 16,5 24,6 32,9 44,12" fill="none" stroke="#f43f5e" stroke-width="2"/>
+              {% else %}
+              <polyline points="0,12 8,10 16,9 24,7 32,5 44,3" fill="none" stroke="#10b981" stroke-width="2"/>
+              {% endif %}
+            </svg>
+          </div>
+        </div>
+        {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+
+    {# Currencies #}
+    <div class="mkt-panel" data-mkt-panel="currencies" hidden>
+      <div class="mkt-grid">
+        {% for label, row in [("US Dollar Index", dxy), ("EUR/USD", eurusd), ("EUR/GBP", eurgbp), ("USD/JPY", usdjpy), ("GBP/USD", gbpusd), ("USD/CNH", usdcnh)] %}
+        <div class="mkt-item">
+          <div><div class="mkt-k">{{ label }}</div><div class="mkt-v">{{ row.price or "-" }}</div></div>
+          <div>{{ daypill(row.day) }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    {# Cross-Asset #}
+    <div class="mkt-panel" data-mkt-panel="crossasset" hidden>
+      <div class="card-head">
+        <h3 class="card-title">Cross-Asset Transmission (v1)</h3>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div class="mini-upd" id="crossAssetAsOf">Loading...</div>
+          <button class="analyze-btn" type="button" id="crossAssetRefreshBtn">Refresh</button>
+        </div>
+      </div>
+      <div class="mini-upd" style="margin-bottom:8px;">Rolling correlation (20/60/252), beta(60d), and 1D expected-vs-actual gap.</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span class="mini-upd" id="crossAssetFilterHint">Click a matrix cell to filter.</span>
+        <button class="analyze-btn" type="button" id="crossAssetClearFilterBtn" style="display:none;">Clear Filter</button>
+      </div>
+      <div id="crossAssetMatrixWrap" style="margin-bottom:10px;">
+        <div style="overflow:auto;">
+          <table class="mini-table" id="crossAssetMatrix">
+            <thead id="crossAssetMatrixHead"><tr><th>Asset</th><th>Loading...</th></tr></thead>
+            <tbody id="crossAssetMatrixBody"><tr><td colspan="2">Loading correlation map...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="crossAssetError" class="mini-upd" style="display:none;color:var(--down-ink);margin-bottom:8px;"></div>
+      <div class="feed-scroll" style="max-height:360px;">
+        <table class="mini-table">
+          <thead><tr><th>Driver &rarr; Target</th><th>Corr20</th><th>Corr60</th><th>Corr252</th><th>Beta60</th><th>Gap 1D</th></tr></thead>
+          <tbody id="crossAssetRows"><tr><td colspan="6">Loading cross-asset snapshot...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+{# Overlays #}
+<div id="indexDrawerOverlay" class="index-drawer-overlay"></div>
+<aside id="indexDrawer" class="index-drawer" aria-hidden="true">
+  <div class="index-drawer-head">
+    <div class="index-drawer-title" id="indexDrawerTitle">Index Detail</div>
+    <button type="button" id="indexDrawerClose" class="index-drawer-close">Close</button>
+  </div>
+  <div class="index-drawer-body">
+    <article class="id-card"><div class="id-k">Last</div><div class="id-v" id="indexDrawerPrice">-</div><div id="indexDrawerDay" class="mini-upd">-</div></article>
+    <article class="id-card">
+      <div class="id-k">1Y Trend (Illustrative)</div>
+      <svg class="id-chart" viewBox="0 0 420 160" preserveAspectRatio="none" aria-hidden="true">
+        <polyline id="indexDrawerLine" points="0,120 42,112 84,105 126,95 168,102 210,88 252,76 294,64 336,55 378,42 420,36" fill="none" stroke="#2563eb" stroke-width="3"/>
+      </svg>
+    </article>
+  </div>
+</aside>
+
+<script>
+(function(){
+  /* Tabs */
+  function activateMktTab(name){
+    document.querySelectorAll('[data-mkt-tab]').forEach(function(b){ b.classList.toggle('is-active', b.getAttribute('data-mkt-tab')===name); });
+    document.querySelectorAll('[data-mkt-panel]').forEach(function(p){ if(p.getAttribute('data-mkt-panel')===name){p.removeAttribute('hidden');}else{p.setAttribute('hidden','hidden');} });
+  }
+  document.querySelectorAll('[data-mkt-tab]').forEach(function(b){ b.addEventListener('click',function(){ activateMktTab(b.getAttribute('data-mkt-tab')||'rates'); }); });
+
+  /* Index drawer */
+  var drawer=document.getElementById('indexDrawer'),ov=document.getElementById('indexDrawerOverlay'),cls=document.getElementById('indexDrawerClose');
+  var dTitle=document.getElementById('indexDrawerTitle'),dPrice=document.getElementById('indexDrawerPrice'),dDay=document.getElementById('indexDrawerDay');
+  function closeD(){ if(drawer&&ov){drawer.classList.remove('open');ov.style.display='none';} }
+  function openD(c){ if(!drawer||!ov||!c)return; var i=c.getAttribute('data-index')||''; if(i!=='S&P 500')return; dTitle.textContent=i+' Detail'; dPrice.textContent=c.getAttribute('data-price')||'-'; dDay.textContent='Day: '+(c.getAttribute('data-day')||'-'); ov.style.display='block'; drawer.classList.add('open'); }
+  document.querySelectorAll('.js-index-card').forEach(function(c){c.addEventListener('click',function(){openD(c);});});
+  if(ov)ov.addEventListener('click',closeD); if(cls)cls.addEventListener('click',closeD);
+
+  /* Cross-asset */
+  var caRows=document.getElementById('crossAssetRows'),caErr=document.getElementById('crossAssetError'),caAsOf=document.getElementById('crossAssetAsOf');
+  var caRefresh=document.getElementById('crossAssetRefreshBtn'),caMxHead=document.getElementById('crossAssetMatrixHead'),caMxBody=document.getElementById('crossAssetMatrixBody');
+  var caClearBtn=document.getElementById('crossAssetClearFilterBtn'),caHint=document.getElementById('crossAssetFilterHint');
+  var caSelA='',caSelB='';
+  function fmtPct(v){var n=Number(v||0);if(!isFinite(n))n=0;return(n>=0?'+':'')+n.toFixed(2)+'%';}
+  function clsBy(v){var n=Number(v||0);if(!isFinite(n))return'';return n>0?'good':n<0?'bad':'mid';}
+  function corrStyle(v){var n=Number(v||0);if(!isFinite(n))n=0;var a=Math.min(1,Math.max(0,Math.abs(n)));if(n>0)return'background:rgba(16,185,129,'+(0.14+a*0.28).toFixed(3)+');';if(n<0)return'background:rgba(244,63,94,'+(0.14+a*0.28).toFixed(3)+');';return'background:var(--panel2);';}
+  function buildMatrix(rows){
+    if(!caMxHead||!caMxBody)return;
+    var assets=[],seen={};
+    rows.forEach(function(r){var d=String(r.driver||'-'),t=String(r.target||'-');if(!seen[d]){seen[d]=1;assets.push(d);}if(!seen[t]){seen[t]=1;assets.push(t);}});
+    if(!assets.length){caMxHead.innerHTML='<tr><th>-</th></tr>';caMxBody.innerHTML='<tr><td>No data</td></tr>';return;}
+    var lk={};rows.forEach(function(r){lk[String(r.driver||'-')+'|'+String(r.target||'-')]=Number(r.corr60||0);});
+    var h='<tr><th></th>';assets.forEach(function(a){h+='<th style="font-size:9px;writing-mode:vertical-lr;transform:rotate(180deg);white-space:nowrap;padding:4px 2px;">'+a+'</th>';});h+='</tr>';caMxHead.innerHTML=h;
+    var b='';assets.forEach(function(a){b+='<tr><td style="font-size:10px;font-weight:700;white-space:nowrap;">'+a+'</td>';assets.forEach(function(bb){if(a===bb){b+='<td style="background:var(--panel2);text-align:center;font-size:9px;color:var(--muted);">-</td>';return;}var v=lk[a+'|'+bb];if(v===undefined)v=lk[bb+'|'+a];if(v===undefined)v=0;b+='<td style="text-align:center;font-size:10px;cursor:pointer;'+corrStyle(v)+'" data-ca-a="'+a+'" data-ca-b="'+bb+'">'+(v?v.toFixed(2):'-')+'</td>';});b+='</tr>';});
+    caMxBody.innerHTML=b;
+    caMxBody.querySelectorAll('td[data-ca-a]').forEach(function(td){td.addEventListener('click',function(){caSelA=td.getAttribute('data-ca-a')||'';caSelB=td.getAttribute('data-ca-b')||'';filterRows();if(caClearBtn)caClearBtn.style.display='';if(caHint)caHint.textContent='Showing: '+caSelA+' \u2194 '+caSelB;});});
+  }
+  function filterRows(){if(!caRows)return;caRows.querySelectorAll('tr').forEach(function(tr){if(!caSelA){tr.style.display='';return;}var t=tr.textContent||'';tr.style.display=(t.indexOf(caSelA)>=0&&t.indexOf(caSelB)>=0)?'':'none';});}
+  if(caClearBtn)caClearBtn.addEventListener('click',function(){caSelA='';caSelB='';caClearBtn.style.display='none';if(caHint)caHint.textContent='Click a matrix cell to filter.';filterRows();});
+  function renderRows(rows){if(!caRows)return;var h='';rows.forEach(function(r){var gap1d=(r.gap_1d!==undefined&&r.gap_1d!==null)?r.gap_1d:r.gap_1d_pct;h+='<tr><td style="white-space:nowrap;">'+(r.driver||'-')+' \u2192 '+(r.target||'-')+'</td><td class="'+clsBy(r.corr20)+'">'+fmtPct(r.corr20)+'</td><td class="'+clsBy(r.corr60)+'">'+fmtPct(r.corr60)+'</td><td class="'+clsBy(r.corr252)+'">'+fmtPct(r.corr252)+'</td><td>'+Number(r.beta60||0).toFixed(3)+'</td><td class="'+clsBy(gap1d)+'">'+fmtPct(gap1d)+'</td></tr>';});caRows.innerHTML=h||'<tr><td colspan="6">No data.</td></tr>';}
+  function loadCA(){if(caErr)caErr.style.display='none';fetch('/dashboard/cross-asset/snapshot').then(function(r){return r.json();}).then(function(d){if(d.error){if(caErr){caErr.textContent=d.error;caErr.style.display='';}return;}if(caAsOf)caAsOf.textContent='As of '+(d.as_of||d.asof||'-');var rows=d.pairs||d.rows||[];renderRows(rows);buildMatrix(rows);}).catch(function(e){if(caErr){caErr.textContent=String(e);caErr.style.display='';}});}
+  loadCA();
+  if(caRefresh)caRefresh.addEventListener('click',loadCA);
+})();
+</script>

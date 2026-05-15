@@ -1,0 +1,331 @@
+{% macro daypill(day) -%}
+  {% set ds = (day or "-") %}
+  {% set dn = (ds|string|replace('%', '')|float) %}
+  {% if (ds|string).startswith('+') or dn > 0 %}
+    <span class="chg-pill up">{{ ds }}</span>
+  {% elif (ds|string).startswith('-') or dn < 0 %}
+    <span class="chg-pill down">{{ ds }}</span>
+  {% else %}
+    <span class="chg-pill flat">{{ ds }}</span>
+  {% endif %}
+{%- endmacro %}
+
+<div class="intel-shell">
+
+  <h1 class="intel-page-title">Intelligence</h1>
+
+  <section class="intel-layout">
+
+    {# ── LEFT: AI Reports Hub ── #}
+    <div class="intel-left">
+      <article class="dash-card accent-green">
+        <div class="ai-hub-head">
+          <h3 class="card-title">AI Reports Hub</h3>
+          <form method="post" action="/dashboard/proposals/scan" hx-post="/dashboard/proposals/scan" hx-target="#intelRoot" hx-swap="outerHTML">
+            <button class="analyze-btn" type="submit">Refresh Insights</button>
+          </form>
+        </div>
+        <div class="ai-tabs">
+          <button type="button" class="ai-tab-btn is-active" data-ai-tab="insights">Open Insights</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="earnings">Earnings</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="thesis">Thesis Alerts</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="cascade">Cascades</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="accuracy">AI Accuracy</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="audit">Audit Log</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="health">Health</button>
+        </div>
+
+        {# ── Insights ── #}
+        <div class="ai-panel" data-ai-panel="insights">
+          {% for p in action_proposals %}
+          <article class="proposal-card">
+            <div class="proposal-title-row">
+              <div>
+                <div class="proposal-title-wrap">
+                  <div class="proposal-title">{{ p.title }}</div>
+                  {% if p.badge_label %}
+                  <span class="chip-badge {% if p.badge_variant == 'blue_chip' %}bluechip{% elif p.badge_variant == 'macro_signal' %}macro{% endif %}">{{ p.badge_label }}</span>
+                  {% endif %}
+                </div>
+                <div class="proposal-meta-chips">
+                  <span class="meta-chip">{{ p.direction or "REVIEW" }}</span>
+                  <span class="meta-chip">Conf {{ "%.0f"|format((p.confidence or 0)*100) }}%</span>
+                  <span class="meta-chip">{{ p.company_name or ("Ticker " ~ (p.ticker or "-")) }}</span>
+                </div>
+              </div>
+              <span class="risk-badge {% if (p.priority_score or 0) >= 9 %}red{% else %}orange{% endif %}">Priority {{ "%.1f"|format(p.priority_score or 0) }}</span>
+            </div>
+            {% if p.insights %}
+            <div class="proposal-insights">
+              {% for i in p.insights %}
+              <div class="proposal-insight"><div class="proposal-insight-label">{{ i.label }}</div><div class="proposal-insight-text">{{ i.text }}</div></div>
+              {% endfor %}
+            </div>
+            {% endif %}
+            <ul class="mini-list proposal-list">{% for b in p.bullets %}<li>{{ b }}</li>{% else %}<li>Review supporting evidence and validate thesis impact.</li>{% endfor %}</ul>
+            <div class="proposal-cites">
+              {% for c in p.citations %}{% set u = c.get("url","") if c else "" %}{% if u %}<a class="analyze-btn" href="{{ u }}">{{ c.get("label","Source") if c else "Source" }}</a>{% endif %}{% endfor %}
+            </div>
+            <div class="proposal-btns">
+              <form method="post" action="/dashboard/proposals/{{ p.id }}/execute" hx-post="/dashboard/proposals/{{ p.id }}/execute" hx-target="#intelRoot" hx-swap="outerHTML">
+                <button class="analyze-btn" type="submit">Open Analysis</button>
+              </form>
+              <button class="analyze-btn js-reject-toggle" data-proposal-id="{{ p.id }}" type="button">Dismiss</button>
+            </div>
+            <div class="proposal-reject-wrap" id="reject-wrap-{{ p.id }}" hidden>
+              <form method="post" action="/dashboard/proposals/{{ p.id }}/reject" hx-post="/dashboard/proposals/{{ p.id }}/reject" hx-target="#intelRoot" hx-swap="outerHTML" class="proposal-reject-form">
+                <input type="text" name="reason" placeholder="Optional feedback to improve insight quality" class="proposal-reason-input">
+                <button class="analyze-btn" type="submit">Confirm Dismiss</button>
+              </form>
+            </div>
+          </article>
+          {% else %}
+          <div class="proposal-empty">No open insights</div>
+          {% endfor %}
+        </div>
+
+        {# ── Earnings analyses ── #}
+        <div class="ai-panel" data-ai-panel="earnings" hidden>
+          {% if earnings_analyses %}
+          <div class="stack-list">
+            {% for e in earnings_analyses %}
+            <div class="stack-item">
+              <div><span class="tk-strong">{{ e.ticker }}</span> <span class="meta-chip">{{ e.form }}</span> <span class="meta-chip">{{ e.fiscal_quarter or e.filing_date[:7] }}</span>
+                <span class="meta-chip {% if e.guidance_direction == 'raised' %}good{% elif e.guidance_direction == 'lowered' %}bad{% endif %}">Guidance {{ e.guidance_direction or "&mdash;" }}</span>
+                <span class="meta-chip {% if e.tone == 'confident' %}good{% elif e.tone in ('cautious','defensive') %}bad{% endif %}">{{ e.tone or "&mdash;" }}</span>
+              </div>
+              {% if e.summary %}<div class="stack-text">{{ e.summary }}</div>{% endif %}
+              {% if e.key_signals %}<ul class="stack-bullets">{% for s in e.key_signals %}<li>{{ s }}</li>{% endfor %}</ul>{% endif %}
+              {% if e.deflected_topics and e.deflected_topics != 'N/A' %}<div class="stack-text" style="color:var(--muted)">Deflected: {{ e.deflected_topics }}</div>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="proposal-empty">No earnings analyses yet</div>
+          {% endif %}
+        </div>
+
+        {# ── Thesis Alerts ── #}
+        <div class="ai-panel" data-ai-panel="thesis" hidden>
+          {% if thesis_breach_alerts %}
+          <div class="stack-list">
+            {% for a in thesis_breach_alerts %}
+            <div class="stack-item" id="breach-alert-{{ a.id }}">
+              <div class="proposal-title-row">
+                <div><a class="tk-strong" href="/ticker/{{ a.ticker|urlencode }}">{{ a.ticker }}</a><span class="meta-chip with-gap">{{ a.breach_type or "breach" }}</span></div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span class="risk-badge {% if a.severity in ('critical','high') %}red{% else %}orange{% endif %}">{{ (a.severity or "medium")|upper }}</span>
+                  <button class="analyze-btn" onclick="dismissBreachAlert({{ a.id }})" title="Dismiss">&#x2715;</button>
+                </div>
+              </div>
+              <div class="stack-text">{{ a.breach_detail or "-" }}</div>
+              {% if a.actual_values %}<div class="mini-upd stack-sub">{{ a.actual_values }}</div>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="proposal-empty">No open thesis breach alerts</div>
+          {% endif %}
+        </div>
+
+        {# ── Cascades ── #}
+        <div class="ai-panel" data-ai-panel="cascade" hidden>
+          {% if cascade_alerts %}
+          <div class="stack-list">
+            {% for c in cascade_alerts %}
+            <div class="stack-item" id="cascade-alert-{{ c.id }}">
+              <div class="proposal-title-row">
+                <div><a class="tk-strong" href="/ticker/{{ c.trigger_ticker|urlencode }}">{{ c.trigger_ticker }}</a><span class="link-arrow">&rarr;</span><a class="tk-strong" href="/ticker/{{ c.affected_ticker|urlencode }}">{{ c.affected_ticker }}</a><span class="meta-chip with-gap">{{ c.effect_type or "cascade" }}</span></div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span class="risk-badge {% if c.severity in ('critical','high') %}red{% else %}orange{% endif %}">{{ "%.0f"|format((c.confidence or 0)*100) }}% conf</span>
+                  <button class="analyze-btn" onclick="dismissCascadeAlert({{ c.id }})" title="Dismiss">&#x2715;</button>
+                </div>
+              </div>
+              <div class="stack-text">{{ c.effect_summary or "-" }}</div>
+              {% if c.relationship %}<div class="mini-upd stack-sub">Link: {{ c.relationship }}</div>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="proposal-empty">No open cascade alerts</div>
+          {% endif %}
+        </div>
+
+        {# ── Accuracy ── #}
+        <div class="ai-panel" data-ai-panel="accuracy" hidden>
+          {% if ai_accuracy and ai_accuracy.get("ok") %}
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+              <div class="big-metric">
+                <div class="big-metric-num {% if (ai_accuracy.overall_hit_rate or 0) >= 60 %}good{% elif (ai_accuracy.overall_hit_rate or 0) >= 40 %}mid{% else %}bad{% endif %}">{{ "%.1f"|format(ai_accuracy.overall_hit_rate or 0) }}%</div>
+                <div class="mini-upd">Prediction hit rate</div><div class="mini-upd">{{ ai_accuracy.total_measured or 0 }} measured</div>
+              </div>
+              <div class="big-metric">
+                {% if ai_accuracy.acceptance_rate is not none %}<div class="big-metric-num {% if (ai_accuracy.acceptance_rate or 0) >= 50 %}good{% elif (ai_accuracy.acceptance_rate or 0) >= 25 %}mid{% else %}bad{% endif %}">{{ "%.1f"|format(ai_accuracy.acceptance_rate) }}%</div>{% else %}<div class="big-metric-num mid">&mdash;</div>{% endif %}
+                <div class="mini-upd">Acceptance rate</div><div class="mini-upd">{{ ai_accuracy.proposals_executed or 0 }} / {{ ai_accuracy.proposals_total or 0 }}</div>
+              </div>
+              <div class="big-metric">
+                {% if ai_accuracy.agent_success_rate is not none %}<div class="big-metric-num {% if (ai_accuracy.agent_success_rate or 0) >= 90 %}good{% elif (ai_accuracy.agent_success_rate or 0) >= 70 %}mid{% else %}bad{% endif %}">{{ "%.1f"|format(ai_accuracy.agent_success_rate) }}%</div>{% else %}<div class="big-metric-num mid">&mdash;</div>{% endif %}
+                <div class="mini-upd">Agent success</div><div class="mini-upd">{{ ai_accuracy.agent_runs_completed or 0 }} / {{ ai_accuracy.agent_runs_total or 0 }}</div>
+              </div>
+            </div>
+            {% if ai_accuracy.by_window %}
+            <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px;">PREDICTION ACCURACY BY WINDOW</div>
+            <table class="mini-table" style="margin-bottom:12px;">
+              <thead><tr><th>Window</th><th>Total</th><th>Correct</th><th>Hit Rate</th><th>Avg Return</th></tr></thead>
+              <tbody>{% for w, s in ai_accuracy.by_window.items() %}<tr><td>{{ w }}</td><td>{{ s.total }}</td><td>{{ s.correct }}</td><td class="{% if s.hit_rate >= 60 %}good{% elif s.hit_rate >= 40 %}mid{% else %}bad{% endif %}">{{ "%.1f"|format(s.hit_rate) }}%</td><td class="{% if s.avg_return_pct >= 0 %}good{% else %}bad{% endif %}">{{ "%+.1f"|format(s.avg_return_pct) }}%</td></tr>{% endfor %}</tbody>
+            </table>
+            {% endif %}
+            {% if (ai_accuracy.proposals_total or 0) > 0 %}
+            <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px;">PROPOSAL FUNNEL (last 90 days)</div>
+            <table class="mini-table">
+              <thead><tr><th>Status</th><th>Count</th><th>Share</th></tr></thead>
+              <tbody>{% set pt = ai_accuracy.proposals_total or 1 %}
+                <tr><td>Executed</td><td>{{ ai_accuracy.proposals_executed or 0 }}</td><td class="good">{{ "%.0f"|format((ai_accuracy.proposals_executed or 0)/pt*100) }}%</td></tr>
+                <tr><td>Open</td><td>{{ ai_accuracy.proposals_open or 0 }}</td><td>{{ "%.0f"|format((ai_accuracy.proposals_open or 0)/pt*100) }}%</td></tr>
+                <tr><td>Dismissed</td><td>{{ ai_accuracy.proposals_dismissed or 0 }}</td><td class="mid">{{ "%.0f"|format((ai_accuracy.proposals_dismissed or 0)/pt*100) }}%</td></tr>
+                <tr><td>Rejected</td><td>{{ ai_accuracy.proposals_rejected or 0 }}</td><td class="bad">{{ "%.0f"|format((ai_accuracy.proposals_rejected or 0)/pt*100) }}%</td></tr>
+              </tbody>
+            </table>
+            {% endif %}
+          {% else %}
+          <div class="proposal-empty">No measured outcomes yet</div>
+          {% endif %}
+        </div>
+
+        {# ── Health ── #}
+        <div class="ai-panel" data-ai-panel="health" hidden>
+          {% set di = data_integrity or {} %}{% set prof = di.profile or {} %}{% set iq = di.interview_queue or {} %}{% set gp = di.gap_prompts_30d or {} %}{% set ar = di.agent_runs_7d or {} %}
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">INVESTOR PROFILE</div><div class="big-metric-num {% if (prof.pct or 0) >= 80 %}good{% elif (prof.pct or 0) >= 40 %}mid{% else %}bad{% endif %}" style="font-size:28px">{{ prof.pct or 0 }}%</div><div class="mini-upd">{{ prof.filled or 0 }} / {{ prof.total or 0 }} keys</div></div>
+            <div><div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">INTERVIEW QUEUE</div><div style="font-size:22px;font-weight:700;{% if (iq.open or 0) > 0 %}color:#f59e0b{% else %}color:#22c55e{% endif %}">{{ iq.open or 0 }} open</div><div class="mini-upd">{{ iq.done or 0 }} done</div></div>
+            <div><div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">GAP PROMPTS (30d)</div><div style="font-size:22px;font-weight:700;{% if (gp.open or 0) > 0 %}color:#f59e0b{% else %}color:#22c55e{% endif %}">{{ gp.open or 0 }} open</div><div class="mini-upd">{{ gp.answered or 0 }} answered</div></div>
+            <div><div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">AGENT RUNS (7d)</div><div style="font-size:22px;font-weight:700;color:#22c55e">{{ ar.success or 0 }} ok</div><div class="mini-upd"><span class="{% if (ar.error or 0) > 0 %}bad{% endif %}">{{ ar.error or 0 }} error</span></div></div>
+          </div>
+        </div>
+
+        {# ── Audit ── #}
+        <div class="ai-panel" data-ai-panel="audit" hidden>
+          {% if ai_audit_timeline %}
+          <table class="mini-table">
+            <thead><tr><th style="width:130px">Time</th><th style="width:90px">Type</th><th>Event</th><th style="width:70px">Status</th><th>Detail</th></tr></thead>
+            <tbody>
+              {% for ev in ai_audit_timeline %}{% set k = ev.kind or "" %}
+              <tr>
+                <td style="font-size:10px;white-space:nowrap;color:var(--muted)">{{ (ev.ts or "")[:19] }}</td>
+                <td>{% if k == "agent_run" %}<span class="meta-chip">Agent</span>{% elif k == "proposal_executed" %}<span class="meta-chip" style="background:var(--up-soft);color:var(--up-ink)">Executed</span>{% elif k in ("proposal_rejected","proposal_debate_rejected") %}<span class="meta-chip" style="background:var(--down-soft);color:var(--down-ink)">Rejected</span>{% elif k == "policy_update" %}<span class="meta-chip" style="background:#ede9fe;color:#7c3aed">Policy</span>{% else %}<span class="meta-chip">{{ k }}</span>{% endif %}</td>
+                <td style="font-size:12px">{{ ev.label or "-" }}</td>
+                <td>{% set st = ev.status or "" %}<span class="{% if st in ('completed','ok','executed','active') %}good{% elif st in ('error','rejected','debate_rejected') %}bad{% else %}mid{% endif %}" style="font-size:11px;font-weight:600">{{ st }}</span></td>
+                <td style="font-size:11px;color:var(--muted)">{{ ev.detail or "" }}{% if ev.error %}<span style="color:#dc2626"> &#x26A0; {{ ev.error[:80] }}</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <div class="proposal-empty">No audit events yet</div>
+          {% endif %}
+        </div>
+      </article>
+    </div>
+
+    {# ── RIGHT: News + Earnings + Lows ── #}
+    <div class="intel-right">
+
+      {# News #}
+      <article class="dash-card compact wire-live-card">
+        <div class="card-head">
+          <h3 class="card-title">Live News Wire</h3>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="live-badge"><span class="live-dot"></span>LIVE</span>
+            <span class="card-meta">{% if freshness.news and freshness.news != '-' %}{{ freshness.news }}{% else %}Now{% endif %}</span>
+          </div>
+        </div>
+        <div class="wire-list">
+          {% for n in (home.news_general[:3] + home.news_company[:2]) %}
+            {% if n.link %}<a class="wire-item" href="{{ n.link }}" target="_blank" rel="noopener"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</a>
+            {% else %}<span class="wire-item"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</span>{% endif %}
+          {% else %}
+            <span class="wire-item"><span class="wire-tag">[News]</span>No headlines available.</span>
+          {% endfor %}
+        </div>
+      </article>
+
+      {# Earnings Calendar #}
+      <article class="dash-card compact accent-amber">
+        <div class="card-head">
+          <h3 class="card-title">Earnings Calendar</h3>
+          <span class="card-meta">{{ report_panels.earnings_updated or "-" }}</span>
+        </div>
+        <div class="card-meta earn-meta">Rows {{ report_panels.earnings_rows_count or 0 }} &middot; Reported {{ report_panels.earnings_reported_count or 0 }} &middot; Upcoming {{ report_panels.earnings_upcoming_count or 0 }}</div>
+        <div class="earn-filters">
+          <button class="earn-filter-btn is-active" type="button" data-earn-filter="all">All</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="reported">Reported</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="upcoming">Upcoming</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="beat">Beat</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="miss">Miss</button>
+        </div>
+        <div class="feed-scroll earnings-feed">
+          {% set ns = namespace(last_date='') %}
+          {% for r in report_panels.earnings_week %}
+            {% set d = r.date or '-' %}{% if d != ns.last_date %}{% set ns.last_date = d %}<div class="earn-date">{{ d }}</div>{% endif %}
+            {% set tl = (r.time or '')|lower %}{% if 'pre' in tl %}{% set tclass = 'pre' %}{% set ttxt = 'Pre' %}{% elif 'after' in tl or 'post' in tl %}{% set tclass = 'post' %}{% set ttxt = 'Post' %}{% else %}{% set tclass = 'day' %}{% set ttxt = 'Day' %}{% endif %}
+            {% set rep = 'reported' if r.reported == '1' else 'upcoming' %}{% set v = (r.verdict or '')|upper %}{% set verdict_key = 'beat' if v == 'BEAT' else ('miss' if r.reported == '1' else '-') %}
+            <div class="earn-row js-earn-row" data-symbol="{{ r.symbol or '-' }}" data-company="{{ r.company or '-' }}" data-reported="{{ 'Reported' if r.reported == '1' else 'Upcoming' }}" data-eps-actual="{{ r.eps_actual or '-' }}" data-eps-estimate="{{ r.eps_estimate or '-' }}" data-surprise="{{ r.surprise_txt or '-' }}" data-verdict="{{ (r.verdict or '-')|upper }}" data-confidence="{{ r.confidence or '-' }}" data-kind="{{ rep }}" data-result="{{ verdict_key }}">
+              <span class="earn-time {{ tclass }}">{{ ttxt }}</span>
+              <div class="earn-ident"><a class="tk-strong" href="/ticker/{{ r.symbol|urlencode }}">{{ r.symbol }}</a><span class="earn-company">{{ r.company or r.name or '-' }}</span></div>
+              <div class="earn-results">{% if r.reported == '1' %}{% if (r.verdict or '')|upper == 'BEAT' %}<span class="risk-badge beat">BEAT {{ r.surprise_txt or '' }}</span>{% else %}<span class="risk-badge miss">MISS {{ r.surprise_txt or '' }}</span>{% endif %}<span class="risk-badge eps">EPS {{ r.eps_actual or '-' }} / {{ r.eps_estimate or '-' }}</span>{% endif %}</div>
+              <div class="earn-status"><span class="status-dot {% if r.reported == '1' %}reported{% else %}upcoming{% endif %}"></span>{% if r.reported == '1' %}<span class="risk-badge reported">Reported</span>{% if (r.confidence or '') == 'verified' %}<span class="risk-badge verified">Verified</span>{% else %}<span class="risk-badge preliminary">Preliminary</span>{% endif %}{% else %}<span class="risk-badge upcoming">Upcoming</span>{% endif %}</div>
+            </div>
+          {% else %}
+            <div class="mini-upd">No upcoming earnings.</div>
+          {% endfor %}
+        </div>
+      </article>
+
+      {# 52-Week Lows #}
+      <article class="dash-card compact">
+        <div class="card-head">
+          <h3 class="card-title">52-Week & All-Time Lows</h3>
+          <span class="card-meta">{{ report_panels.appendix_updated or "-" }}</span>
+        </div>
+        <div class="feed-scroll lows-feed">
+          <table class="mini-table">
+            <thead><tr><th>Ticker</th><th>Risk</th><th>% Above</th><th></th></tr></thead>
+            <tbody>
+              {% for r in report_panels.lows_both %}<tr><td><a class="tk-strong" href="/ticker/{{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot"></span>{% endif %}<div class="company-sub">{{ r.company or r.name or '-' }}</div></td><td><span class="risk-badge red">ALL TIME LOW</span></td><td>{{ r.above_low }}</td><td><a class="analyze-btn" href="/ticker/{{ r.ticker|urlencode }}">&#x1F50D;</a></td></tr>{% endfor %}
+              {% for r in report_panels.lows_52 %}<tr><td><a class="tk-strong" href="/ticker/{{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot"></span>{% endif %}<div class="company-sub">{{ r.company or r.name or '-' }}</div></td><td><span class="risk-badge orange">YEAR LOW</span></td><td>{{ r.above_low }}</td><td><a class="analyze-btn" href="/ticker/{{ r.ticker|urlencode }}">&#x1F50D;</a></td></tr>{% endfor %}
+              {% if (report_panels.lows_both|length + report_panels.lows_52|length) == 0 %}<tr><td colspan="4">No lows found.</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </div>
+  </section>
+</div>
+
+<div id="earnTooltip" class="earn-tooltip" aria-hidden="true"></div>
+
+<script>
+(function(){
+  /* Reject toggle */
+  document.querySelectorAll('.js-reject-toggle').forEach(function(b){b.addEventListener('click',function(){var e=document.getElementById('reject-wrap-'+b.getAttribute('data-proposal-id'));if(e){var h=e.hasAttribute('hidden');if(h)e.removeAttribute('hidden');else e.setAttribute('hidden','hidden');}});});
+
+  /* AI tabs */
+  function activateAiTab(n){document.querySelectorAll('[data-ai-tab]').forEach(function(b){b.classList.toggle('is-active',b.getAttribute('data-ai-tab')===n);});document.querySelectorAll('[data-ai-panel]').forEach(function(p){if(p.getAttribute('data-ai-panel')===n)p.removeAttribute('hidden');else p.setAttribute('hidden','hidden');});}
+  document.querySelectorAll('[data-ai-tab]').forEach(function(b){b.addEventListener('click',function(){activateAiTab(b.getAttribute('data-ai-tab')||'insights');});});
+  activateAiTab('insights');
+
+  /* Earnings filter */
+  function applyEF(k){document.querySelectorAll('[data-earn-filter]').forEach(function(b){b.classList.toggle('is-active',(b.getAttribute('data-earn-filter')||'all')===k);});document.querySelectorAll('.js-earn-row').forEach(function(r){var rk=r.getAttribute('data-kind')||'',rr=(r.getAttribute('data-result')||'').toLowerCase();r.classList.toggle('is-hidden',!(k==='all'||(k==='reported'&&rk==='reported')||(k==='upcoming'&&rk==='upcoming')||(k==='beat'&&rr==='beat')||(k==='miss'&&rr==='miss')));});}
+  document.querySelectorAll('[data-earn-filter]').forEach(function(b){b.addEventListener('click',function(){applyEF(b.getAttribute('data-earn-filter')||'all');});});
+  applyEF('all');
+
+  /* Earnings tooltip */
+  var tt=document.getElementById('earnTooltip');
+  document.querySelectorAll('.js-earn-row').forEach(function(r){
+    r.addEventListener('mouseenter',function(ev){if(!tt)return;tt.innerHTML='<div class="tt-head">'+r.getAttribute('data-symbol')+' \u00B7 '+r.getAttribute('data-reported')+'</div><div>'+r.getAttribute('data-company')+'</div><div>EPS: '+r.getAttribute('data-eps-actual')+' / '+r.getAttribute('data-eps-estimate')+'</div><div>Surprise: '+r.getAttribute('data-surprise')+' \u00B7 '+r.getAttribute('data-verdict')+'</div>';tt.style.display='block';moveTT(ev);});
+    r.addEventListener('mousemove',moveTT);
+    r.addEventListener('mouseleave',function(){if(tt)tt.style.display='none';});
+  });
+  function moveTT(ev){if(!tt||tt.style.display!=='block')return;tt.style.left=Math.max(8,Math.min((ev.clientX||0)+14,window.innerWidth-tt.offsetWidth-12))+'px';tt.style.top=Math.max(8,Math.min((ev.clientY||0)+12,window.innerHeight-tt.offsetHeight-12))+'px';}
+})();
+</script>
