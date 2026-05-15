@@ -7,21 +7,6 @@
 {% set selected_industries = (industry or '').split(',') %}
 
 <style>
-  :root {
-    --bg: #f8fafc;
-    --surface: #ffffff;
-    --border: #e2e8f0;
-    --text: #0f172a;
-    --muted: #64748b;
-    --accent: #0ea5a4;
-    --accent-soft: #ccfbf1;
-    --radius: 10px;
-    --shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-    --h1: 18px;
-    --title: 15px;
-    --body: 13px;
-    --meta: 12px;
-  }
   .cf-page {
     background: var(--bg);
     color: var(--text);
@@ -70,7 +55,7 @@
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: #fff;
+    background: var(--panel);
   }
   .cf-controls {
     display: flex;
@@ -83,7 +68,7 @@
     padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: #fff;
+    background: var(--panel);
     color: var(--text);
     cursor: pointer;
     text-decoration: none;
@@ -92,7 +77,7 @@
   .cf-chip.is-active {
     border-color: var(--accent);
     background: var(--accent-soft);
-    color: #115e59;
+    color: var(--accent);
   }
   .cf-section-title {
     font-size: 11px;
@@ -105,7 +90,7 @@
   .cf-accordion {
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: #fff;
+    background: var(--panel);
     margin-bottom: 8px;
     padding: 6px 8px;
   }
@@ -114,7 +99,7 @@
     cursor: pointer;
     font-size: 12px;
     font-weight: 700;
-    color: #334155;
+    color: var(--text);
   }
   .cf-accordion summary::-webkit-details-marker { display: none; }
   .cf-filter-list {
@@ -135,7 +120,7 @@
     padding: 8px;
     display: grid;
     gap: 6px;
-    background: #fff;
+    background: var(--panel);
   }
   .cf-industry-item {
     display: grid;
@@ -143,7 +128,7 @@
     align-items: start;
     column-gap: 8px;
     font-size: 12px;
-    color: #334155;
+    color: var(--text);
     line-height: 1.25;
   }
   .cf-industry-item input {
@@ -166,8 +151,8 @@
     padding: 3px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
-    background: #fff;
-    color: #334155;
+    background: var(--panel);
+    color: var(--text);
     text-decoration: none;
   }
   .cf-list-wrap {
@@ -175,7 +160,7 @@
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: #fff;
+    background: var(--panel);
   }
   .cf-card-grid {
     display: grid;
@@ -186,7 +171,7 @@
   .cf-company-card {
     border: 1px solid var(--border);
     border-radius: 10px;
-    background: #fff;
+    background: var(--panel);
     padding: 10px;
     display: grid;
     gap: 8px;
@@ -235,7 +220,7 @@
     position: sticky;
     top: 0;
     z-index: 2;
-    background: #fff;
+    background: var(--panel);
     text-align: left;
     font-size: 11px;
     font-weight: 700;
@@ -246,36 +231,76 @@
   .cf-table td {
     font-size: var(--body);
     padding: 8px 10px;
-    border-bottom: 1px solid #f1f5f9;
+    border-bottom: 1px solid var(--panel2);
     vertical-align: top;
-  }
-  .cf-table tr:hover td {
-    background: #f1f5f9;
   }
   .cf-table th:first-child,
   .cf-table td:first-child {
     position: sticky;
     left: 0;
-    background: #fff;
+    background: var(--panel);
     z-index: 1;
   }
   .cf-table th:first-child { z-index: 3; }
-  .cf-col-company { width: 42%; }
-  .cf-col-country { width: 16%; }
-  .cf-col-industry { width: 25%; }
-  .cf-col-mcap { width: 17%; }
-  .cf-col-add { width: 50px; }
+  .cf-col-ticker { width: 8%; }
+  .cf-col-company { width: 32%; }
+  .cf-col-country { width: 14%; }
+  .cf-col-industry { width: 22%; }
+  .cf-col-mcap { width: 14%; text-align: right; font-variant-numeric: tabular-nums; }
+  .cf-col-add { width: 40px; text-align: center; }
   .cf-company-name {
-    font-size: var(--title);
-    font-weight: 800;
+    font-size: 13px;
+    font-weight: 600;
     color: var(--text);
     text-decoration: none;
-    line-height: 1.25;
+    line-height: 1.3;
+  }
+  .cf-company-name:hover {
+    color: var(--accent, #ee7b5a);
+  }
+  .cf-company-ticker {
+    font-weight: 700;
+    font-size: 12px;
+    color: var(--text);
+    letter-spacing: .02em;
+    text-decoration: none;
+  }
+  .cf-company-ticker:hover {
+    color: var(--accent, #ee7b5a);
   }
   .cf-company-meta {
     margin-top: 2px;
     font-size: var(--meta);
     color: var(--muted);
+  }
+  .cf-industry-pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel2, rgba(0,0,0,.04));
+    color: var(--muted);
+    border: none;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  .cf-industry-pill:hover {
+    background: var(--accent-soft, rgba(238,123,90,.1));
+    color: var(--accent, #ee7b5a);
+  }
+  .cf-table tbody tr:nth-child(even) td {
+    background: var(--panel2, rgba(0,0,0,.015));
+  }
+  .cf-table tr:hover td {
+    background: var(--accent-soft, rgba(238,123,90,.06)) !important;
+  }
+  .cf-col-add .cf-btn {
+    opacity: 0.4;
+    transition: opacity .15s;
+  }
+  .cf-table tr:hover .cf-col-add .cf-btn,
+  .cf-col-add .cf-btn[data-inwl="1"] {
+    opacity: 1;
   }
   .cf-density-compact .cf-table td { padding-top: 7px; padding-bottom: 7px; }
   .cf-pager {
@@ -294,11 +319,11 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .cf-focus .cf-rail { display: none; }
-  .cf-focus .cf-company-name { font-size: 17px; font-weight: 900; }
+  .cf-focus .cf-company-name { font-size: 14px; font-weight: 700; }
   .cf-focus .cf-control,
   .cf-focus .cf-btn,
   .cf-focus .cf-chip { font-size: 11px; padding-top: 4px; padding-bottom: 4px; }
-  .cf-focus .cf-table th { font-size: 10px; color: #94a3b8; }
+  .cf-focus .cf-table th { font-size: 10px; color: var(--muted); }
   .cf-focus .cf-table td { font-size: 12px; padding: 6px 8px; }
   .cf-focus .cf-card-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; padding: 8px; }
   .cf-focus .cf-company-card { padding: 8px; }
@@ -463,16 +488,12 @@
           <article class="cf-company-card is-compact">
             <div class="cf-company-card-head">
               <div>
-                <a href="/company_file?t={{ r.ticker|urlencode }}" class="cf-company-name">{{ r.name }}</a>
+                <a href="/ticker/{{ r.ticker|urlencode }}" class="cf-company-name">{{ r.name }}</a>
                 <div class="cf-company-meta">
                   {{ r.ticker }} • <button type="button" class="cf-industry-btn" data-cf-industry="{{ r.industry }}">{{ r.industry }}</button>
                 </div>
               </div>
-              <form method="post" action="/my_companies/watchlist/add">
-                <input type="hidden" name="ticker" value="{{ r.ticker }}">
-                <input type="hidden" name="reason" value="">
-                <button type="submit" class="cf-btn">+</button>
-              </form>
+              {% if r.ticker|upper in watchlist_tickers %}<button type="button" class="cf-btn cf-wl-active" data-ticker="{{ r.ticker }}" data-inwl="1" onclick="cfToggleWatchlist(this)" style="color:var(--success, #22c55e);">✓</button>{% else %}<button type="button" class="cf-btn" data-ticker="{{ r.ticker }}" data-inwl="0" onclick="cfToggleWatchlist(this)">+</button>{% endif %}
             </div>
             <div class="cf-company-card-body">
               <div class="cf-company-card-kv"><span>Country</span><b>{{ r.country }}</b></div>
@@ -488,36 +509,28 @@
         <table class="cf-table">
           <thead>
             <tr>
+              <th class="cf-col-ticker">Ticker</th>
               <th class="cf-col-company">Company</th>
               <th class="cf-col-country">Country</th>
               <th class="cf-col-industry">Industry</th>
-              <th class="cf-col-mcap">Market Cap</th>
+              <th class="cf-col-mcap" style="text-align:right;">Market Cap</th>
               <th class="cf-col-add"></th>
             </tr>
           </thead>
           <tbody>
             {% for r in rows %}
             <tr>
-              <td class="cf-col-company">
-                <a href="/company_file?t={{ r.ticker|urlencode }}" class="cf-company-name">{{ r.name }}</a>
-                <div class="cf-company-meta">{{ r.ticker }} • {{ r.industry }}</div>
-              </td>
+              <td class="cf-col-ticker"><a href="/ticker/{{ r.ticker|urlencode }}" class="cf-company-ticker">{{ r.ticker }}</a></td>
+              <td class="cf-col-company"><a href="/ticker/{{ r.ticker|urlencode }}" class="cf-company-name">{{ r.name }}</a></td>
               <td class="cf-col-country">{{ r.country }}</td>
-              <td class="cf-col-industry"><button type="button" class="cf-industry-btn" data-cf-industry="{{ r.industry }}">{{ r.industry }}</button></td>
-              <td class="cf-col-mcap">
-                <div>{{ r.market_cap }}</div>
-                <div class="cf-company-meta">5Y {{ r.y5_move if r.y5_move is defined else "-" }}</div>
-              </td>
+              <td class="cf-col-industry"><button type="button" class="cf-industry-pill" data-cf-industry="{{ r.industry }}">{{ r.industry }}</button></td>
+              <td class="cf-col-mcap">{{ r.market_cap }}</td>
               <td class="cf-col-add">
-                <form method="post" action="/my_companies/watchlist/add">
-                  <input type="hidden" name="ticker" value="{{ r.ticker }}">
-                  <input type="hidden" name="reason" value="">
-                  <button type="submit" class="cf-btn">+</button>
-                </form>
+                {% if r.ticker|upper in watchlist_tickers %}<button type="button" class="cf-btn cf-wl-active" data-ticker="{{ r.ticker }}" data-inwl="1" onclick="cfToggleWatchlist(this)" style="color:var(--success, #22c55e);">✓</button>{% else %}<button type="button" class="cf-btn" data-ticker="{{ r.ticker }}" data-inwl="0" onclick="cfToggleWatchlist(this)">+</button>{% endif %}
               </td>
             </tr>
             {% else %}
-            <tr><td colspan="5" class="cf-company-meta">No companies match these filters.</td></tr>
+            <tr><td colspan="6" class="cf-company-meta">No companies match these filters.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -698,5 +711,36 @@
     syncIndustry();
     applyIndustryFilter();
   })();
+
+  function cfToggleWatchlist(btn) {
+    var ticker = btn.getAttribute('data-ticker');
+    var inWl = btn.getAttribute('data-inwl') === '1';
+    var url = inWl ? '/my_companies/watchlist/remove' : '/my_companies/watchlist/add';
+    btn.disabled = true;
+    btn.textContent = '…';
+    var fd = new FormData();
+    fd.append('ticker', ticker);
+    if(!inWl) fd.append('reason', '');
+    fetch(url, {method:'POST', body: fd})
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if(data.ok){
+          if(inWl){
+            btn.textContent = '+';
+            btn.style.color = '';
+            btn.setAttribute('data-inwl', '0');
+          } else {
+            btn.textContent = '✓';
+            btn.style.color = 'var(--success, #22c55e)';
+            btn.setAttribute('data-inwl', '1');
+          }
+        }
+        btn.disabled = false;
+      })
+      .catch(function(){
+        btn.textContent = inWl ? '✓' : '+';
+        btn.disabled = false;
+      });
+  }
 </script>
 {% endblock %}

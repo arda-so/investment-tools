@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import logging
 import os
 import re
@@ -11,7 +12,6 @@ from app.core.ticker import normalize_ticker as _normalize_ticker
 from app.core.ticker_infer import infer_ticker_from_aliases
 from app.services.memory_engine import OnyxMemory
 from app.services.postgres_core_service import (
-    core_backend,
     list_company_reminders_pg,
     list_recent_notes_pg,
     list_todos_pg,
@@ -22,7 +22,6 @@ from app.services.google_workspace_service import (
     get_today_calendar_events,
     google_status,
 )
-from app.services.organizer_service import recall as keyword_recall
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +46,6 @@ def _extract_ticker_hints(text: str) -> list[str]:
 
 def _company_alias_rows() -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
-    if core_backend() != "postgres":
-        return []
     con_pg = pg_connect()
     if con_pg is not None:
         try:
@@ -136,6 +133,17 @@ def _query_tokens(text: str, limit: int = 5) -> list[str]:
     return out
 
 
+def _keyword_recall(question: str, limit: int = 10) -> tuple[str, list[dict[str, str]]]:
+    try:
+        mod = importlib.import_module("app.services.organizer_service")
+        fn = getattr(mod, "recall", None)
+        if callable(fn):
+            return fn(question, limit=limit)
+    except Exception:
+        pass
+    return "", []
+
+
 def _is_exhaustive_query(q: str) -> bool:
     s = str(q or "").lower()
     keys = (
@@ -152,8 +160,6 @@ def _is_exhaustive_query(q: str) -> bool:
 
 
 def _gather_db_context(user_query: str, tickers: list[str], n_results: int, exhaustive: bool = False) -> list[dict[str, str]]:
-    if core_backend() != "postgres":
-        return []
     lim = max(10, min(240, int(n_results) * (14 if exhaustive else 3)))
     tokens = _query_tokens(user_query, limit=6)
     rows: list[dict[str, str]] = []
@@ -399,7 +405,7 @@ def ask_agent(user_query: str, n_results: int = 5, extra_context: str = "") -> s
 
     # Hard fallback: existing keyword recall path.
     try:
-        old_ans, _rows = keyword_recall(q, limit=max(3, min(12, int(n_results) * 2)))
+        old_ans, _rows = _keyword_recall(q, limit=max(3, min(12, int(n_results) * 2)))
         if str(old_ans or "").strip():
             return old_ans
     except Exception:

@@ -4,7 +4,7 @@ import datetime as dt
 import urllib.parse
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.core.date import parse_datetime_flexible
 from app.services.reports_service import list_reports, mark_report_read, mark_reports_read, read_report_file, report_intelligence
@@ -180,6 +180,47 @@ def reports_mark_all_read(
     if po:
         params["portfolio_only"] = "1"
     return RedirectResponse(url="/reports?" + urllib.parse.urlencode(params), status_code=303)
+
+
+@router.get("/api/reports")
+def api_reports_list(q: str = "", kind: str = ""):
+    """JSON list of all reports — powers the inline reports viewer."""
+    rows = list_reports(limit=500)
+    ql = str(q or "").strip().lower()
+    kd = str(kind or "").strip()
+    if kd:
+        rows = [r for r in rows if str(r.get("kind") or "") == kd]
+    if ql:
+        rows = [r for r in rows if ql in str(r.get("name") or "").lower() or ql in str(r.get("kind") or "").lower()]
+    now = dt.datetime.now()
+    for r in rows:
+        mod = _parse_modified(str(r.get("modified") or ""))
+        r["group"] = _group_label(mod, now)
+        r["time_short"] = mod.strftime("%H:%M")
+    kinds = sorted({str(r.get("kind") or "Other") for r in rows})
+    return JSONResponse({"ok": True, "reports": rows, "kinds": kinds})
+
+
+@router.get("/api/report/{name:path}/content")
+def api_report_content(name: str = ""):
+    """Return report content as JSON — powers the slide panel viewer."""
+    mark_report_read(name)
+    meta = {}
+    for r in list_reports(limit=2000):
+        if str(r.get("name") or "") == str(name or ""):
+            meta = r
+            break
+    txt, err = read_report_file(name)
+    if err:
+        return JSONResponse({"ok": False, "error": err})
+    return JSONResponse({
+        "ok": True,
+        "name": name,
+        "title": str(meta.get("title") or "Report"),
+        "kind": str(meta.get("kind") or "Report"),
+        "modified": str(meta.get("modified") or ""),
+        "content": txt,
+    })
 
 
 @router.get("/reports/view")

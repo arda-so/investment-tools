@@ -45,6 +45,11 @@
     </div>
   </section>
 
+  <div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;">
+    <a href="/lab/{{ detail.ticker }}" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;background:var(--accent);color:#fff;font-size:12px;font-weight:700;border-radius:999px;text-decoration:none;">Financial Lab &rarr;</a>
+    <a href="/company_file?t={{ detail.ticker|urlencode }}&panel=hub" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;background:var(--panel2);color:var(--text);font-size:12px;font-weight:700;border-radius:999px;text-decoration:none;border:1px solid var(--border);">Ticker Hub</a>
+  </div>
+
   {{ omnibox_form(
     "companyOmniboxForm",
     "/company_file/omnibox-add",
@@ -63,7 +68,7 @@
         <div class="todo-meta" style="margin-bottom:8px;">
           {{ detail.active_proposal.status|upper }} • {{ detail.active_proposal.kind }} • Conf {{ "%.0f"|format((detail.active_proposal.confidence or 0) * 100) }}% • Priority {{ "%.1f"|format(detail.active_proposal.priority_score or 0) }}
         </div>
-        <div style="font-weight:800;color:#0f172a;margin-bottom:8px;">{{ detail.active_proposal.title or ("Insight for " ~ detail.ticker) }}</div>
+        <div style="font-weight:800;color:var(--text);margin-bottom:8px;">{{ detail.active_proposal.title or ("Insight for " ~ detail.ticker) }}</div>
         {% if detail.active_proposal.insights %}
           <div class="note-stream" style="margin-bottom:8px;">
             {% for i in detail.active_proposal.insights %}
@@ -76,7 +81,7 @@
         {% endif %}
         {% set rz = detail.active_proposal.reasoning or {} %}
         {% if rz.actionable_proposal %}
-        <div class="note-item" style="margin-bottom:8px;background:#f8fafc;">
+        <div class="note-item" style="margin-bottom:8px;background:var(--panel2);">
           <div class="note-top"><span>Key Takeaway</span></div>
           <div class="note-body">{{ rz.actionable_proposal }}</div>
         </div>
@@ -243,13 +248,13 @@
         </div>
         <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;">
           <div>
-            <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">Product Mix</div>
+            <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px;">Product Mix</div>
             <div class="seg-donut" data-series='{{ seg_product|tojson }}'></div>
             <div style="display:grid;gap:4px;">
               {% for row in seg_product[:6] %}
               <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;">
-                <span style="color:#334155;max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ row.label or "-" }}</span>
-                <span style="font-weight:700;color:#0f172a;">{{ "%.1f%%"|format(row.pct or 0) }}</span>
+                <span style="color:var(--text);max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ row.label or "-" }}</span>
+                <span style="font-weight:700;color:var(--text);">{{ "%.1f%%"|format(row.pct or 0) }}</span>
               </div>
               {% else %}
               <div class="muted">No product segmentation available.</div>
@@ -257,13 +262,13 @@
             </div>
           </div>
           <div>
-            <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">Geographic Mix</div>
+            <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px;">Geographic Mix</div>
             <div class="seg-donut" data-series='{{ seg_geo|tojson }}'></div>
             <div style="display:grid;gap:4px;">
               {% for row in seg_geo[:6] %}
               <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;">
-                <span style="color:#334155;max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ row.label or "-" }}</span>
-                <span style="font-weight:700;color:#0f172a;">{{ "%.1f%%"|format(row.pct or 0) }}</span>
+                <span style="color:var(--text);max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ row.label or "-" }}</span>
+                <span style="font-weight:700;color:var(--text);">{{ "%.1f%%"|format(row.pct or 0) }}</span>
               </div>
               {% else %}
               <div class="muted">No geographic segmentation available.</div>
@@ -282,7 +287,7 @@
         <h3 class="sec-head">Share Buybacks (TTM)</h3>
         <div style="display:grid;grid-template-columns:1fr 180px;gap:12px;align-items:end;">
           <div>
-            <div style="font-size:24px;font-weight:800;color:#0f172a;">{{ bb.ttm_value|abbr_money if bb.ttm_value is not none else "-" }}</div>
+            <div style="font-size:24px;font-weight:800;color:var(--text);">{{ bb.ttm_value|abbr_money if bb.ttm_value is not none else "-" }}</div>
             <div class="todo-meta">Treasury stock acquired / repurchase concepts.</div>
           </div>
           <div class="buyback-bars" data-series="{% for q in bb_q %}{{ '' if loop.first else ',' }}{{ q.value if q.value is not none else 0 }}{% endfor %}"></div>
@@ -295,14 +300,14 @@
         <div class="todo-meta" style="margin-bottom:8px;">Recent reported insider transactions.</div>
         <div style="display:grid;gap:6px;">
           {% for it in insiders[:8] %}
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:var(--panel);">
             <div style="min-width:0;">
-              <div style="font-size:12px;font-weight:700;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              <div style="font-size:12px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
                 {{ it.owner or "-" }}{% if it.title %} • {{ it.title }}{% endif %}
               </div>
               <div class="muted" style="font-size:11px;">{{ it.date or "-" }}</div>
             </div>
-            <div style="font-size:12px;font-weight:700;{% if (it.tx_type or '') == 'BUY' %}color:#15803d;{% elif (it.tx_type or '') == 'SELL' %}color:#b91c1c;{% else %}color:#334155;{% endif %}">
+            <div style="font-size:12px;font-weight:700;{% if (it.tx_type or '') == 'BUY' %}color:var(--up-ink);{% elif (it.tx_type or '') == 'SELL' %}color:var(--down-ink);{% else %}color:var(--text);{% endif %}">
               {% if (it.tx_type or '') == 'BUY' %}+{% elif (it.tx_type or '') == 'SELL' %}-{% endif %}
               {{ "{:,.0f}".format((it.net_shares or 0)|float|abs) }} {{ it.tx_type or "" }}
             </div>
@@ -332,7 +337,7 @@
       <article class="canvas-sec">
         <h3 class="sec-head">Quick Actions</h3>
         <button type="button" class="big-btn primary" id="openIrEmail">✉️ Email Investor Relations</button>
-        <a class="big-btn secondary" href="/company_file/sec?t={{ detail.ticker|urlencode }}">📂 View {{ detail.filings|length }} SEC Filings</a>
+        <a class="big-btn secondary" href="/ticker/{{ detail.ticker|urlencode }}">📂 View SEC Filings</a>
         <form method="post" action="/company_file/price-metrics-refresh"
               hx-post="/company_file/price-metrics-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
           <input type="hidden" name="ticker" value="{{ detail.ticker }}">
@@ -348,11 +353,11 @@
         </div>
 
         <div style="display:grid;gap:8px;">
-          <div style="font-size:12px;font-weight:800;color:#1f2937;">Suppliers</div>
+          <div style="font-size:12px;font-weight:800;color:var(--text);">Suppliers</div>
           {% for r in scm.suppliers or [] %}
-          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:var(--panel);">
             <div>
-              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+              <div style="font-size:13px;font-weight:700;color:var(--text);">
                 <a href="/company_file?t={{ (r.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ r.ticker or "-" }}</a>
                 <span class="muted">· {{ r.name or "-" }}</span>
               </div>
@@ -377,11 +382,11 @@
         </div>
 
         <div style="display:grid;gap:8px;margin-top:10px;">
-          <div style="font-size:12px;font-weight:800;color:#1f2937;">Customers</div>
+          <div style="font-size:12px;font-weight:800;color:var(--text);">Customers</div>
           {% for r in scm.customers or [] %}
-          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:var(--panel);">
             <div>
-              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+              <div style="font-size:13px;font-weight:700;color:var(--text);">
                 <a href="/company_file?t={{ (r.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ r.ticker or "-" }}</a>
                 <span class="muted">· {{ r.name or "-" }}</span>
               </div>
@@ -406,11 +411,11 @@
         </div>
 
         <div style="display:grid;gap:8px;margin-top:10px;">
-          <div style="font-size:12px;font-weight:800;color:#1f2937;">Partners</div>
+          <div style="font-size:12px;font-weight:800;color:var(--text);">Partners</div>
           {% for r in scm.partners or [] %}
-          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:var(--panel);">
             <div>
-              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+              <div style="font-size:13px;font-weight:700;color:var(--text);">
                 <a href="/company_file?t={{ (r.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ r.ticker or "-" }}</a>
                 <span class="muted">· {{ r.name or "-" }}</span>
               </div>
@@ -436,9 +441,9 @@
 
         <form method="post" action="/company_file/supply-chain-add"
               hx-post="/company_file/supply-chain-add" hx-target="#companyDetailRoot" hx-swap="outerHTML"
-              style="margin-top:12px;padding:10px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;display:grid;gap:8px;">
+              style="margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--panel);display:grid;gap:8px;">
           <input type="hidden" name="ticker" value="{{ detail.ticker }}">
-          <div style="font-size:12px;font-weight:800;color:#1f2937;">Add relationship</div>
+          <div style="font-size:12px;font-weight:800;color:var(--text);">Add relationship</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
             <input name="counterparty_ticker" placeholder="Ticker (e.g. VRT)" required>
             <input name="counterparty_name" placeholder="Company name (optional)">
@@ -463,9 +468,9 @@
         <div class="todo-meta" style="margin-bottom:8px;">Same industry with closest market cap.</div>
         <div style="display:grid;gap:8px;">
           {% for c in detail.similar_companies or [] %}
-          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;">
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:var(--panel);">
             <div>
-              <div style="font-size:13px;font-weight:700;color:#0f172a;">
+              <div style="font-size:13px;font-weight:700;color:var(--text);">
                 <a href="/company_file?t={{ (c.ticker or '')|urlencode }}" style="text-decoration:none;color:inherit;">{{ c.ticker or "-" }}</a>
                 <span class="muted">· {{ c.name or "-" }}</span>
               </div>
@@ -489,7 +494,7 @@
       <article class="timeline-surface">
         <div class="timeline-wrap" id="companyTimelineWrap">
           <div class="timeline-head">
-            <div style="font-size:13px;font-weight:800;color:#1f2f46;">Activity</div>
+            <div style="font-size:13px;font-weight:800;color:var(--text);">Activity</div>
             <div style="display:flex;align-items:center;gap:8px;">
               {% if detail.show_ai == "1" %}
               <a class="btn" href="/company_file?t={{ detail.ticker|urlencode }}&show_ai=0">Hide AI notes</a>
@@ -501,9 +506,9 @@
           </div>
           {% set calls = detail.earnings_calls or [] %}
           {% set call_src = detail.earnings_call_source_counts or {} %}
-          <div style="margin:10px 0;padding:10px;border-radius:10px;background:#f8fafc;">
+          <div style="margin:10px 0;padding:10px;border-radius:10px;background:var(--panel2);">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
-              <div style="font-size:12px;font-weight:800;color:#334155;">Earnings Calls (SEC)</div>
+              <div style="font-size:12px;font-weight:800;color:var(--text);">Earnings Calls (SEC)</div>
               <form method="post" action="/company_file/transcripts-refresh"
                     hx-post="/company_file/transcripts-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
                 <input type="hidden" name="ticker" value="{{ detail.ticker }}">
@@ -519,7 +524,7 @@
             {% endif %}
             <div style="display:grid;gap:8px;">
               {% for tr in calls[:12] %}
-              <article class="timeline-item" style="background:#fff;">
+              <article class="timeline-item" style="background:var(--panel);">
                 <div class="timeline-icon">🎧</div>
                 <div>
                   <div class="timeline-title">{{ tr.title or "Earnings Call" }}</div>
@@ -546,10 +551,10 @@
           </div>
 
           {% set rels = detail.earnings_releases or [] %}
-          <div style="margin:10px 0;padding:10px;border-radius:10px;background:#f8fafc;">
-            <div style="font-size:12px;font-weight:800;color:#334155;margin-bottom:8px;">Earnings Releases (SEC)</div>
+          <div style="margin:10px 0;padding:10px;border-radius:10px;background:var(--panel2);">
+            <div style="font-size:12px;font-weight:800;color:var(--text);margin-bottom:8px;">Earnings Releases (SEC)</div>
             {% set ebrief = detail.earnings_sec_brief or {} %}
-            <div style="display:grid;gap:6px;margin-bottom:10px;padding:8px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;">
+            <div style="display:grid;gap:6px;margin-bottom:10px;padding:8px;border:1px solid var(--border);border-radius:10px;background:var(--panel);">
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
                 <span class="ticker-chip" style="margin:0;">Next announced: {{ ebrief.next_announced_date or "Not found in recent SEC filings" }}</span>
                 <span class="ticker-chip" style="margin:0;">Last release: {{ ebrief.last_release_date or "-" }}</span>
@@ -563,7 +568,7 @@
             </div>
             <div style="display:grid;gap:8px;">
               {% for tr in rels[:12] %}
-              <article class="timeline-item" style="background:#fff;">
+              <article class="timeline-item" style="background:var(--panel);">
                 <div class="timeline-icon">🧾</div>
                 <div>
                   <div class="timeline-title">{{ tr.title or "Earnings Release" }}</div>
@@ -589,9 +594,9 @@
           </div>
 
           {% set qsig = detail.quarterly_signals or [] %}
-          <div style="margin:10px 0;padding:10px;border-radius:10px;background:#f8fafc;">
+          <div style="margin:10px 0;padding:10px;border-radius:10px;background:var(--panel2);">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
-              <div style="font-size:12px;font-weight:800;color:#334155;">Quarterly Results Signals (10-Q / 8-K / 10-K)</div>
+              <div style="font-size:12px;font-weight:800;color:var(--text);">Quarterly Results Signals (10-Q / 8-K / 10-K)</div>
               <form method="post" action="/company_file/sec-facts-refresh"
                     hx-post="/company_file/sec-facts-refresh" hx-target="#companyCenterPane" hx-swap="innerHTML">
                 <input type="hidden" name="ticker" value="{{ detail.ticker }}">
@@ -600,7 +605,7 @@
             </div>
             <div style="display:grid;gap:6px;">
               {% for s in qsig[:8] %}
-              <article class="timeline-item" style="background:#fff;">
+              <article class="timeline-item" style="background:var(--panel);">
                 <div class="timeline-icon">📌</div>
                 <div>
                   <div class="timeline-title">{{ s.text|truncate(150, True, "...") }}</div>
@@ -788,7 +793,7 @@
         var pcts = rows.map(function(r){ var v = parseFloat(String((r && r.pct) || 0)); return isNaN(v) ? 0 : Math.max(0, v); });
         var total = pcts.reduce(function(a,b){ return a+b; }, 0);
         if(total <= 0){
-          el.style.background = '#e2e8f0';
+          el.style.background = 'var(--border)';
           return;
         }
         var cum = 0;
@@ -869,7 +874,7 @@
     height:132px;
     border-radius:999px;
     margin:2px auto 8px auto;
-    border:1px solid #e2e8f0;
-    box-shadow: inset 0 0 0 16px #fff;
+    border:1px solid var(--border);
+    box-shadow: inset 0 0 0 16px var(--panel);
   }
 </style>

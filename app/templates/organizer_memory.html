@@ -46,9 +46,9 @@
     <input type="hidden" name="limit" value="{{ limit }}">
   </form>
   <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;">
-    <button type="button" id="memSelectAll" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Select All Shown</button>
-    <button type="button" id="memSelectNone" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Clear Selection</button>
-    <button type="submit" form="bulkDeleteForm" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Delete Selected</button>
+    <button type="button" id="memSelectAll" style="background:var(--panel2,#edf2f6);color:var(--text,#2f4358);border:1px solid var(--border,#c8d3dd);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;">Select All Shown</button>
+    <button type="button" id="memSelectNone" style="background:var(--panel2,#edf2f6);color:var(--text,#2f4358);border:1px solid var(--border,#c8d3dd);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;">Clear Selection</button>
+    <button type="submit" form="bulkDeleteForm" style="background:var(--panel2,#edf2f6);color:var(--text,#2f4358);border:1px solid var(--border,#c8d3dd);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;">Delete Selected</button>
   </div>
   <table>
     <thead><tr><th>Timestamp</th><th>Source</th><th>Ticker</th><th>Text</th><th>Action</th></tr></thead>
@@ -68,7 +68,7 @@
             <input type="hidden" name="ticker" value="{{ ticker }}">
             <input type="hidden" name="source" value="{{ source }}">
             <input type="hidden" name="limit" value="{{ limit }}">
-            <button type="submit" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Delete</button>
+            <button type="submit" style="background:var(--panel2,#edf2f6);color:var(--text,#2f4358);border:1px solid var(--border,#c8d3dd);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;">Delete</button>
           </form>
         </td>
       </tr>
@@ -82,7 +82,7 @@
     <input type="hidden" name="ticker" value="{{ ticker }}">
     <input type="hidden" name="source" value="{{ source }}">
     <input type="hidden" name="limit" value="{{ limit }}">
-    <button type="submit" style="background:#edf2f6;color:#2f4358;border:1px solid #c8d3dd;">Delete All Filtered ({{ rows|length }})</button>
+    <button type="submit" style="background:var(--panel2,#edf2f6);color:var(--text,#2f4358);border:1px solid var(--border,#c8d3dd);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;">Delete All Filtered ({{ rows|length }})</button>
   </form>
 </div>
 <script>

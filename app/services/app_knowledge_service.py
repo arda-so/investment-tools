@@ -5,9 +5,8 @@ import re
 from pathlib import Path
 
 from app.core.config import ROOT
-from app.core.db import core_conn
 from app.core.normalize import normalize_text
-from app.services.postgres_core_service import pg_connect, pg_enabled
+from app.services.postgres_core_service import pg_connect
 
 
 KNOWLEDGE_PATH = ROOT / "data" / "app_knowledge.json"
@@ -153,73 +152,46 @@ def _load_items() -> list[dict[str, str]]:
 
 def _schema_items(limit_tables: int = 20) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
-    if pg_enabled():
-        con_pg = pg_connect()
-        if con_pg is None:
-            return out
-        try:
-            cur = con_pg.cursor()
-            cur.execute(
-                """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='public'
-                ORDER BY table_name ASC
-                LIMIT %s
-                """,
-                (max(1, int(limit_tables)),),
-            )
-            tables = [str(r[0] or "").strip() for r in (cur.fetchall() or []) if str(r[0] or "").strip()]
-            for nm in tables:
-                cur.execute(
-                    """
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name=%s
-                    ORDER BY ordinal_position ASC
-                    """,
-                    (nm,),
-                )
-                col_names = [str(c[0] or "").strip() for c in (cur.fetchall() or []) if str(c[0] or "").strip()]
-                out.append(
-                    {
-                        "id": f"schema_{nm}",
-                        "kind": "schema",
-                        "title": f"table {nm}",
-                        "tags": "schema,table,db",
-                        "content": f"Table {nm} columns: {', '.join(col_names[:24])}",
-                    }
-                )
-        except Exception:
-            return out
-        finally:
-            con_pg.close()
+    con_pg = pg_connect()
+    if con_pg is None:
         return out
     try:
-        con = core_conn()
-        try:
-            tables = con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
-            ).fetchall()
-            for t in tables[: max(1, int(limit_tables))]:
-                nm = str(t["name"] or "").strip()
-                if not nm:
-                    continue
-                cols = con.execute(f"PRAGMA table_info({nm})").fetchall()
-                col_names = [str(c["name"] or "").strip() for c in cols if str(c["name"] or "").strip()]
-                out.append(
-                    {
-                        "id": f"schema_{nm}",
-                        "kind": "schema",
-                        "title": f"table {nm}",
-                        "tags": "schema,table,db",
-                        "content": f"Table {nm} columns: {', '.join(col_names[:24])}",
-                    }
-                )
-        finally:
-            con.close()
+        cur = con_pg.cursor()
+        cur.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public'
+            ORDER BY table_name ASC
+            LIMIT %s
+            """,
+            (max(1, int(limit_tables)),),
+        )
+        tables = [str(r[0] or "").strip() for r in (cur.fetchall() or []) if str(r[0] or "").strip()]
+        for nm in tables:
+            cur.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema='public' AND table_name=%s
+                ORDER BY ordinal_position ASC
+                """,
+                (nm,),
+            )
+            col_names = [str(c[0] or "").strip() for c in (cur.fetchall() or []) if str(c[0] or "").strip()]
+            out.append(
+                {
+                    "id": f"schema_{nm}",
+                    "kind": "schema",
+                    "title": f"table {nm}",
+                    "tags": "schema,table,db",
+                    "content": f"Table {nm} columns: {', '.join(col_names[:24])}",
+                }
+            )
     except Exception:
         return out
+    finally:
+        con_pg.close()
     return out
 
 

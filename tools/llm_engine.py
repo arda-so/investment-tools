@@ -80,19 +80,52 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+_AI_CALL_LOG_ENABLED = os.getenv("AI_CALL_LOG_ENABLED", "1") == "1"
+
+
+def _log_ai_call(*, provider: str, model: str, mode: str, latency_ms: float, cache: str, status: str) -> None:
+    if not _AI_CALL_LOG_ENABLED:
+        return
+    _log(
+        "[AI_CALL] "
+        f"provider={str(provider or '-')[:32]} "
+        f"model={str(model or '-')[:64]} "
+        f"mode={str(mode or '-')[:16]} "
+        f"latency_ms={max(0.0, float(latency_ms)):.2f} "
+        f"cache={str(cache or '-')[:8]} "
+        f"status={str(status or '-')[:16]}"
+    )
+
+
 def _is_truthy(v: str | None) -> bool:
     return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _key_providers_disabled() -> bool:
+    return _is_truthy(os.getenv("AI_DISABLE_KEY_PROVIDERS"))
+
+
+def _vertex_mode_enabled() -> bool:
+    return _is_truthy(os.getenv("GEMINI_USE_VERTEX_AI"))
 
 
 def _provider_has_key(provider: str) -> bool:
     p = str(provider or "").strip().lower()
     if p == "openai":
+        if _key_providers_disabled():
+            return False
         return bool(os.getenv("OPENAI_API_KEY", "").strip())
     if p == "gemini":
+        if _vertex_mode_enabled():
+            return True
         return bool(os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip())
     if p == "anthropic":
+        if _key_providers_disabled():
+            return False
         return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
     if p == "groq":
+        if _key_providers_disabled():
+            return False
         return bool(os.getenv("GROQ_API_KEY", "").strip())
     if p == "ollama":
         return True
@@ -104,6 +137,8 @@ def _is_cloud_env() -> bool:
 
 
 def _default_primary_provider() -> str:
+    if _is_cloud_env() and _vertex_mode_enabled():
+        return "gemini"
     for p in ("openai", "gemini", "anthropic", "groq"):
         if _provider_has_key(p):
             return p
@@ -176,10 +211,22 @@ class AIEngine:
         self.timeout = float(_cfg("AI_TIMEOUT_SECONDS", 90.0))
         self.max_tokens = int(_cfg("AI_MAX_TOKENS", 3000))
         self.gemini_use_sdk = str(_cfg("GEMINI_USE_NATIVE_SDK", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        self.gemini_use_vertex = str(_cfg("GEMINI_USE_VERTEX_AI", "0")).strip().lower() in {"1", "true", "yes", "on"}
         self.gemini_use_context_cache = str(_cfg("GEMINI_USE_CONTEXT_CACHE", "0")).strip().lower() in {"1", "true", "yes", "on"}
         self._gemini_sdk_client = None
         self._gemini_context_cache: dict[str, str] = {}
-        if self.gemini_use_sdk and google_genai is not None:
+        if self.gemini_use_vertex and google_genai is not None:
+            # Vertex AI: no API key needed, uses service account auth
+            try:
+                self._gemini_sdk_client = google_genai.Client(
+                    vertexai=True,
+                    project=os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or os.getenv("GCP_PROJECT_ID", "").strip() or None,
+                    location=os.getenv("GOOGLE_CLOUD_LOCATION", "europe-west1").strip(),
+                )
+                self.gemini_use_sdk = True  # force SDK path
+            except Exception:
+                self._gemini_sdk_client = None
+        elif self.gemini_use_sdk and google_genai is not None:
             try:
                 self._gemini_sdk_client = google_genai.Client()
             except Exception:
@@ -321,6 +368,8 @@ class AIEngine:
                 return self._ask_gemini_sdk(prompt, context, mode=mode, json_mode=json_mode, temperature=temperature)
             except Exception as exc:
                 _log(f"[AIEngine] Gemini native SDK failed; falling back to REST path: {exc}")
+        if self.gemini_use_vertex:
+            raise RuntimeError("Vertex AI SDK call failed and REST fallback is disabled in Vertex mode.")
         key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
         if not key:
             raise RuntimeError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set.")
@@ -455,6 +504,38 @@ class AIEngine:
         mode: str = "smart",
         temperature: Optional[float] = None,
     ) -> str:
+        # Vertex AI mode: use SDK for multimodal too (no API key needed)
+        if self.gemini_use_vertex and self._gemini_sdk_client is not None:
+            if not image_bytes:
+                raise RuntimeError("image_bytes is empty.")
+            safe_mime = str(mime_type or "image/png").strip().lower()
+            if safe_mime not in {"image/png", "image/jpeg", "image/jpg", "image/webp"}:
+                safe_mime = "image/png"
+            sys_txt = str(context or "").strip()
+            usr_txt = str(prompt or "").strip() or "Analyze this image."
+            errs: list[str] = []
+            for model in self._gemini_model_chain(mode=mode):
+                try:
+                    resp = self._gemini_sdk_client.models.generate_content(
+                        model=model,
+                        contents=[
+                            {"text": f"{sys_txt}\n\nUser request: {usr_txt}"},
+                            {"inline_data": {"mime_type": safe_mime, "data": base64.b64encode(image_bytes).decode("ascii")}},
+                        ],
+                        config={
+                            "temperature": float(temperature) if temperature is not None else 0.3,
+                            "max_output_tokens": int(self.max_tokens),
+                        },
+                    )
+                    txt = str(getattr(resp, "text", "") or "").strip()
+                    if not txt:
+                        raise RuntimeError("Gemini SDK returned empty multimodal content.")
+                    self._active_gemini_model = model
+                    return txt
+                except Exception as exc:
+                    errs.append(f"{model}: {exc}")
+                    continue
+            raise RuntimeError("Gemini Vertex multimodal chain failed: " + " | ".join(errs))
         key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
         if not key:
             raise RuntimeError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set.")
@@ -824,6 +905,14 @@ def ask_ai(
     ck = _cache_key(prompt, context, mode, json_mode, temperature)
     hit = _cache_get(ck)
     if hit is not None and str(hit).strip():
+        _log_ai_call(
+            provider=str(_ENGINE.provider or "-"),
+            model=str(_ENGINE._model_for(_ENGINE.provider) or "-"),
+            mode=mode,
+            latency_ms=0.0,
+            cache="hit",
+            status="ok",
+        )
         return str(hit)
     if float(_CB_STATE.get("until") or 0.0) > now:
         msg = "Service temporarily degraded. Please retry shortly."
@@ -833,7 +922,7 @@ def ask_ai(
     start = time.time()
     _AI_TELEMETRY["calls"] = int(_AI_TELEMETRY.get("calls") or 0) + 1
     try:
-        out = _ENGINE.ask_ai(prompt, context, mode=mode, json_mode=json_mode, temperature=temperature)
+        out, provider, model = _ENGINE.ask_ai_with_meta(prompt, context, mode=mode, json_mode=json_mode, temperature=temperature)
         _cache_put(ck, out)
         dur = (time.time() - start) * 1000.0
         n = int(_AI_TELEMETRY.get("latency_samples") or 0)
@@ -841,6 +930,14 @@ def ask_ai(
         _AI_TELEMETRY["latency_ms_avg"] = ((avg * n) + dur) / float(n + 1)
         _AI_TELEMETRY["latency_samples"] = n + 1
         _CB_STATE["consecutive_failures"] = 0.0
+        _log_ai_call(
+            provider=provider,
+            model=model,
+            mode=mode,
+            latency_ms=dur,
+            cache="miss",
+            status="ok",
+        )
         return out
     except Exception as exc:
         _log(f"[AIEngine] request failed: {exc}")
@@ -849,6 +946,14 @@ def ask_ai(
         _CB_STATE["consecutive_failures"] = float(_CB_STATE.get("consecutive_failures") or 0.0) + 1.0
         if int(_CB_STATE.get("consecutive_failures") or 0.0) >= cb_threshold:
             _CB_STATE["until"] = time.time() + cb_cooldown
+        _log_ai_call(
+            provider=str(_ENGINE.provider or "-"),
+            model=str(_ENGINE._model_for(_ENGINE.provider) or "-"),
+            mode=mode,
+            latency_ms=(time.time() - start) * 1000.0,
+            cache="miss",
+            status="error",
+        )
         msg = "Transport issue while waiting for analysis result. Please retry."
         if json_mode:
             return json.dumps({"message": msg}, ensure_ascii=True)

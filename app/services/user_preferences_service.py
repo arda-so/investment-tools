@@ -3,25 +3,23 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-import sqlite3
 from typing import Any
 
-from app.core.db import core_conn as _conn
-from app.core.sqlite_hardening import sqlite_retry
-from app.services.postgres_core_service import pg_connect, pg_enabled
+from app.services.postgres_core_service import pg_connect
 try:
     from tools.llm_engine import ask_ai
 except Exception:  # pragma: no cover
     ask_ai = None  # type: ignore[assignment]
 
 def ensure_user_preferences_schema() -> None:
-    if pg_enabled():
+    con_pg = pg_connect()
+    if con_pg is None:
         return
-    con = _conn()
     try:
-        con.execute(
-            """CREATE TABLE IF NOT EXISTS user_preferences (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cur = con_pg.cursor()
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS user_preferences_core (
+                id BIGSERIAL PRIMARY KEY,
                 pref_key TEXT NOT NULL UNIQUE,
                 pref_value TEXT NOT NULL DEFAULT '',
                 source TEXT NOT NULL DEFAULT 'chat',
@@ -32,22 +30,20 @@ def ensure_user_preferences_schema() -> None:
                 updated_at TEXT NOT NULL
             )"""
         )
-        cols = {str(r["name"] if isinstance(r, sqlite3.Row) else r[1]).strip().lower() for r in con.execute("PRAGMA table_info(user_preferences)").fetchall()}
-        if "preference_key" not in cols:
-            con.execute("ALTER TABLE user_preferences ADD COLUMN preference_key TEXT NOT NULL DEFAULT ''")
-        if "preference_value" not in cols:
-            con.execute("ALTER TABLE user_preferences ADD COLUMN preference_value TEXT NOT NULL DEFAULT ''")
-        if "context_reason" not in cols:
-            con.execute("ALTER TABLE user_preferences ADD COLUMN context_reason TEXT NOT NULL DEFAULT ''")
-        con.execute(
-            "UPDATE user_preferences SET preference_key = pref_key, preference_value = pref_value "
+        cur.execute(
+            "UPDATE user_preferences_core SET preference_key = pref_key, preference_value = pref_value "
             "WHERE COALESCE(preference_key,'') = ''"
         )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_user_pref_updated ON user_preferences(updated_at DESC)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_user_pref_key_v2 ON user_preferences(preference_key)")
-        con.commit()
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_pref_core_updated ON user_preferences_core(updated_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_pref_core_key_v2 ON user_preferences_core(preference_key)")
+        con_pg.commit()
+    except Exception:
+        try:
+            con_pg.rollback()
+        except Exception:
+            pass
     finally:
-        con.close()
+        con_pg.close()
 
 
 def upsert_user_preference(pref_key: str, pref_value: str, source: str = "chat") -> bool:
@@ -57,110 +53,62 @@ def upsert_user_preference(pref_key: str, pref_value: str, source: str = "chat")
     if not k or not v:
         return False
     now = dt.datetime.now().isoformat()
-    if pg_enabled():
-        con_pg = pg_connect()
-        if con_pg is None:
-            return False
+    con_pg = pg_connect()
+    if con_pg is None:
+        return False
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """
+            INSERT INTO user_preferences_core
+            (pref_key, pref_value, source, preference_key, preference_value, context_reason, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(pref_key) DO UPDATE SET
+              pref_value=EXCLUDED.pref_value,source=EXCLUDED.source,preference_key=EXCLUDED.preference_key,
+              preference_value=EXCLUDED.preference_value,updated_at=EXCLUDED.updated_at
+            """,
+            (k, v, s, k, v, "", now, now),
+        )
+        con_pg.commit()
+        return True
+    except Exception:
         try:
-            cur = con_pg.cursor()
-            cur.execute(
-                """
-                INSERT INTO user_preferences_core
-                (id, pref_key, pref_value, source, preference_key, preference_value, context_reason, created_at, updated_at)
-                VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM user_preferences_core), %s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT(pref_key) DO UPDATE SET
-                  pref_value=EXCLUDED.pref_value,source=EXCLUDED.source,preference_key=EXCLUDED.preference_key,
-                  preference_value=EXCLUDED.preference_value,updated_at=EXCLUDED.updated_at
-                """,
-                (k, v, s, k, v, "", now, now),
-            )
-            con_pg.commit()
-            return True
+            con_pg.rollback()
         except Exception:
-            try:
-                con_pg.rollback()
-            except Exception:
-                pass
-            return False
-        finally:
-            con_pg.close()
-
-    def _write() -> bool:
-        con = _conn()
-        try:
-            row = con.execute("SELECT id FROM user_preferences WHERE pref_key = ? LIMIT 1", (k,)).fetchone()
-            if row:
-                con.execute(
-                    "UPDATE user_preferences "
-                    "SET pref_value=?, source=?, preference_key=?, preference_value=?, updated_at=? "
-                    "WHERE pref_key=?",
-                    (v, s, k, v, now, k),
-                )
-            else:
-                con.execute(
-                    """INSERT INTO user_preferences
-                       (pref_key, pref_value, source, preference_key, preference_value, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (k, v, s, k, v, now, now),
-                )
-            con.commit()
-            return True
-        finally:
-            con.close()
-
-    return bool(sqlite_retry(_write))
+            pass
+        return False
+    finally:
+        con_pg.close()
 
 
 def list_user_preferences(limit: int = 40) -> list[dict[str, str]]:
     ensure_user_preferences_schema()
-    if pg_enabled():
-        con_pg = pg_connect()
-        if con_pg is None:
-            return []
-        try:
-            cur = con_pg.cursor()
-            cur.execute(
-                """SELECT pref_key, pref_value, preference_key, preference_value, source, updated_at
-                   FROM user_preferences_core
-                   ORDER BY updated_at DESC
-                   LIMIT %s""",
-                (max(1, min(200, int(limit or 40))),),
-            )
-            rows = cur.fetchall() or []
-            return [
-                {
-                    "key": str((r[2] or r[0] or "")).strip(),
-                    "value": str((r[3] or r[1] or "")).strip(),
-                    "source": str(r[4] or "").strip(),
-                    "updated_at": str(r[5] or "").strip(),
-                }
-                for r in rows
-            ]
-        except Exception:
-            return []
-        finally:
-            con_pg.close()
-
-    con = _conn()
+    con_pg = pg_connect()
+    if con_pg is None:
+        return []
     try:
-        rows = con.execute(
+        cur = con_pg.cursor()
+        cur.execute(
             """SELECT pref_key, pref_value, preference_key, preference_value, source, updated_at
-               FROM user_preferences
+               FROM user_preferences_core
                ORDER BY updated_at DESC
-               LIMIT ?""",
+               LIMIT %s""",
             (max(1, min(200, int(limit or 40))),),
-        ).fetchall()
+        )
+        rows = cur.fetchall() or []
         return [
             {
-                "key": str((r["preference_key"] or r["pref_key"] or "")).strip(),
-                "value": str((r["preference_value"] or r["pref_value"] or "")).strip(),
-                "source": str(r["source"] or "").strip(),
-                "updated_at": str(r["updated_at"] or "").strip(),
+                "key": str((r[2] or r[0] or "")).strip(),
+                "value": str((r[3] or r[1] or "")).strip(),
+                "source": str(r[4] or "").strip(),
+                "updated_at": str(r[5] or "").strip(),
             }
             for r in rows
         ]
+    except Exception:
+        return []
     finally:
-        con.close()
+        con_pg.close()
 
 
 def summarize_user_preferences(limit: int = 24) -> str:

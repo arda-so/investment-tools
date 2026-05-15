@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures as _cf
 import datetime as dt
+import threading
 from email.utils import parsedate_to_datetime
 import json
 import os
@@ -17,7 +18,6 @@ import yfinance as yf
 from app.core import cloud_files
 from app.services.agent_service import ask_agent, memorize_user_note
 from app.core.config import ROOT
-from app.core.db import core_conn as _conn
 from app.core.market import finnhub_key
 from app.core.ticker import normalize_ticker, yfinance_symbol
 from app.services.company_lookup_service import company_name_map, market_cap_map
@@ -26,10 +26,9 @@ from app.services.memory_engine import OnyxMemory
 from app.services.portfolio_state_service import read_portfolio_rows_state, read_watchlist_rows_state
 from app.services.postgres_core_service import (
     company_news_from_report_facts_pg,
-    core_backend,
     filing_stats_map_pg,
     list_news_wire_snapshot_pg,
-    strict_postgres_mode,
+    pg_connect,
     upsert_news_wire_snapshot_pg,
 )
 
@@ -39,7 +38,7 @@ except Exception:  # pragma: no cover
     ask_ai = None  # type: ignore[assignment]
 
 _HOME_CACHE: dict[str, object] = {"ts": 0.0, "pulse": {}, "news": {}, "snapshot_ts": 0.0, "snapshot": {}}
-_HOME_SNAPSHOT_TTL_SEC = 45.0
+_HOME_SNAPSHOT_TTL_SEC = 180.0  # 3 min — background thread refreshes every 3 min
 _SEC_SYNC_STATE_PATH = ROOT / "data" / "sec_sync_state.json"
 _HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -269,8 +268,8 @@ def _ticker_live_status(ticker: str) -> str:
     try:
         tk = yf.Ticker(_yf_symbol(t))
         fi = tk.fast_info or {}
-        last = fi.get("last_price")
-        prev = fi.get("previous_close")
+        last = fi.get("lastPrice")
+        prev = fi.get("previousClose")
         if last is not None and prev not in (None, 0):
             d = (float(last) - float(prev)) / abs(float(prev)) * 100.0
             asof = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -295,13 +294,12 @@ def _daypct_map() -> dict[str, float]:
 def _filing_stats_map(tickers: list[str]) -> dict[str, dict[str, str | int]]:
     if not tickers:
         return {}
-    if core_backend() == "postgres":
-        try:
-            out_pg = filing_stats_map_pg(tickers)
-            if out_pg:
-                return out_pg
-        except Exception:
-            pass
+    try:
+        out_pg = filing_stats_map_pg(tickers)
+        if out_pg:
+            return out_pg
+    except Exception:
+        pass
     return {t: {"filings": 0, "last_filing_date": ""} for t in tickers}
 
 
@@ -345,9 +343,9 @@ def _fetch_text(url: str, timeout: int = 8) -> str:
         import certifi  # type: ignore
         import requests  # type: ignore
 
-        r = requests.get(u, headers=dict(_HTTP_HEADERS), timeout=to, verify=certifi.where())
-        r.raise_for_status()
-        return str(r.text or "")
+        with requests.get(u, headers=dict(_HTTP_HEADERS), timeout=to, verify=certifi.where()) as r:
+            r.raise_for_status()
+            return str(r.text or "")
     except Exception:
         pass
     # Fallback to urllib default behavior.
@@ -365,15 +363,15 @@ def _finnhub_general_news(limit: int = 12) -> list[dict[str, str]]:
         import certifi  # type: ignore
         import requests  # type: ignore
 
-        r = requests.get(
+        with requests.get(
             "https://finnhub.io/api/v1/news",
             params={"category": "general", "token": key},
             timeout=10,
             verify=certifi.where(),
             headers={"Accept": "application/json", "User-Agent": _HTTP_HEADERS.get("User-Agent", "OnyxTerminal/1.0")},
-        )
-        r.raise_for_status()
-        rows = r.json() or []
+        ) as r:
+            r.raise_for_status()
+            rows = r.json() or []
     except Exception:
         return []
     out: list[dict[str, str]] = []
@@ -418,31 +416,31 @@ def _finnhub_company_news(tickers: list[str], limit: int = 12, days_back: int = 
 
         def _fetch_ticker(t: str) -> list[dict[str, str]]:
             try:
-                r = requests.get(
+                with requests.get(
                     "https://finnhub.io/api/v1/company-news",
                     params={"symbol": t, "from": date_from, "to": date_to, "token": key},
                     timeout=8,
                     verify=certifi.where(),
                     headers={"Accept": "application/json", "User-Agent": _HTTP_HEADERS.get("User-Agent", "OnyxTerminal/1.0")},
-                )
-                if r.status_code != 200:
-                    return []
-                items: list[dict[str, str]] = []
-                for it in (r.json() or [])[:per_ticker * 2]:
-                    title = str((it or {}).get("headline") or "").strip()
-                    if not title:
-                        continue
-                    link = str((it or {}).get("url") or "").strip()
-                    src_origin = str((it or {}).get("source") or "").strip()
-                    ts_raw = str((it or {}).get("datetime") or "").strip()
-                    items.append({
-                        "title": f"{t}: {title}",
-                        "ticker": t,
-                        "link": link,
-                        "source": "Finnhub" + (f" ({src_origin})" if src_origin else ""),
-                        "published_at": ts_raw,
-                    })
-                return items
+                ) as r:
+                    if r.status_code != 200:
+                        return []
+                    items: list[dict[str, str]] = []
+                    for it in (r.json() or [])[:per_ticker * 2]:
+                        title = str((it or {}).get("headline") or "").strip()
+                        if not title:
+                            continue
+                        link = str((it or {}).get("url") or "").strip()
+                        src_origin = str((it or {}).get("source") or "").strip()
+                        ts_raw = str((it or {}).get("datetime") or "").strip()
+                        items.append({
+                            "title": f"{t}: {title}",
+                            "ticker": t,
+                            "link": link,
+                            "source": "Finnhub" + (f" ({src_origin})" if src_origin else ""),
+                            "published_at": ts_raw,
+                        })
+                    return items
             except Exception:
                 return []
 
@@ -556,31 +554,32 @@ def _news_fallback_from_feed(
     include_fast: bool = False,
     tickers: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    if strict_postgres_mode():
+    con_pg = pg_connect()
+    if con_pg is None:
         return []
-    con = _conn()
     try:
         lim = max(1, min(40, int(limit)))
-        where = []
+        where: list[str] = []
         params: list[object] = []
         if not include_fast:
-            where.append("category != 'FAST_INTEL'")
+            where.append("COALESCE(category,'') != 'FAST_INTEL'")
         tks = [str(x or "").strip().upper() for x in (tickers or []) if str(x or "").strip()]
         if tks:
-            marks = ",".join("?" for _ in tks)
-            where.append(f"ticker IN ({marks})")
-            params.extend(tks)
-        sql = "SELECT title, summary, ticker, created_at FROM intel_feed"
+            where.append("ticker = ANY(%s)")
+            params.append(tks)
+        sql = "SELECT title, summary, ticker, created_at FROM intel_feed_core"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY id DESC LIMIT ?"
+        sql += " ORDER BY id DESC LIMIT %s"
         params.append(lim)
-        rows = con.execute(sql, tuple(params)).fetchall()
+        cur = con_pg.cursor()
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall() or []
         out: list[dict[str, str]] = []
         seen: set[str] = set()
         for r in rows:
-            title = str(r["title"] or "").strip() or str(r["summary"] or "").strip()
-            ticker = str(r["ticker"] or "").strip().upper()
+            title = str(r[0] or "").strip() or str(r[1] or "").strip()
+            ticker = str(r[2] or "").strip().upper()
             if not title:
                 continue
             key = " ".join(title.lower().split())
@@ -590,23 +589,22 @@ def _news_fallback_from_feed(
             if ticker:
                 title = f"{ticker}: {title}"
             link = f"/company_file/sec?t={urllib.parse.quote(ticker)}" if ticker else "/reports"
-            out.append({"title": title, "link": link, "source": "SEC", "published_at": str(r["created_at"] or "")})
+            out.append({"title": title, "link": link, "source": "SEC", "published_at": str(r[3] or "")})
         return out
     finally:
-        con.close()
+        con_pg.close()
 
 
 def _company_news_from_report_facts(tickers: list[str], limit: int = 8) -> list[dict[str, str]]:
     tks = [str(x or "").strip().upper() for x in (tickers or []) if str(x or "").strip()]
     if not tks:
         return []
-    if core_backend() == "postgres":
-        try:
-            out_pg = company_news_from_report_facts_pg(tks, limit=limit)
-            if out_pg:
-                return out_pg
-        except Exception:
-            pass
+    try:
+        out_pg = company_news_from_report_facts_pg(tks, limit=limit)
+        if out_pg:
+            return out_pg
+    except Exception:
+        pass
     return []
 
 
@@ -884,8 +882,8 @@ def _market_pulse_cached() -> dict[str, object]:
         try:
             tk = yf.Ticker(sym)
             fi = tk.fast_info or {}
-            last = fi.get("last_price")
-            prev = fi.get("previous_close")
+            last = fi.get("lastPrice")
+            prev = fi.get("previousClose")
             if last is not None:
                 px = _fmt_num(float(last), 2)
             if last is not None and prev not in (None, 0):
@@ -901,45 +899,32 @@ def _market_pulse_cached() -> dict[str, object]:
 
 
 def _regulatory_audit(portfolio: list[str], watchlist: list[str]) -> dict[str, object]:
-    if strict_postgres_mode():
-        return {"portfolio_changes": 0, "watchlist_changes": 0, "recent": []}
-    con = _conn()
+    con_pg = pg_connect()
+    if con_pg is None:
+        return {"portfolio_count": 0, "watchlist_count": 0, "recent": []}
     try:
-        p_marks = ",".join("?" for _ in portfolio) if portfolio else "''"
-        w_marks = ",".join("?" for _ in watchlist) if watchlist else "''"
-        p_cnt = (
-            int(
-                con.execute(
-                    f"SELECT COUNT(*) c FROM changes WHERE ticker IN ({p_marks})",
-                    tuple(portfolio),
-                ).fetchone()["c"]
+        cur = con_pg.cursor()
+        p_cnt = 0
+        if portfolio:
+            cur.execute("SELECT COUNT(*) FROM changes_core WHERE ticker = ANY(%s)", (portfolio,))
+            p_cnt = int((cur.fetchone() or [0])[0] or 0)
+        w_cnt = 0
+        if watchlist:
+            cur.execute("SELECT COUNT(*) FROM changes_core WHERE ticker = ANY(%s)", (watchlist,))
+            w_cnt = int((cur.fetchone() or [0])[0] or 0)
+        cur.execute("SELECT ticker, section_name, summary, detected_at FROM changes_core ORDER BY id DESC LIMIT 12")
+        recent = []
+        for r in cur.fetchall() or []:
+            recent.append(
+                {
+                    "ticker": str(r[0] or "").strip().upper(),
+                    "section": str(r[1] or ""),
+                    "summary": str(r[2] or ""),
+                    "detected_at": str(r[3] or ""),
+                }
             )
-            if portfolio
-            else 0
-        )
-        w_cnt = (
-            int(
-                con.execute(
-                    f"SELECT COUNT(*) c FROM changes WHERE ticker IN ({w_marks})",
-                    tuple(watchlist),
-                ).fetchone()["c"]
-            )
-            if watchlist
-            else 0
-        )
-        recent = [
-            {
-                "ticker": str(r["ticker"] or "").strip().upper(),
-                "section": str(r["section_name"] or ""),
-                "summary": str(r["summary"] or ""),
-                "detected_at": str(r["detected_at"] or ""),
-            }
-            for r in con.execute(
-                "SELECT ticker, section_name, summary, detected_at FROM changes ORDER BY id DESC LIMIT 12"
-            ).fetchall()
-        ]
     finally:
-        con.close()
+        con_pg.close()
     return {"portfolio_count": p_cnt, "watchlist_count": w_cnt, "recent": recent}
 
 
@@ -994,41 +979,73 @@ def home_snapshot() -> dict[str, object]:
     _news_needs_refresh = True
     # Fast path: read from Postgres snapshot first (survives container restarts).
     # Only call Finnhub if data is older than 3 hours.
-    if core_backend() == "postgres":
-        try:
-            pg_general = [dict(x) for x in list_news_wire_snapshot_pg("general", limit=16, max_age_hours=3)]
-            pg_company = [dict(x) for x in list_news_wire_snapshot_pg("company", limit=16, max_age_hours=3)]
-            if pg_general:
-                news_general = pg_general
-            if pg_company:
-                news_company = pg_company
-            _news_needs_refresh = not (news_general and news_company)
-        except Exception:
-            _news_needs_refresh = True
+    try:
+        pg_general = [dict(x) for x in list_news_wire_snapshot_pg("general", limit=16, max_age_hours=3)]
+        pg_company = [dict(x) for x in list_news_wire_snapshot_pg("company", limit=16, max_age_hours=3)]
+        if pg_general:
+            news_general = pg_general
+        if pg_company:
+            news_company = pg_company
+        _news_needs_refresh = not (news_general and news_company)
+        # Even if we have cached rows, check if the newest article is too old
+        # (e.g. weekend: cached Friday articles keep being served).
+        # If all articles are >6h old by published_at, try Finnhub again.
+        if not _news_needs_refresh:
+            def _newest_pub(items: list[dict]) -> float:
+                best = 0.0
+                for it in items:
+                    pa = str(it.get("published_at") or "").strip()
+                    if not pa:
+                        continue
+                    try:
+                        if pa.isdigit() and len(pa) >= 10:
+                            best = max(best, float(pa))
+                        else:
+                            best = max(best, dt.datetime.fromisoformat(pa.replace("Z", "+00:00")).timestamp())
+                    except Exception:
+                        pass
+                return best
+            newest_ts = max(_newest_pub(news_general), _newest_pub(news_company))
+            if newest_ts > 0:
+                age_h = (dt.datetime.now(dt.timezone.utc).timestamp() - newest_ts) / 3600
+                if age_h > 6:
+                    _news_needs_refresh = True
+    except Exception:
+        _news_needs_refresh = True
     # Call Finnhub only when Postgres data is stale or missing.
-    # Both calls run in parallel via ThreadPoolExecutor.
+    # Run in BACKGROUND thread so page render is never blocked by Finnhub latency.
     if _news_needs_refresh:
-        need_general = not news_general
-        need_company = not news_company
-        with _cf.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_g = ex.submit(_finnhub_general_news, 16) if need_general else None
-            fut_c = ex.submit(_finnhub_company_news, tickers[:10], 16, 4) if need_company else None
-            if fut_g:
-                try:
-                    fh_g = _filter_relevant_news(fut_g.result(timeout=12) or [], company_mode=False)
-                    fh_g = _filter_recent_news(fh_g, max_age_hours=96)
-                    if fh_g:
-                        news_general = fh_g
-                except Exception:
-                    pass
-            if fut_c:
-                try:
-                    fh_c = _filter_relevant_news(fut_c.result(timeout=14) or [], company_mode=True)
-                    fh_c = _filter_recent_news(fh_c, max_age_hours=120, keep_undated_company=True)
-                    if fh_c:
-                        news_company = fh_c
-                except Exception:
-                    pass
+        _tickers_copy = list(tickers[:10])
+        _need_general = not news_general
+        _need_company = not news_company
+        def _bg_finnhub_refresh():
+            try:
+                with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+                    fut_g = ex.submit(_finnhub_general_news, 16) if _need_general else None
+                    fut_c = ex.submit(_finnhub_company_news, _tickers_copy, 16, 4) if _need_company else None
+                    if fut_g:
+                        try:
+                            fh_g = _filter_relevant_news(fut_g.result(timeout=12) or [], company_mode=False)
+                            fh_g = _filter_recent_news(fh_g, max_age_hours=96)
+                            if fh_g:
+                                upsert_news_wire_snapshot_pg("general", fh_g)
+                                _HOME_CACHE["news_general_last"] = [dict(x) for x in fh_g]
+                        except Exception:
+                            pass
+                    if fut_c:
+                        try:
+                            fh_c = _filter_relevant_news(fut_c.result(timeout=14) or [], company_mode=True)
+                            fh_c = _filter_recent_news(fh_c, max_age_hours=120, keep_undated_company=True)
+                            if fh_c:
+                                upsert_news_wire_snapshot_pg("company", fh_c)
+                                _HOME_CACHE["news_company_last"] = [dict(x) for x in fh_c]
+                        except Exception:
+                            pass
+                # Invalidate home cache so next request picks up fresh news
+                _HOME_CACHE["snapshot_ts"] = 0.0
+            except Exception:
+                pass
+        threading.Thread(target=_bg_finnhub_refresh, daemon=True, name="finnhub-news-bg").start()
     # Local SEC/intel fallbacks if still empty.
     if not news_general:
         news_general = _news_fallback_from_feed(limit=8, include_fast=False)
@@ -1044,23 +1061,23 @@ def home_snapshot() -> dict[str, object]:
     news_general = _dedupe_news(news_general)[:8]
     news_company = _dedupe_news(news_company)[:8]
     # Persist to Postgres so next cold start is instant.
-    if news_general and core_backend() == "postgres":
+    if news_general:
         try:
             upsert_news_wire_snapshot_pg("general", news_general)
         except Exception:
             pass
-    if news_company and core_backend() == "postgres":
+    if news_company:
         try:
             upsert_news_wire_snapshot_pg("company", news_company)
         except Exception:
             pass
     # Last-resort Postgres fallback (older than 3h but still valid).
-    if not news_general and core_backend() == "postgres":
+    if not news_general:
         try:
             news_general = [dict(x) for x in list_news_wire_snapshot_pg("general", limit=8, max_age_hours=168)]
         except Exception:
             news_general = []
-    if not news_company and core_backend() == "postgres":
+    if not news_company:
         try:
             news_company = [dict(x) for x in list_news_wire_snapshot_pg("company", limit=8, max_age_hours=168)]
         except Exception:

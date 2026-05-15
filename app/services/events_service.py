@@ -8,7 +8,7 @@ from typing import Any
 
 from app.services.ai_job_queue_service import enqueue_job
 from app.services.phase2_scaling_service import enqueue_sector_map_reduce, get_map_reduce_report
-from app.services.postgres_core_service import core_backend, pg_connect
+from app.services.postgres_core_service import pg_connect
 
 
 def _now() -> str:
@@ -38,8 +38,6 @@ def _event_uid() -> str:
 
 
 def ensure_events_schema() -> dict[str, Any]:
-    if core_backend() != "postgres":
-        return {"ok": False, "error": "postgres_backend_required"}
     con = pg_connect()
     if con is None:
         return {"ok": False, "error": "pg_not_available"}
@@ -98,8 +96,6 @@ def create_event(
     dk = str(dedupe_key or "").strip() or _dedupe_key(src, tk, et, oa, p)
     uid = _event_uid()
     now = _now()
-    if core_backend() != "postgres":
-        return {"ok": False, "error": "postgres_backend_required"}
     con = pg_connect()
     if con is None:
         return {"ok": False, "error": "pg_not_available"}
@@ -145,8 +141,6 @@ def get_event(event_ref: str) -> dict[str, Any] | None:
     if not ref:
         return None
     by_id = ref.isdigit()
-    if core_backend() != "postgres":
-        return None
     con = pg_connect()
     if con is None:
         return None
@@ -192,8 +186,6 @@ def list_events(status: str = "", limit: int = 30) -> list[dict[str, Any]]:
     ensure_events_schema()
     lim = max(1, min(500, int(limit or 30)))
     st = str(status or "").strip().lower()
-    if core_backend() != "postgres":
-        return []
     out: list[dict[str, Any]] = []
     con = pg_connect()
     if con is None:
@@ -254,8 +246,6 @@ def _update_event_row(event_id: int, *, status: str, attempts_delta: int = 0, an
     if eid <= 0:
         return
     now = _now()
-    if core_backend() != "postgres":
-        return
     con = pg_connect()
     if con is None:
         return

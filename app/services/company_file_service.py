@@ -3,14 +3,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import DATA_DIR, ROOT
-from app.core.db import core_conn as _conn_core
 from app.core.date import parse_datetime_flexible
 from app.core.filing_text import resolve_filing_path, normalize_filing_rel_path, filing_path_available, read_filing_text_any
 from app.core import cloud_files
@@ -153,56 +151,22 @@ def _upsert_profile_cache_rows(rows: list[dict[str, str]]) -> None:
     clean = [r for r in rows if str(r.get("ticker") or "").strip()]
     if not clean:
         return
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is None:
-            return
-        try:
-            cur = con_pg.cursor()
-            for r in clean:
-                cur.execute(
-                    """
-                    INSERT INTO company_profile_cache_core (ticker, name, country, industry, sector, updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT(ticker) DO UPDATE SET
-                      name=CASE WHEN trim(COALESCE(EXCLUDED.name,''))<>'' THEN EXCLUDED.name ELSE company_profile_cache_core.name END,
-                      country=CASE WHEN trim(COALESCE(EXCLUDED.country,''))<>'' THEN EXCLUDED.country ELSE company_profile_cache_core.country END,
-                      industry=CASE WHEN trim(COALESCE(EXCLUDED.industry,''))<>'' THEN EXCLUDED.industry ELSE company_profile_cache_core.industry END,
-                      sector=CASE WHEN trim(COALESCE(EXCLUDED.sector,''))<>'' THEN EXCLUDED.sector ELSE company_profile_cache_core.sector END,
-                      updated_at=EXCLUDED.updated_at
-                    """,
-                    (
-                        str(r.get("ticker") or ""),
-                        str(r.get("name") or ""),
-                        str(r.get("country") or ""),
-                        str(r.get("industry") or ""),
-                        str(r.get("sector") or ""),
-                        str(r.get("updated_at") or dt.datetime.now().isoformat()),
-                    ),
-                )
-            con_pg.commit()
-        except Exception:
-            try:
-                con_pg.rollback()
-            except Exception:
-                pass
-        finally:
-            con_pg.close()
+    con_pg = pg_connect()
+    if con_pg is None:
         return
-
-    con = None if core_backend() == "postgres" else _conn_core()
     try:
         for r in clean:
-            con.execute(
+            cur = con_pg.cursor()
+            cur.execute(
                 """
-                INSERT INTO company_profile_cache (ticker, name, country, industry, sector, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO company_profile_cache_core (ticker, name, country, industry, sector, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(ticker) DO UPDATE SET
-                  name=CASE WHEN trim(excluded.name)<>'' THEN excluded.name ELSE company_profile_cache.name END,
-                  country=CASE WHEN trim(excluded.country)<>'' THEN excluded.country ELSE company_profile_cache.country END,
-                  industry=CASE WHEN trim(excluded.industry)<>'' THEN excluded.industry ELSE company_profile_cache.industry END,
-                  sector=CASE WHEN trim(excluded.sector)<>'' THEN excluded.sector ELSE company_profile_cache.sector END,
-                  updated_at=excluded.updated_at
+                  name=CASE WHEN trim(COALESCE(EXCLUDED.name,''))<>'' THEN EXCLUDED.name ELSE company_profile_cache_core.name END,
+                  country=CASE WHEN trim(COALESCE(EXCLUDED.country,''))<>'' THEN EXCLUDED.country ELSE company_profile_cache_core.country END,
+                  industry=CASE WHEN trim(COALESCE(EXCLUDED.industry,''))<>'' THEN EXCLUDED.industry ELSE company_profile_cache_core.industry END,
+                  sector=CASE WHEN trim(COALESCE(EXCLUDED.sector,''))<>'' THEN EXCLUDED.sector ELSE company_profile_cache_core.sector END,
+                  updated_at=EXCLUDED.updated_at
                 """,
                 (
                     str(r.get("ticker") or ""),
@@ -213,15 +177,14 @@ def _upsert_profile_cache_rows(rows: list[dict[str, str]]) -> None:
                     str(r.get("updated_at") or dt.datetime.now().isoformat()),
                 ),
             )
-        con.commit()
+        con_pg.commit()
     except Exception:
         try:
-            con.rollback()
+            con_pg.rollback()
         except Exception:
             pass
     finally:
-        if con is not None:
-            con.close()
+        con_pg.close()
 
 
 def prefetch_company_profiles_async(tickers: list[str] | None = None, *, limit: int = 40) -> None:
@@ -268,29 +231,6 @@ def _normalize_supply_role(role: str) -> str:
     return "partner"
 
 
-def _ensure_supply_chain_table_sqlite(con: sqlite3.Connection) -> None:
-    con.execute(
-        """CREATE TABLE IF NOT EXISTS company_supply_chain_links (
-           id INTEGER PRIMARY KEY AUTOINCREMENT,
-           anchor_ticker TEXT NOT NULL,
-           counterparty_ticker TEXT NOT NULL DEFAULT '',
-           counterparty_name TEXT NOT NULL DEFAULT '',
-           relationship_type TEXT NOT NULL DEFAULT 'supplier',
-           evidence TEXT NOT NULL DEFAULT '',
-           confidence REAL NOT NULL DEFAULT 0.6,
-           source TEXT NOT NULL DEFAULT 'manual',
-           status TEXT NOT NULL DEFAULT 'active',
-           updated_at TEXT NOT NULL
-        )"""
-    )
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_supply_chain_anchor ON company_supply_chain_links(anchor_ticker, status, id DESC)"
-    )
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_supply_chain_counterparty ON company_supply_chain_links(counterparty_ticker, status)"
-    )
-
-
 def _ensure_supply_chain_table_pg() -> None:
     con_pg = pg_connect()
     if con_pg is None:
@@ -332,69 +272,36 @@ def list_manual_supply_chain_links(anchor_ticker: str) -> list[dict[str, object]
     if not t:
         return []
     out: list[dict[str, object]] = []
-    if core_backend() == "postgres":
-        _ensure_supply_chain_table_pg()
-        con_pg = pg_connect()
-        if con_pg is None:
-            return []
-        try:
-            cur = con_pg.cursor()
-            cur.execute(
-                """SELECT id, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence
-                   FROM company_supply_chain_links_core
-                   WHERE anchor_ticker = %s AND status = 'active'
-                   ORDER BY id DESC
-                   LIMIT 500""",
-                (t,),
-            )
-            for r in cur.fetchall() or []:
-                rid = int((r[0] if isinstance(r, (tuple, list)) else r["id"]) or 0)
-                ct = _normalize_ticker(str((r[1] if isinstance(r, (tuple, list)) else r["counterparty_ticker"]) or ""))
-                cn = str((r[2] if isinstance(r, (tuple, list)) else r["counterparty_name"]) or "").strip()
-                rl = _normalize_supply_role(str((r[3] if isinstance(r, (tuple, list)) else r["relationship_type"]) or ""))
-                ev = str((r[4] if isinstance(r, (tuple, list)) else r["evidence"]) or "").strip()
-                cf = float((r[5] if isinstance(r, (tuple, list)) else r["confidence"]) or 0.6)
-                out.append(
-                    {
-                        "id": rid,
-                        "counterparty_ticker": ct,
-                        "counterparty_name": cn,
-                        "relationship_type": rl,
-                        "evidence": ev,
-                        "confidence": max(0.0, min(1.0, cf)),
-                    }
-                )
-        except Exception:
-            return []
-        finally:
-            con_pg.close()
-        return out
-
-    con = None if core_backend() == "postgres" else _conn_core()
+    _ensure_supply_chain_table_pg()
+    con_pg = pg_connect()
+    if con_pg is None:
+        return []
     try:
-        _ensure_supply_chain_table_sqlite(con)
-        for r in con.execute(
+        cur = con_pg.cursor()
+        cur.execute(
             """SELECT id, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence
-               FROM company_supply_chain_links
-               WHERE anchor_ticker = ? AND status = 'active'
+               FROM company_supply_chain_links_core
+               WHERE anchor_ticker = %s AND status = 'active'
                ORDER BY id DESC
                LIMIT 500""",
             (t,),
-        ).fetchall():
+        )
+        for r in cur.fetchall() or []:
             out.append(
                 {
-                    "id": int(r["id"] or 0),
-                    "counterparty_ticker": _normalize_ticker(str(r["counterparty_ticker"] or "")),
-                    "counterparty_name": str(r["counterparty_name"] or "").strip(),
-                    "relationship_type": _normalize_supply_role(str(r["relationship_type"] or "")),
-                    "evidence": str(r["evidence"] or "").strip(),
-                    "confidence": max(0.0, min(1.0, float(r["confidence"] or 0.6))),
+                    "id": int((r[0] if isinstance(r, (tuple, list)) else r["id"]) or 0),
+                    "counterparty_ticker": _normalize_ticker(str((r[1] if isinstance(r, (tuple, list)) else r["counterparty_ticker"]) or "")),
+                    "counterparty_name": str((r[2] if isinstance(r, (tuple, list)) else r["counterparty_name"]) or "").strip(),
+                    "relationship_type": _normalize_supply_role(str((r[3] if isinstance(r, (tuple, list)) else r["relationship_type"]) or "")),
+                    "evidence": str((r[4] if isinstance(r, (tuple, list)) else r["evidence"]) or "").strip(),
+                    "confidence": max(0.0, min(1.0, float((r[5] if isinstance(r, (tuple, list)) else r["confidence"]) or 0.6))),
                 }
             )
         return out
+    except Exception:
+        return []
     finally:
-        if con is not None:
-            con.close()
+        con_pg.close()
 
 
 def _supply_chain_for_ticker(
@@ -497,76 +404,51 @@ def add_supply_chain_link(
         conf = 0.7
     now = dt.datetime.now().isoformat()
 
-    if core_backend() == "postgres":
-        _ensure_supply_chain_table_pg()
-        con_pg = pg_connect()
-        if con_pg is None:
-            return False
-        try:
-            cur = con_pg.cursor()
-            cur.execute(
-                """INSERT INTO company_supply_chain_links_core
-                   (anchor_ticker, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence, source, status, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, 'manual', 'active', %s)""",
-                (anchor, cp, name[:160], role, ev, conf, now),
-            )
-            con_pg.commit()
-            return True
-        except Exception:
-            try:
-                con_pg.rollback()
-            except Exception:
-                pass
-            return False
-        finally:
-            con_pg.close()
-
-    con = _conn_core()
+    _ensure_supply_chain_table_pg()
+    con_pg = pg_connect()
+    if con_pg is None:
+        return False
     try:
-        _ensure_supply_chain_table_sqlite(con)
-        con.execute(
-            """INSERT INTO company_supply_chain_links
+        cur = con_pg.cursor()
+        cur.execute(
+            """INSERT INTO company_supply_chain_links_core
                (anchor_ticker, counterparty_ticker, counterparty_name, relationship_type, evidence, confidence, source, status, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'manual', 'active', ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, 'manual', 'active', %s)""",
             (anchor, cp, name[:160], role, ev, conf, now),
         )
-        con.commit()
+        con_pg.commit()
         return True
+    except Exception:
+        try:
+            con_pg.rollback()
+        except Exception:
+            pass
+        return False
     finally:
-        con.close()
+        con_pg.close()
 
 
 def remove_supply_chain_link(row_id: int) -> bool:
     rid = int(row_id or 0)
     if rid <= 0:
         return False
-    if core_backend() == "postgres":
-        _ensure_supply_chain_table_pg()
-        con_pg = pg_connect()
-        if con_pg is None:
-            return False
-        try:
-            cur = con_pg.cursor()
-            cur.execute("UPDATE company_supply_chain_links_core SET status = 'removed' WHERE id = %s", (rid,))
-            con_pg.commit()
-            return bool(cur.rowcount and int(cur.rowcount) > 0)
-        except Exception:
-            try:
-                con_pg.rollback()
-            except Exception:
-                pass
-            return False
-        finally:
-            con_pg.close()
-
-    con = _conn_core()
+    _ensure_supply_chain_table_pg()
+    con_pg = pg_connect()
+    if con_pg is None:
+        return False
     try:
-        _ensure_supply_chain_table_sqlite(con)
-        cur = con.execute("UPDATE company_supply_chain_links SET status = 'removed' WHERE id = ?", (rid,))
-        con.commit()
+        cur = con_pg.cursor()
+        cur.execute("UPDATE company_supply_chain_links_core SET status = 'removed' WHERE id = %s", (rid,))
+        con_pg.commit()
         return bool(cur.rowcount and int(cur.rowcount) > 0)
+    except Exception:
+        try:
+            con_pg.rollback()
+        except Exception:
+            pass
+        return False
     finally:
-        con.close()
+        con_pg.close()
 
 
 def _clean_seg_label(label: str) -> str:
@@ -698,54 +580,37 @@ def _company_profiles() -> dict[str, dict[str, str]]:
         if cached and (now - float(ts)) <= _LOOKUP_CACHE_TTL_SEC:
             return dict(cached)
     out: dict[str, dict[str, str]] = {}
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is not None:
-            try:
-                cur = con_pg.cursor()
-                cur.execute("SELECT ticker, name, country, industry, sector FROM company_profile_cache_core")
+    con_pg = pg_connect()
+    if con_pg is not None:
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT ticker, name, country, industry, sector FROM company_profile_cache_core")
+            for r in cur.fetchall() or []:
+                t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
+                if not t:
+                    continue
+                out[t] = {
+                    "name": str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip(),
+                    "country": str((r[2] if isinstance(r, (tuple, list)) else r["country"]) or "").strip(),
+                    "industry": str((r[3] if isinstance(r, (tuple, list)) else r["industry"]) or "").strip(),
+                    "sector": str((r[4] if isinstance(r, (tuple, list)) else r["sector"]) or "").strip(),
+                }
+            if not out:
+                cur.execute("SELECT ticker, name FROM companies_core")
                 for r in cur.fetchall() or []:
                     t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
                     if not t:
                         continue
                     out[t] = {
                         "name": str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip(),
-                        "country": str((r[2] if isinstance(r, (tuple, list)) else r["country"]) or "").strip(),
-                        "industry": str((r[3] if isinstance(r, (tuple, list)) else r["industry"]) or "").strip(),
-                        "sector": str((r[4] if isinstance(r, (tuple, list)) else r["sector"]) or "").strip(),
+                        "country": "",
+                        "industry": "",
+                        "sector": "",
                     }
-                if not out:
-                    cur.execute("SELECT ticker, name FROM companies_core")
-                    for r in cur.fetchall() or []:
-                        t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
-                        if not t:
-                            continue
-                        out[t] = {
-                            "name": str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip(),
-                            "country": "",
-                            "industry": "",
-                            "sector": "",
-                        }
-            except Exception:
-                out = {}
-            finally:
-                con_pg.close()
-    else:
-        con = _conn_core()
-        try:
-            rows = con.execute("SELECT ticker, name, country, industry, sector FROM company_profile_cache").fetchall()
-            for r in rows:
-                t = _normalize_ticker(str(r["ticker"] or ""))
-                if not t:
-                    continue
-                out[t] = {
-                    "name": str(r["name"] or "").strip(),
-                    "country": str(r["country"] or "").strip(),
-                    "industry": str(r["industry"] or "").strip(),
-                    "sector": str(r["sector"] or "").strip(),
-                }
+        except Exception:
+            out = {}
         finally:
-            con.close()
+            con_pg.close()
     with _LOOKUP_CACHE_LOCK:
         _PROFILES_CACHE = (now, dict(out))
     return out
@@ -818,34 +683,23 @@ def _companies_name_map() -> dict[str, str]:
         if cached and (now - float(ts)) <= _LOOKUP_CACHE_TTL_SEC:
             return dict(cached)
     out: dict[str, str] = {}
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is not None:
-            try:
-                cur = con_pg.cursor()
-                try:
-                    cur.execute("SELECT ticker, name FROM companies_core")
-                except Exception:
-                    cur.execute("SELECT ticker, name FROM company_profile_cache_core")
-                for r in cur.fetchall() or []:
-                    t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
-                    if not t:
-                        continue
-                    out[t] = str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip()
-            except Exception:
-                out = {}
-            finally:
-                con_pg.close()
-    else:
-        con = _conn_core()
+    con_pg = pg_connect()
+    if con_pg is not None:
         try:
-            for r in con.execute("SELECT ticker, name FROM companies").fetchall():
-                t = _normalize_ticker(str(r["ticker"] or ""))
+            cur = con_pg.cursor()
+            try:
+                cur.execute("SELECT ticker, name FROM companies_core")
+            except Exception:
+                cur.execute("SELECT ticker, name FROM company_profile_cache_core")
+            for r in cur.fetchall() or []:
+                t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
                 if not t:
                     continue
-                out[t] = str(r["name"] or "").strip()
+                out[t] = str((r[1] if isinstance(r, (tuple, list)) else r["name"]) or "").strip()
+        except Exception:
+            out = {}
         finally:
-            con.close()
+            con_pg.close()
     with _LOOKUP_CACHE_LOCK:
         _NAMES_CACHE = (now, dict(out))
     return out
@@ -862,9 +716,9 @@ def _live_price(ticker: str) -> str:
     try:
         obj = yf.Ticker(t)
         fi = (obj.fast_info or {})
-        px = float(fi.get("last_price") or 0.0)
+        px = float(fi.get("lastPrice") or 0.0)
         if px <= 0:
-            px = float(fi.get("regular_market_price") or 0.0)
+            px = float(fi.get("regularMarketPrice") or 0.0)
         if px <= 0:
             info = (obj.info or {})
             px = float(info.get("currentPrice") or 0.0)
@@ -880,75 +734,39 @@ def _live_price(ticker: str) -> str:
 
 
 def _saved_lists() -> list[dict[str, str | int]]:
-    if core_backend() == "postgres":
-        return []
-    con = _conn_core()
-    rows: list[dict[str, str | int]] = []
-    try:
-        sql = """
-            SELECT l.id, l.name, COUNT(i.id) AS cnt
-            FROM company_lists l
-            LEFT JOIN company_list_items i ON i.list_id = l.id
-            GROUP BY l.id, l.name
-            ORDER BY l.name ASC
-        """
-        for r in con.execute(sql).fetchall():
-            rows.append(
-                {
-                    "id": int(r["id"]),
-                    "name": str(r["name"] or ""),
-                    "count": int(r["cnt"] or 0),
-                }
-            )
-    finally:
-        con.close()
-    return rows
+    return []
 
 
 def _saved_list_tickers(list_name: str) -> list[str]:
     n = str(list_name or "").strip()
     if not n:
         return []
-    if core_backend() == "postgres":
-        return []
-    con = _conn_core()
-    try:
-        row = con.execute("SELECT id FROM company_lists WHERE name = ?", (n,)).fetchone()
-        if not row:
-            return []
-        lid = int(row["id"])
-        out = []
-        seen: set[str] = set()
-        for r in con.execute("SELECT ticker FROM company_list_items WHERE list_id = ?", (lid,)).fetchall():
-            t = _normalize_ticker(str(r["ticker"] or ""))
-            if not t or t in seen:
-                continue
-            seen.add(t)
-            out.append(t)
-        return out
-    finally:
-        con.close()
+    return []
 
 
 def _moat_tickers(moat_key: str) -> list[str]:
     mk = str(moat_key or "").strip().lower()
     if not mk:
         return []
-    if core_backend() == "postgres":
+    con_pg = pg_connect()
+    if con_pg is None:
         return []
-    con = _conn_core()
     try:
+        cur = con_pg.cursor()
+        cur.execute("SELECT ticker FROM company_moat_tags_core WHERE moat_key = %s", (mk,))
         out = []
         seen: set[str] = set()
-        for r in con.execute("SELECT ticker FROM company_moat_tags WHERE moat_key = ?", (mk,)).fetchall():
-            t = _normalize_ticker(str(r["ticker"] or ""))
+        for r in cur.fetchall() or []:
+            t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
             if not t or t in seen:
                 continue
             seen.add(t)
             out.append(t)
         return out
+    except Exception:
+        return []
     finally:
-        con.close()
+        con_pg.close()
 
 
 def _all_universe() -> list[str]:
@@ -960,50 +778,28 @@ def _all_universe() -> list[str]:
             return list(cached)
     seen: set[str] = set()
     out: list[str] = []
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is not None:
-            try:
-                cur = con_pg.cursor()
-                for sql in (
-                    "SELECT ticker FROM company_profile_cache_core",
-                    "SELECT ticker FROM companies_core",
-                    "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE",
-                ):
-                    try:
-                        cur.execute(sql)
-                        rows = cur.fetchall() or []
-                    except Exception:
-                        continue
-                    for r in rows:
-                        t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
-                        if not t or t in seen:
-                            continue
-                        seen.add(t)
-                        out.append(t)
-            finally:
-                con_pg.close()
-    else:
-        con = _conn_core()
+    con_pg = pg_connect()
+    if con_pg is not None:
         try:
+            cur = con_pg.cursor()
             for sql in (
-                "SELECT ticker FROM company_profile_cache",
-                "SELECT ticker FROM companies",
-                "SELECT ticker FROM company_list_items",
-                "SELECT ticker FROM universe_registry WHERE is_us_listed = 1",
+                "SELECT ticker FROM company_profile_cache_core",
+                "SELECT ticker FROM companies_core",
+                "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE",
             ):
                 try:
-                    rows = con.execute(sql).fetchall()
+                    cur.execute(sql)
+                    rows = cur.fetchall() or []
                 except Exception:
                     continue
                 for r in rows:
-                    t = _normalize_ticker(str(r["ticker"] or ""))
+                    t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
                     if not t or t in seen:
                         continue
                     seen.add(t)
                     out.append(t)
         finally:
-            con.close()
+            con_pg.close()
     with _LOOKUP_CACHE_LOCK:
         _UNIVERSE_ALL_CACHE = (now, list(out))
     return out
@@ -1023,50 +819,29 @@ def _registry_universe(mode: str) -> list[str]:
                 return list(cached)
     seen: set[str] = set()
     out: list[str] = []
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is None:
-            return []
-        try:
-            cur = con_pg.cursor()
-            if m == "us_listed":
-                sql = "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE"
-            elif m == "otc_only":
-                sql = "SELECT ticker FROM universe_registry_core WHERE is_otc = TRUE"
-            else:
-                sql = "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE OR is_otc = TRUE"
-            cur.execute(sql)
-            rows = cur.fetchall() or []
-            for r in rows:
-                t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
-                if not t or t in seen:
-                    continue
-                seen.add(t)
-                out.append(t)
-        except Exception:
-            return []
-        finally:
-            con_pg.close()
-    else:
-        con = _conn_core()
-        try:
-            if m == "us_listed":
-                sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1"
-            elif m == "otc_only":
-                sql = "SELECT ticker FROM universe_registry WHERE is_otc = 1"
-            else:
-                sql = "SELECT ticker FROM universe_registry WHERE is_us_listed = 1 OR is_otc = 1"
-            rows = con.execute(sql).fetchall()
-            for r in rows:
-                t = _normalize_ticker(str(r["ticker"] or ""))
-                if not t or t in seen:
-                    continue
-                seen.add(t)
-                out.append(t)
-        except Exception:
-            return []
-        finally:
-            con.close()
+    con_pg = pg_connect()
+    if con_pg is None:
+        return []
+    try:
+        cur = con_pg.cursor()
+        if m == "us_listed":
+            sql = "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE"
+        elif m == "otc_only":
+            sql = "SELECT ticker FROM universe_registry_core WHERE is_otc = TRUE"
+        else:
+            sql = "SELECT ticker FROM universe_registry_core WHERE is_us_listed = TRUE OR is_otc = TRUE"
+        cur.execute(sql)
+        rows = cur.fetchall() or []
+        for r in rows:
+            t = _normalize_ticker(str((r[0] if isinstance(r, (tuple, list)) else r["ticker"]) or ""))
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+    except Exception:
+        return []
+    finally:
+        con_pg.close()
     with _LOOKUP_CACHE_LOCK:
         _UNIVERSE_REG_CACHE[m] = (now, list(out))
     return out
@@ -1110,15 +885,18 @@ def list_filters() -> list[dict[str, str | int]]:
 
 
 def moat_filters() -> list[dict[str, str | int]]:
-    if core_backend() == "postgres":
-        return [{"key": key, "label": label, "count": 0} for key, label in MOAT_OPTIONS]
-    con = _conn_core()
+    con_pg = pg_connect()
     cnt_map: dict[str, int] = {}
-    try:
-        for r in con.execute("SELECT moat_key, COUNT(*) AS cnt FROM company_moat_tags GROUP BY moat_key").fetchall():
-            cnt_map[str(r["moat_key"] or "").strip().lower()] = int(r["cnt"] or 0)
-    finally:
-        con.close()
+    if con_pg is not None:
+        try:
+            cur = con_pg.cursor()
+            cur.execute("SELECT moat_key, COUNT(*) AS cnt FROM company_moat_tags_core GROUP BY moat_key")
+            for r in cur.fetchall() or []:
+                key = str((r[0] if isinstance(r, (tuple, list)) else r["moat_key"]) or "").strip().lower()
+                val = int((r[1] if isinstance(r, (tuple, list)) else r["cnt"]) or 0)
+                cnt_map[key] = val
+        finally:
+            con_pg.close()
     out: list[dict[str, str | int]] = []
     for key, label in MOAT_OPTIONS:
         out.append({"key": key, "label": label, "count": int(cnt_map.get(key, 0))})
@@ -1504,7 +1282,6 @@ def company_detail(ticker: str) -> dict[str, object]:
     p = profiles.get(t, {})
     mcap = market_cap_map([t]).get(t, "-")
 
-    con = None if core_backend() == "postgres" else _conn_core()
     moats: list[str] = []
     competitors: list[dict[str, str | int]] = []
     notes: list[dict[str, str | int]] = []
@@ -1514,281 +1291,130 @@ def company_detail(ticker: str) -> dict[str, object]:
     timeline_events: list[dict[str, object]] = []
     filings: list[dict[str, str]] = []
     active_proposal: dict[str, object] = {}
-    try:
-        if core_backend() != "postgres":
-            for r in con.execute("SELECT moat_key FROM company_moat_tags WHERE ticker = ? ORDER BY moat_key", (t,)).fetchall():
-                mk = str(r["moat_key"] or "").strip().lower()
+    for r in list_recent_notes_pg(limit=80):
+        if str(r.get("source_table") or "") != "workspace_journal":
+            continue
+        if str(r.get("ticker") or "").strip().upper() != t:
+            continue
+        row = {
+            "id": int(r.get("id") or 0),
+            "created_at": str(r.get("date") or ""),
+            "action": str(r.get("tag") or "Note"),
+            "emotion": "",
+            "note": str(r.get("text") or ""),
+        }
+        action_txt = str(row.get("action") or "").strip().lower()
+        note_txt = str(row.get("note") or "").strip().lower()
+        is_system = (
+            str(r.get("created_by") or "human").strip().lower() != "human"
+            or ("proposal" in action_txt)
+            or ("proposal" in note_txt)
+        )
+        if not is_system:
+            notes.append(row)
+        else:
+            system_logs.append(row)
+        if len(notes) >= 120 and len(system_logs) >= 120:
+            break
+    for r in list_todos_pg(open_only=True, limit=50, ticker=t) + list_todos_pg(open_only=False, limit=50, ticker=t):
+        tasks.append(
+            {
+                "id": int(r.get("id") or 0),
+                "task": str(r.get("task") or ""),
+                "status": str(r.get("status") or "open"),
+                "priority": str(r.get("priority") or "P2"),
+                "due_date": str(r.get("due_date") or ""),
+                "created_at": str(r.get("created_at") or ""),
+                "category": str(r.get("category") or "company"),
+            }
+        )
+    reminders = list_company_reminders_pg(ticker=t, limit=160)
+
+    cands = [x for x in list_action_proposals_pg(status="executed", limit=30) if str(x.get("ticker") or "").upper() == t]
+    if not cands:
+        cands = [x for x in list_action_proposals_pg(status="open", limit=30) if str(x.get("ticker") or "").upper() == t]
+    pr = cands[0] if cands else {}
+    if pr:
+        active_proposal = {
+            "id": int(pr.get("id") or 0),
+            "status": str(pr.get("status") or "").strip(),
+            "kind": str(pr.get("kind") or "").strip(),
+            "title": str(pr.get("title") or "").strip(),
+            "confidence": float(pr.get("confidence") or 0.0),
+            "priority_score": float(pr.get("priority_score") or 0.0),
+            "updated_at": str(pr.get("updated_at") or "").strip(),
+            "reasoning": dict(pr.get("reasoning_json") or {}),
+            "insights": [x for x in list(pr.get("insights_json") or []) if isinstance(x, dict)][:3],
+            "citations": [x for x in list(pr.get("citations_json") or []) if isinstance(x, dict)][:6],
+        }
+
+    con_pg = pg_connect()
+    if con_pg is not None:
+        try:
+            cur = con_pg.cursor()
+            cur.execute(
+                "SELECT moat_key FROM company_moat_tags_core WHERE ticker = %s ORDER BY moat_key",
+                (t,),
+            )
+            for r in cur.fetchall() or []:
+                mk = str((r[0] if isinstance(r, (tuple, list)) else r["moat_key"]) or "").strip().lower()
                 if mk:
                     moats.append(mk)
-            for r in con.execute(
+            cur.execute(
                 """SELECT id, competitor_ticker, competitor_name, evidence, source_date
-                   FROM company_sec_competitors
-                   WHERE ticker = ? AND status = 'active'
-                   ORDER BY confidence DESC, id DESC LIMIT 50""",
+                   FROM company_sec_competitors_core
+                   WHERE ticker = %s AND status = 'active'
+                   ORDER BY confidence DESC, id DESC
+                   LIMIT 50""",
                 (t,),
-            ).fetchall():
+            )
+            for r in cur.fetchall() or []:
+                rid = int((r[0] if isinstance(r, (tuple, list)) else r["id"]) or 0)
+                ct = str((r[1] if isinstance(r, (tuple, list)) else r["competitor_ticker"]) or "")
+                cn = str((r[2] if isinstance(r, (tuple, list)) else r["competitor_name"]) or "").strip()
+                ev = str((r[3] if isinstance(r, (tuple, list)) else r["evidence"]) or "").strip()
+                sd = str((r[4] if isinstance(r, (tuple, list)) else r["source_date"]) or "").strip()
                 competitors.append(
                     {
-                        "id": int(r["id"] or 0),
-                        "ticker": _normalize_ticker(str(r["competitor_ticker"] or "")),
-                        "name": str(r["competitor_name"] or "").strip(),
-                        "evidence": str(r["evidence"] or "").strip(),
-                        "date": str(r["source_date"] or "").strip(),
+                        "id": rid,
+                        "ticker": _normalize_ticker(ct),
+                        "name": cn,
+                        "evidence": ev,
+                        "date": sd,
                     }
                 )
-        if core_backend() == "postgres":
-            for r in list_recent_notes_pg(limit=400):
-                if str(r.get("source_table") or "") != "workspace_journal":
-                    continue
-                if str(r.get("ticker") or "").strip().upper() != t:
-                    continue
-                row = {
-                    "id": int(r.get("id") or 0),
-                    "created_at": str(r.get("date") or ""),
-                    "action": str(r.get("tag") or "Note"),
-                    "emotion": "",
-                    "note": str(r.get("text") or ""),
-                }
-                action_txt = str(row.get("action") or "").strip().lower()
-                note_txt = str(row.get("note") or "").strip().lower()
-                is_system = (
-                    str(r.get("created_by") or "human").strip().lower() != "human"
-                    or ("proposal" in action_txt)
-                    or ("proposal" in note_txt)
-                )
-                if not is_system:
-                    notes.append(row)
-                else:
-                    system_logs.append(row)
-                if len(notes) >= 120 and len(system_logs) >= 120:
-                    break
-            for r in list_todos_pg(open_only=True, limit=300, ticker=t) + list_todos_pg(open_only=False, limit=300, ticker=t):
-                tasks.append(
-                    {
-                        "id": int(r.get("id") or 0),
-                        "task": str(r.get("task") or ""),
-                        "status": str(r.get("status") or "open"),
-                        "priority": str(r.get("priority") or "P2"),
-                        "due_date": str(r.get("due_date") or ""),
-                        "created_at": str(r.get("created_at") or ""),
-                        "category": str(r.get("category") or "company"),
-                    }
-                )
-            reminders = list_company_reminders_pg(ticker=t, limit=160)
-        else:
-            for r in con.execute(
-                """SELECT id, created_at, action, emotion, note, COALESCE(created_by,'human') AS created_by
-                   FROM workspace_journal
-                   WHERE ticker = ?
-                   ORDER BY id DESC LIMIT 120""",
-                (t,),
-            ).fetchall():
-                row = {
-                    "id": int(r["id"] or 0),
-                    "created_at": str(r["created_at"] or ""),
-                    "action": str(r["action"] or "Note"),
-                    "emotion": str(r["emotion"] or ""),
-                    "note": str(r["note"] or ""),
-                }
-                action_txt = str(row.get("action") or "").strip().lower()
-                note_txt = str(row.get("note") or "").strip().lower()
-                is_system = (
-                    str(r["created_by"] or "human").strip().lower() != "human"
-                    or ("proposal" in action_txt)
-                    or ("proposal" in note_txt)
-                )
-                if not is_system:
-                    notes.append(row)
-                else:
-                    system_logs.append(row)
-            for r in con.execute(
-                """SELECT id, task, status, priority, due_date, created_at, category
-                   FROM todos
-                   WHERE ticker = ?
-                   ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'done' THEN 1 ELSE 2 END, id DESC
-                   LIMIT 200""",
-                (t,),
-            ).fetchall():
-                tasks.append(
-                    {
-                        "id": int(r["id"] or 0),
-                        "task": str(r["task"] or ""),
-                        "status": str(r["status"] or "open"),
-                        "priority": str(r["priority"] or "P2"),
-                        "due_date": str(r["due_date"] or ""),
-                        "created_at": str(r["created_at"] or ""),
-                        "category": str(r["category"] or "company"),
-                    }
-                )
-            for r in con.execute(
-                """SELECT id, remind_at, note, status, created_at
-                   FROM company_reminders
-                   WHERE ticker = ?
-                   ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, id DESC
-                   LIMIT 160""",
-                (t,),
-            ).fetchall():
-                reminders.append(
-                    {
-                        "id": int(r["id"] or 0),
-                        "remind_at": str(r["remind_at"] or ""),
-                        "note": str(r["note"] or ""),
-                        "status": str(r["status"] or "open"),
-                        "created_at": str(r["created_at"] or ""),
-                    }
-                )
-        if core_backend() != "postgres":
-            for r in con.execute(
-                """SELECT form, date, accession, doc_url, path
-                   FROM filings
-                   WHERE ticker = ?
+            cur.execute(
+                """SELECT form, date, accession, doc_url, path,
+                          (content IS NOT NULL AND content != '') AS has_content
+                   FROM filings_core
+                   WHERE ticker = %s
                    ORDER BY date DESC, id DESC
-                   LIMIT 10000""",
+                   LIMIT 100""",
                 (t,),
-            ).fetchall():
-                pth = str(r["path"] or "").strip()
-                fp = safe_resolve_filing_path(pth)
+            )
+            for r in cur.fetchall() or []:
+                form = str((r[0] if isinstance(r, (tuple, list)) else r["form"]) or "").strip()
+                fdate = str((r[1] if isinstance(r, (tuple, list)) else r["date"]) or "").strip()
+                accession = str((r[2] if isinstance(r, (tuple, list)) else r["accession"]) or "").strip()
+                doc_url = str((r[3] if isinstance(r, (tuple, list)) else r["doc_url"]) or "").strip()
+                pth = str((r[4] if isinstance(r, (tuple, list)) else r["path"]) or "").strip()
+                has_db_content = bool(r[5] if isinstance(r, (tuple, list)) else r.get("has_content"))
                 cpath = _canonical_filing_path(pth)
                 filings.append(
                     {
-                        "form": str(r["form"] or "").strip() or "-",
-                        "date": str(r["date"] or "").strip() or "-",
-                        "accession": str(r["accession"] or "").strip() or "-",
-                        "doc_url": str(r["doc_url"] or "").strip(),
+                        "form": form or "-",
+                        "date": fdate or "-",
+                        "accession": accession or "-",
+                        "doc_url": doc_url,
                         "path": cpath,
                         "file_name": (Path(cpath).name if cpath else (Path(pth).name if pth else "")),
-                        "has_local": "1" if filing_path_available(pth) else "0",
+                        "has_local": "1" if (has_db_content or filing_path_available(pth)) else "0",
                     }
                 )
-        if core_backend() == "postgres":
-            cands = [x for x in list_action_proposals_pg(status="executed", limit=120) if str(x.get("ticker") or "").upper() == t]
-            if not cands:
-                cands = [x for x in list_action_proposals_pg(status="open", limit=120) if str(x.get("ticker") or "").upper() == t]
-            pr = cands[0] if cands else {}
-            if pr:
-                active_proposal = {
-                    "id": int(pr.get("id") or 0),
-                    "status": str(pr.get("status") or "").strip(),
-                    "kind": str(pr.get("kind") or "").strip(),
-                    "title": str(pr.get("title") or "").strip(),
-                    "confidence": float(pr.get("confidence") or 0.0),
-                    "priority_score": float(pr.get("priority_score") or 0.0),
-                    "updated_at": str(pr.get("updated_at") or "").strip(),
-                    "reasoning": dict(pr.get("reasoning_json") or {}),
-                    "insights": [x for x in list(pr.get("insights_json") or []) if isinstance(x, dict)][:3],
-                    "citations": [x for x in list(pr.get("citations_json") or []) if isinstance(x, dict)][:6],
-                }
-        else:
-            pr = con.execute(
-                """SELECT id, status, kind, title, confidence, priority_score, updated_at,
-                          COALESCE(reasoning_json,'{}') AS reasoning_json,
-                          COALESCE(insights_json,'[]') AS insights_json,
-                          COALESCE(citations_json,'[]') AS citations_json
-                   FROM action_proposals
-                   WHERE ticker = ? AND status IN ('executed', 'open')
-                   ORDER BY CASE status WHEN 'executed' THEN 0 ELSE 1 END, id DESC
-                   LIMIT 1""",
-                (t,),
-            ).fetchone()
-            if pr:
-                try:
-                    reasoning = json.loads(str(pr["reasoning_json"] or "{}"))
-                except Exception:
-                    reasoning = {}
-                try:
-                    insights = json.loads(str(pr["insights_json"] or "[]"))
-                except Exception:
-                    insights = []
-                try:
-                    citations = json.loads(str(pr["citations_json"] or "[]"))
-                except Exception:
-                    citations = []
-                active_proposal = {
-                    "id": int(pr["id"] or 0),
-                    "status": str(pr["status"] or "").strip(),
-                    "kind": str(pr["kind"] or "").strip(),
-                    "title": str(pr["title"] or "").strip(),
-                    "confidence": float(pr["confidence"] or 0.0),
-                    "priority_score": float(pr["priority_score"] or 0.0),
-                    "updated_at": str(pr["updated_at"] or "").strip(),
-                    "reasoning": reasoning if isinstance(reasoning, dict) else {},
-                    "insights": [x for x in list(insights or []) if isinstance(x, dict)][:3],
-                    "citations": [x for x in list(citations or []) if isinstance(x, dict)][:6],
-                }
-    finally:
-        if con is not None:
-            con.close()
-
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is not None:
-            try:
-                cur = con_pg.cursor()
-                if not moats:
-                    cur.execute(
-                        "SELECT moat_key FROM company_moat_tags_core WHERE ticker = %s ORDER BY moat_key",
-                        (t,),
-                    )
-                    for r in cur.fetchall() or []:
-                        mk = str((r[0] if isinstance(r, (tuple, list)) else r["moat_key"]) or "").strip().lower()
-                        if mk:
-                            moats.append(mk)
-                if not competitors:
-                    cur.execute(
-                        """SELECT id, competitor_ticker, competitor_name, evidence, source_date
-                           FROM company_sec_competitors_core
-                           WHERE ticker = %s AND status = 'active'
-                           ORDER BY confidence DESC, id DESC
-                           LIMIT 50""",
-                        (t,),
-                    )
-                    for r in cur.fetchall() or []:
-                        rid = int((r[0] if isinstance(r, (tuple, list)) else r["id"]) or 0)
-                        ct = str((r[1] if isinstance(r, (tuple, list)) else r["competitor_ticker"]) or "")
-                        cn = str((r[2] if isinstance(r, (tuple, list)) else r["competitor_name"]) or "").strip()
-                        ev = str((r[3] if isinstance(r, (tuple, list)) else r["evidence"]) or "").strip()
-                        sd = str((r[4] if isinstance(r, (tuple, list)) else r["source_date"]) or "").strip()
-                        competitors.append(
-                            {
-                                "id": rid,
-                                "ticker": _normalize_ticker(ct),
-                                "name": cn,
-                                "evidence": ev,
-                                "date": sd,
-                            }
-                        )
-                if not filings:
-                    cur.execute(
-                        """SELECT form, date, accession, doc_url, path
-                           FROM filings_core
-                           WHERE ticker = %s
-                           ORDER BY date DESC, id DESC
-                           LIMIT 10000""",
-                        (t,),
-                    )
-                    for r in cur.fetchall() or []:
-                        form = str((r[0] if isinstance(r, (tuple, list)) else r["form"]) or "").strip()
-                        fdate = str((r[1] if isinstance(r, (tuple, list)) else r["date"]) or "").strip()
-                        accession = str((r[2] if isinstance(r, (tuple, list)) else r["accession"]) or "").strip()
-                        doc_url = str((r[3] if isinstance(r, (tuple, list)) else r["doc_url"]) or "").strip()
-                        pth = str((r[4] if isinstance(r, (tuple, list)) else r["path"]) or "").strip()
-                        fp = safe_resolve_filing_path(pth)
-                        cpath = _canonical_filing_path(pth)
-                        filings.append(
-                            {
-                                "form": form or "-",
-                                "date": fdate or "-",
-                                "accession": accession or "-",
-                                "doc_url": doc_url,
-                                "path": cpath,
-                                "file_name": (Path(cpath).name if cpath else (Path(pth).name if pth else "")),
-                                "has_local": "1" if filing_path_available(pth) else "0",
-                            }
-                        )
-            except Exception:
-                pass
-            finally:
-                con_pg.close()
+        except Exception:
+            pass
+        finally:
+            con_pg.close()
 
     filing_form_counts: dict[str, int] = {}
     for r in filings:
@@ -2013,24 +1639,12 @@ def save_company_moats(ticker: str, moat_keys: list[str]) -> bool:
         return False
     allowed = {k for k, _v in MOAT_OPTIONS}
     picked = sorted({str(x or "").strip().lower() for x in moat_keys if str(x or "").strip().lower() in allowed})
-    now = dt.datetime.now().isoformat()
-    con = _conn_core()
-    try:
-        con.execute("DELETE FROM company_moat_tags WHERE ticker = ?", (t,))
-        for mk in picked:
-            con.execute(
-                "INSERT INTO company_moat_tags (ticker, moat_key, updated_at, note) VALUES (?, ?, ?, '')",
-                (t, mk, now),
-            )
-        con.commit()
-    finally:
-        con.close()
     try:
         from app.services.postgres_core_service import save_company_moats_pg
         save_company_moats_pg(t, picked)
+        return True
     except Exception:
-        pass
-    return True
+        return False
 
 
 def add_competitor(ticker: str, competitor_ticker: str, competitor_name: str, evidence: str = "") -> bool:
@@ -2040,24 +1654,12 @@ def add_competitor(ticker: str, competitor_ticker: str, competitor_name: str, ev
     ev = str(evidence or "").strip()
     if not t or (not ct and not name):
         return False
-    now = dt.datetime.now().isoformat()
-    con = _conn_core()
-    try:
-        con.execute(
-            """INSERT INTO company_sec_competitors
-               (ticker, competitor_ticker, competitor_name, source_form, source_date, source_path, evidence, confidence, status, updated_at)
-               VALUES (?, ?, ?, '', '', '', ?, 1.0, 'active', ?)""",
-            (t, ct, name[:160], ev[:1200], now),
-        )
-        con.commit()
-    finally:
-        con.close()
     try:
         from app.services.postgres_core_service import add_company_competitor_pg
         add_company_competitor_pg(t, ct, name, evidence=ev)
+        return True
     except Exception:
-        pass
-    return True
+        return False
 
 
 def update_competitor(row_id: int, competitor_ticker: str, competitor_name: str, evidence: str = "") -> bool:
@@ -2067,46 +1669,22 @@ def update_competitor(row_id: int, competitor_ticker: str, competitor_name: str,
     ct = _normalize_ticker(competitor_ticker)
     name = str(competitor_name or "").strip()[:160]
     ev = str(evidence or "").strip()[:1200]
-    now = dt.datetime.now().isoformat()
-    con = _conn_core()
-    ok = False
-    try:
-        cur = con.execute(
-            """UPDATE company_sec_competitors
-               SET competitor_ticker = ?, competitor_name = ?, evidence = ?, updated_at = ?
-               WHERE id = ?""",
-            (ct, name, ev, now, rid),
-        )
-        con.commit()
-        ok = cur.rowcount > 0
-    finally:
-        con.close()
     try:
         from app.services.postgres_core_service import update_company_competitor_pg
-        update_company_competitor_pg(rid, competitor_ticker=ct, competitor_name=name, evidence=ev)
+        return bool(update_company_competitor_pg(rid, competitor_ticker=ct, competitor_name=name, evidence=ev))
     except Exception:
-        pass
-    return ok
+        return False
 
 
 def remove_competitor(row_id: int) -> bool:
     rid = int(row_id or 0)
     if rid <= 0:
         return False
-    con = _conn_core()
-    ok = False
-    try:
-        cur = con.execute("DELETE FROM company_sec_competitors WHERE id = ?", (rid,))
-        con.commit()
-        ok = cur.rowcount > 0
-    finally:
-        con.close()
     try:
         from app.services.postgres_core_service import remove_company_competitor_pg
-        remove_company_competitor_pg(rid)
+        return bool(remove_company_competitor_pg(rid))
     except Exception:
-        pass
-    return ok
+        return False
 
 
 def add_company_note(
@@ -2123,24 +1701,7 @@ def add_company_note(
     cb = str(created_by or "human").strip().lower()
     if cb not in {"human", "ai"}:
         cb = "human"
-    if core_backend() == "postgres":
-        return add_workspace_journal_note_pg(ticker=t, note=txt, action=action, emotion=emotion, created_by=cb)
-    con = _conn_core()
-    try:
-        try:
-            con.execute(
-                "INSERT INTO workspace_journal (ticker, action, emotion, note, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)",
-                (t, str(action or "Note")[:80], str(emotion or "Calm")[:80], txt[:4000], dt.datetime.now().isoformat(), cb),
-            )
-        except Exception:
-            con.execute(
-                "INSERT INTO workspace_journal (ticker, action, emotion, note, created_at) VALUES (?, ?, ?, ?, ?)",
-                (t, str(action or "Note")[:80], str(emotion or "Calm")[:80], txt[:4000], dt.datetime.now().isoformat()),
-            )
-        con.commit()
-        return True
-    finally:
-        con.close()
+    return add_workspace_journal_note_pg(ticker=t, note=txt, action=action, emotion=emotion, created_by=cb)
 
 
 def update_company_note(note_id: int, note: str) -> bool:
@@ -2148,33 +1709,14 @@ def update_company_note(note_id: int, note: str) -> bool:
     txt = str(note or "").strip()
     if rid <= 0 or not txt:
         return False
-    if core_backend() == "postgres":
-        return update_workspace_journal_note_pg(note_id=rid, note=txt)
-    con = _conn_core()
-    try:
-        cur = con.execute(
-            "UPDATE workspace_journal SET note = ?, created_at = ? WHERE id = ?",
-            (txt[:4000], dt.datetime.now().isoformat(), rid),
-        )
-        con.commit()
-        return cur.rowcount > 0
-    finally:
-        con.close()
+    return update_workspace_journal_note_pg(note_id=rid, note=txt)
 
 
 def delete_company_note(note_id: int) -> bool:
     rid = int(note_id or 0)
     if rid <= 0:
         return False
-    if core_backend() == "postgres":
-        return delete_workspace_journal_note_pg(note_id=rid)
-    con = _conn_core()
-    try:
-        cur = con.execute("DELETE FROM workspace_journal WHERE id = ?", (rid,))
-        con.commit()
-        return cur.rowcount > 0
-    finally:
-        con.close()
+    return delete_workspace_journal_note_pg(note_id=rid)
 
 
 def add_company_task(ticker: str, task: str, due_date: str = "", priority: str = "P2") -> bool:
@@ -2188,58 +1730,21 @@ def add_company_task(ticker: str, task: str, due_date: str = "", priority: str =
         due = ""
     if not t or not txt:
         return False
-    if core_backend() == "postgres":
-        return add_todo_pg(task=txt[:1000], ticker=t, category="company", priority=p, due_date=due)
-    con = _conn_core()
-    try:
-        con.execute(
-            """INSERT INTO todos (task, status, created_at, priority, due_date, ticker, category)
-               VALUES (?, 'open', ?, ?, ?, ?, 'company')""",
-            (txt[:1000], dt.datetime.now().isoformat(), p, due, t),
-        )
-        con.commit()
-        return True
-    finally:
-        con.close()
+    return add_todo_pg(task=txt[:1000], ticker=t, category="company", priority=p, due_date=due)
 
 
 def toggle_company_task(todo_id: int) -> bool:
     rid = int(todo_id or 0)
     if rid <= 0:
         return False
-    if core_backend() == "postgres":
-        return toggle_todo_pg(rid)
-    con = _conn_core()
-    try:
-        row = con.execute("SELECT status, category FROM todos WHERE id = ?", (rid,)).fetchone()
-        if not row:
-            return False
-        cur = str(row["status"] or "open").strip().lower()
-        cat = str(row["category"] or "company").strip().lower()
-        if cur == "open":
-            nxt = "archived" if cat == "quick" else "done"
-        else:
-            nxt = "open"
-        con.execute("UPDATE todos SET status = ? WHERE id = ?", (nxt, rid))
-        con.commit()
-        return True
-    finally:
-        con.close()
+    return toggle_todo_pg(rid)
 
 
 def delete_company_task(todo_id: int) -> bool:
     rid = int(todo_id or 0)
     if rid <= 0:
         return False
-    if core_backend() == "postgres":
-        return delete_todo_pg(rid)
-    con = _conn_core()
-    try:
-        cur = con.execute("DELETE FROM todos WHERE id = ?", (rid,))
-        con.commit()
-        return cur.rowcount > 0
-    finally:
-        con.close()
+    return delete_todo_pg(rid)
 
 
 def update_company_task(todo_id: int, task: str, due_date: str = "", priority: str = "P2") -> bool:
@@ -2253,18 +1758,7 @@ def update_company_task(todo_id: int, task: str, due_date: str = "", priority: s
         due = ""
     if rid <= 0 or not txt:
         return False
-    if core_backend() == "postgres":
-        return update_todo_pg(todo_id=rid, task=txt[:1000], due_date=due, priority=p)
-    con = _conn_core()
-    try:
-        cur = con.execute(
-            "UPDATE todos SET task = ?, due_date = ?, priority = ?, created_at = ? WHERE id = ?",
-            (txt[:1000], due, p, dt.datetime.now().isoformat(), rid),
-        )
-        con.commit()
-        return cur.rowcount > 0
-    finally:
-        con.close()
+    return update_todo_pg(todo_id=rid, task=txt[:1000], due_date=due, priority=p)
 
 
 def add_company_reminder(ticker: str, remind_at: str, note: str) -> bool:
@@ -2273,39 +1767,14 @@ def add_company_reminder(ticker: str, remind_at: str, note: str) -> bool:
     txt = str(note or "").strip()
     if not t or not txt:
         return False
-    if core_backend() == "postgres":
-        return add_company_reminder_pg(ticker=t, remind_at=ra[:64], note=txt[:500])
-    con = _conn_core()
-    try:
-        con.execute(
-            """INSERT INTO company_reminders (ticker, remind_at, note, status, created_at)
-               VALUES (?, ?, ?, 'open', ?)""",
-            (t, ra[:64], txt[:500], dt.datetime.now().isoformat()),
-        )
-        con.commit()
-        return True
-    finally:
-        con.close()
+    return add_company_reminder_pg(ticker=t, remind_at=ra[:64], note=txt[:500])
 
 
 def toggle_company_reminder(reminder_id: int) -> bool:
     rid = int(reminder_id or 0)
     if rid <= 0:
         return False
-    if core_backend() == "postgres":
-        return toggle_company_reminder_pg(rid)
-    con = _conn_core()
-    try:
-        row = con.execute("SELECT status FROM company_reminders WHERE id = ?", (rid,)).fetchone()
-        if not row:
-            return False
-        cur = str(row["status"] or "open").strip().lower()
-        nxt = "done" if cur == "open" else "open"
-        con.execute("UPDATE company_reminders SET status = ? WHERE id = ?", (nxt, rid))
-        con.commit()
-        return True
-    finally:
-        con.close()
+    return toggle_company_reminder_pg(rid)
 
 
 def update_company_reminder(reminder_id: int, remind_at: str, note: str) -> bool:
@@ -2314,30 +1783,11 @@ def update_company_reminder(reminder_id: int, remind_at: str, note: str) -> bool
     txt = str(note or "").strip()
     if rid <= 0 or not txt:
         return False
-    if core_backend() == "postgres":
-        return update_company_reminder_pg(reminder_id=rid, remind_at=ra, note=txt[:500])
-    con = _conn_core()
-    try:
-        cur = con.execute(
-            "UPDATE company_reminders SET remind_at = ?, note = ?, created_at = ? WHERE id = ?",
-            (ra, txt[:500], dt.datetime.now().isoformat(), rid),
-        )
-        con.commit()
-        return cur.rowcount > 0
-    finally:
-        con.close()
+    return update_company_reminder_pg(reminder_id=rid, remind_at=ra, note=txt[:500])
 
 
 def delete_company_reminder(reminder_id: int) -> bool:
     rid = int(reminder_id or 0)
     if rid <= 0:
         return False
-    if core_backend() == "postgres":
-        return delete_company_reminder_pg(rid)
-    con = _conn_core()
-    try:
-        cur = con.execute("DELETE FROM company_reminders WHERE id = ?", (rid,))
-        con.commit()
-        return cur.rowcount > 0
-    finally:
-        con.close()
+    return delete_company_reminder_pg(rid)

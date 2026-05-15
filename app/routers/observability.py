@@ -3,7 +3,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.core.num import to_float
 from app.services.ai_orchestrator import (
@@ -18,9 +18,10 @@ from app.services.observability_service import list_recent_system_events
 router = APIRouter()
 
 
-@router.get("/observability")
-def observability_page(request: Request, msg: str = ""):
-    templates = request.app.state.templates
+@router.get("/api/observability/snapshot")
+def api_observability_snapshot():
+    """Full observability snapshot as JSON — powers the inline workspace space."""
+    from app.services.dashboard_service import get_data_integrity_health
     rows = list_recent_system_events(limit=50)
     risk_veto = list_recent_risk_veto_decisions(limit=12)
     risk_veto_config = get_risk_veto_config()
@@ -28,19 +29,24 @@ def observability_page(request: Request, msg: str = ""):
     reflexions = list_recent_reflexions(limit=12)
     policy_versions = list((reflexions or {}).get("policy_versions") or [])
     active_policy = next((x for x in policy_versions if int(x.get("is_active") or 0) == 1), {})
-    return templates.TemplateResponse(
-        "observability.html",
-        {
-            "request": request,
-            "message": msg,
-            "rows": rows,
-            "risk_veto_decisions": risk_veto,
-            "risk_veto_config": risk_veto_config,
-            "agent_runs": agent_runs,
-            "reflexions": reflexions,
-            "active_reflexion_policy": active_policy,
-        },
-    )
+    data_integrity = get_data_integrity_health()
+    return JSONResponse({
+        "ok": True,
+        "system_events": rows,
+        "risk_veto_decisions": risk_veto,
+        "risk_veto_config": risk_veto_config,
+        "agent_runs": agent_runs,
+        "reflexions": reflexions,
+        "active_reflexion_policy": active_policy,
+        "data_integrity": data_integrity,
+    })
+
+
+@router.get("/observability")
+def observability_page(request: Request, msg: str = ""):
+    if request.headers.get("HX-Request") == "true":
+        return JSONResponse({"redirect": "/today?space=observability"})
+    return RedirectResponse(url="/today?space=observability", status_code=302)
 
 
 @router.post("/observability/risk-veto/config")
@@ -81,4 +87,8 @@ def observability_risk_veto_config_update(
         f"MinConf={float(cfg.get('min_confidence_for_mutation') or 0.0):.2f}, "
         f"MaxAdd={float(cfg.get('max_single_add_pct') or 0.0):.2f}%."
     )
+    # Return JSON for fetch requests, redirect for form submissions
+    accept = request.headers.get("accept", "")
+    if "application/json" in accept or request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return JSONResponse({"ok": True, "message": msg, "config": cfg})
     return RedirectResponse(url="/observability?msg=" + quote(msg), status_code=303)

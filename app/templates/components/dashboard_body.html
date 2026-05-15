@@ -54,6 +54,7 @@
   <div class="flash">{{ message }}</div>
   {% endif %}
 
+  {# ════════════════════════ ROW 1: INDEX CARDS ════════════════════════ #}
   <section class="idx-grid">
     {% for label, row, extra in [
       ("S&P 500", sp, ""),
@@ -76,289 +77,23 @@
     {% endfor %}
   </section>
 
-  <section class="top-morning">
-    <article class="brief-card morning-card">
-      <div class="mini-top">
-        <h3 class="morning-head">Morning Report</h3>
-        <div class="mini-upd">Updated {{ report_panels.morning_updated or "-" }}</div>
-      </div>
-      <div class="morning-sub">Top points from the latest morning brief.</div>
-      <ol class="morning-list">
-        {% for x in report_panels.morning_points %}
-        {% set parts = x.split(':', 1) %}
-        {% set kicker = (parts[0] if (parts|length > 1) else "Insight")|replace('**','')|replace('__','')|trim %}
-        {% set body = (parts[1] if (parts|length > 1) else x)|replace('**','')|replace('__','')|trim %}
-        <li class="morning-row">
-          <div class="morning-kicker">{{ kicker }}</div>
-          <div class="morning-text">{{ body }}</div>
-        </li>
-        {% else %}
-        <li class="morning-row">
-          <div class="morning-text">No morning bullets found in latest report file.</div>
-        </li>
-        {% endfor %}
-      </ol>
-    </article>
-  </section>
+  {# ════════════════════════ ROW 2: 2-COLUMN INTELLIGENCE ════════════════════════ #}
+  <section class="intel-layout">
 
-  <section class="top-live">
-    <article class="brief-card wire-card wire-live">
-      <div class="wire-head">
-        <h3 class="wire-title">Live News Wire</h3>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span class="live-badge"><span class="live-dot"></span>LIVE</span>
-          <div class="wire-upd">{% if freshness.news and freshness.news != '-' %}Updated {{ freshness.news }}{% else %}Streaming now{% endif %}</div>
-        </div>
-      </div>
-      <div class="wire-box">
-        {% for n in (home.news_general[:2] + home.news_company[:1]) %}
-          {% if n.link %}
-          <a class="wire-item" href="{{ n.link }}" target="_blank" rel="noopener"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</a>
-          {% else %}
-          <span class="wire-item"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</span>
-          {% endif %}
-        {% else %}
-          <span class="wire-item"><span class="wire-tag">[News]</span>No headlines available.</span>
-        {% endfor %}
-      </div>
-    </article>
-  </section>
+    {# ── LEFT COLUMN: AI Hub ── #}
+    <div class="intel-left">
 
-  <section class="top-macro">
-    <article class="brief-card flat-card macro-panel">
-      <h4 class="macro-head">Rates & Risk</h4>
-      <div class="macro-list">
-        {% for label, row in [
-          ("US 2Y", us2),
-          ("US 5Y", us5),
-          ("US 10Y", us10),
-          ("US 30Y", us30),
-          ("German 10Y", de10),
-          ("Japan 10Y", jp10),
-          ("VIX", vix)
-        ] %}
-        <div class="macro-item">
-          <div>
-            <div class="macro-k">{{ label }}</div>
-            <div class="macro-v">{{ row.price or "-" }}</div>
-          </div>
-          <div>{{ daypill(row.day) }}</div>
-        </div>
-        {% endfor %}
-      </div>
-    </article>
-
-    <article class="brief-card flat-card macro-panel">
-      <h4 class="macro-head">Commodities</h4>
-      <div class="cmd-grid">
-        {% for label, row in [
-          ("Crude Oil", crude),
-          ("Brent Oil", brent),
-          ("Nat Gas", gas),
-          ("Heating Oil", heatoil),
-          ("Gasoline", gasoline),
-          ("Lumber", lumber),
-          ("Gold", gold),
-          ("Silver", silver),
-          ("Platinum", platinum),
-          ("Palladium", palladium),
-          ("Copper", copper),
-          ("Aluminum", aluminum),
-          ("Iron Ore", ironore),
-          ("Cotton", cotton),
-          ("Sugar", sugar),
-          ("Coffee", coffee),
-          ("Cocoa", cocoa),
-          ("Wheat", wheat),
-          ("Corn", corn),
-          ("Soybeans", soybeans)
-        ] %}
-        {% set ds = row.day or "-" %}
-        {% if row.price and row.price != "-" %}
-        <div class="cmd-item">
-          <div>
-            <div class="cmd-k">{{ label }}</div>
-            <div class="cmd-v{% if label == 'Nat Gas' and (ds|string).startswith('-') %} critical{% endif %}">{{ row.price or "-" }}</div>
-          </div>
-          <div>
-            {{ daypill(ds) }}
-            <svg class="spark" viewBox="0 0 44 14" preserveAspectRatio="none" aria-hidden="true">
-              {% if (ds|string).startswith('-') %}
-              <polyline points="0,2 8,3 16,5 24,6 32,9 44,12" fill="none" stroke="#f43f5e" stroke-width="2"/>
-              {% else %}
-              <polyline points="0,12 8,10 16,9 24,7 32,5 44,3" fill="none" stroke="#10b981" stroke-width="2"/>
-              {% endif %}
-            </svg>
-          </div>
-        </div>
-        {% endif %}
-        {% endfor %}
-      </div>
-    </article>
-
-    <article class="brief-card flat-card macro-panel">
-      <h4 class="macro-head">Currencies</h4>
-      <div class="macro-list">
-      {% for label, row in [
-        ("US Dollar Index", dxy),
-        ("EUR/USD", eurusd),
-        ("EUR/GBP", eurgbp),
-        ("USD/JPY", usdjpy),
-        ("GBP/USD", gbpusd),
-        ("USD/CNH", usdcnh)
-      ] %}
-      <div class="macro-item">
-        <div>
-          <div class="macro-k">{{ label }}</div>
-          <div class="macro-v">{{ row.price or "-" }}</div>
-        </div>
-        <div>{{ daypill(row.day) }}</div>
-      </div>
-      {% endfor %}
-      </div>
-    </article>
-  </section>
-
-  <section class="top-focus">
-    <article class="brief-card">
-      <div class="mini-top">
-        <h3 class="mini-head">Earnings Calendar (This Week)</h3>
-        <div class="mini-upd">Updated {{ report_panels.earnings_updated or "-" }}</div>
-      </div>
-      <div class="mini-upd">
-        Source: {{ report_panels.earnings_result_source or "Schedule reports + reliable earnings feed" }}
-      </div>
-      <div class="mini-upd earn-meta">
-        Rows {{ report_panels.earnings_rows_count or 0 }} · Reported {{ report_panels.earnings_reported_count or 0 }} · Upcoming {{ report_panels.earnings_upcoming_count or 0 }}
-      </div>
-      <div class="earn-filters">
-        <button class="earn-filter-btn is-active" type="button" data-earn-filter="all">All</button>
-        <button class="earn-filter-btn" type="button" data-earn-filter="reported">Reported</button>
-        <button class="earn-filter-btn" type="button" data-earn-filter="upcoming">Upcoming</button>
-        <button class="earn-filter-btn" type="button" data-earn-filter="beat">Beat</button>
-        <button class="earn-filter-btn" type="button" data-earn-filter="miss">Miss</button>
-      </div>
-      <div class="feed-scroll earnings-feed">
-        {% set ns = namespace(last_date='') %}
-        {% for r in report_panels.earnings_week %}
-          {% set d = r.date or '-' %}
-          {% if d != ns.last_date %}
-            {% set ns.last_date = d %}
-            <div class="earn-date">📅 {{ d }}</div>
-          {% endif %}
-          {% set tl = (r.time or '')|lower %}
-          {% if 'pre' in tl %}
-            {% set tclass = 'pre' %}
-            {% set ttxt = 'Pre' %}
-          {% elif 'after' in tl or 'post' in tl %}
-            {% set tclass = 'post' %}
-            {% set ttxt = 'Post' %}
-          {% else %}
-            {% set tclass = 'day' %}
-            {% set ttxt = 'Day' %}
-          {% endif %}
-          {% set rep = 'reported' if r.reported == '1' else 'upcoming' %}
-          {% set v = (r.verdict or '')|upper %}
-          {% set verdict_key = 'beat' if v == 'BEAT' else ('miss' if r.reported == '1' else '-') %}
-          <div
-            class="earn-row js-earn-row"
-            data-symbol="{{ r.symbol or '-' }}"
-            data-company="{{ r.company or '-' }}"
-            data-reported="{{ 'Reported' if r.reported == '1' else 'Upcoming' }}"
-            data-eps-actual="{{ r.eps_actual or '-' }}"
-            data-eps-estimate="{{ r.eps_estimate or '-' }}"
-            data-surprise="{{ r.surprise_txt or '-' }}"
-            data-verdict="{{ (r.verdict or '-')|upper }}"
-            data-confidence="{{ r.confidence or '-' }}"
-            data-kind="{{ rep }}"
-            data-result="{{ verdict_key }}"
-          >
-            <span class="earn-time {{ tclass }}">{{ ttxt }}</span>
-            <div class="earn-ident">
-              <a class="tk-strong" href="/company_file?t={{ r.symbol|urlencode }}">{{ r.symbol }}</a>
-              <span class="earn-company">{{ r.company or r.name or '-' }}</span>
-            </div>
-            <div class="earn-results">
-              {% if r.reported == '1' %}
-                {% if (r.verdict or '')|upper == 'BEAT' %}
-                  <span class="risk-badge beat">BEAT {{ r.surprise_txt or '' }}</span>
-                {% else %}
-                  <span class="risk-badge miss">MISS {{ r.surprise_txt or '' }}</span>
-                {% endif %}
-                <span class="risk-badge eps" title="EPS actual vs estimate">EPS {{ r.eps_actual or '-' }} / {{ r.eps_estimate or '-' }}</span>
-              {% endif %}
-            </div>
-            <div class="earn-status">
-              <span class="status-dot {% if r.reported == '1' %}reported{% else %}upcoming{% endif %}" title="{% if r.reported == '1' %}Reported{% else %}Upcoming{% endif %}"></span>
-              {% if r.reported == '1' %}
-                <span class="risk-badge reported">Reported</span>
-                {% if (r.confidence or '') == 'verified' %}
-                  <span class="risk-badge verified" title="{{ r.verify_source or '' }} {{ r.verify_form or '' }} {{ r.verify_date or '' }}">Verified</span>
-                {% else %}
-                  <span class="risk-badge preliminary" title="Waiting for SEC confirmation">Preliminary</span>
-                {% endif %}
-              {% else %}
-                <span class="risk-badge upcoming">Upcoming</span>
-              {% endif %}
-            </div>
-          </div>
-        {% else %}
-          <div class="mini-upd">No upcoming earnings rows found.</div>
-        {% endfor %}
-      </div>
-    </article>
-  </section>
-
-  <section class="dashboard-main">
-    <div class="dash-main">
-      <article class="brief-card">
-      <div class="mini-top">
-        <h3 class="mini-head">52-Week & All-Time Lows</h3>
-        <div class="mini-upd">Updated {{ report_panels.appendix_updated or "-" }}</div>
-      </div>
-      <div class="feed-scroll lows-feed">
-      <table class="mini-table">
-        <thead><tr><th>Ticker</th><th>Risk</th><th>% Above Low</th><th></th></tr></thead>
-        <tbody>
-          {% for r in report_panels.lows_both %}
-          <tr>
-            <td>
-              <a class="tk-strong" href="/company_file?t={{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
-              <div class="company-sub">{{ r.company or r.name or '-' }}</div>
-            </td>
-            <td><span class="risk-badge red">ALL TIME LOW</span></td>
-            <td>{{ r.above_low }}</td>
-            <td><a class="analyze-btn" href="/company_file?t={{ r.ticker|urlencode }}" title="Analyze">🔍</a></td>
-          </tr>
-          {% endfor %}
-          {% for r in report_panels.lows_52 %}
-          <tr>
-            <td>
-              <a class="tk-strong" href="/company_file?t={{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
-              <div class="company-sub">{{ r.company or r.name or '-' }}</div>
-            </td>
-            <td><span class="risk-badge orange">YEAR LOW</span></td>
-            <td>{{ r.above_low }}</td>
-            <td><a class="analyze-btn" href="/company_file?t={{ r.ticker|urlencode }}" title="Analyze">🔍</a></td>
-          </tr>
-          {% endfor %}
-          {% if (report_panels.lows_both|length + report_panels.lows_52|length) == 0 %}
-          <tr><td colspan="4">No low-lists found in latest appendix.</td></tr>
-          {% endif %}
-        </tbody>
-      </table>
-      </div>
-    </article>
-
-      <section class="brief-card proposals-card">
+      {# AI Reports Hub #}
+      <article class="dash-card accent-green">
         <div class="ai-hub-head">
-          <h3 class="mini-head">AI Reports Hub</h3>
+          <h3 class="card-title">AI Reports Hub</h3>
           <form method="post" action="/dashboard/proposals/scan" hx-post="/dashboard/proposals/scan" hx-target="#dashboardRoot" hx-swap="outerHTML">
             <button class="analyze-btn" type="submit">Refresh Insights</button>
           </form>
         </div>
         <div class="ai-tabs">
-          <button type="button" class="ai-tab-btn is-active" data-ai-tab="insights">Open Insights</button>
+          <button type="button" class="ai-tab-btn is-active" data-ai-tab="morning">Morning Brief</button>
+          <button type="button" class="ai-tab-btn" data-ai-tab="insights">Open Insights</button>
           <button type="button" class="ai-tab-btn" data-ai-tab="earnings">Earnings</button>
           <button type="button" class="ai-tab-btn" data-ai-tab="thesis">Thesis Alerts</button>
           <button type="button" class="ai-tab-btn" data-ai-tab="cascade">Cascades</button>
@@ -367,6 +102,25 @@
           <button type="button" class="ai-tab-btn" data-ai-tab="health">Health</button>
         </div>
 
+        {# ── Morning Brief panel ── #}
+        <div class="ai-panel" data-ai-panel="morning">
+          {% set mp = report_panels.morning_points or [] %}
+          {% if mp %}
+          <div class="morning-list">
+            {% for bullet in mp %}
+            <div class="morning-row">
+              <span class="morning-kicker">{{ loop.index }}</span>
+              <span class="morning-text">{{ bullet }}</span>
+            </div>
+            {% endfor %}
+          </div>
+          <div style="margin-top:8px;font-size:11px;color:var(--muted);">Updated {{ report_panels.morning_updated or "-" }}</div>
+          {% else %}
+          <div style="padding:18px;color:var(--muted);font-size:13px;">No morning brief available yet. Data generates automatically from your portfolio holdings and market conditions.</div>
+          {% endif %}
+        </div>
+
+        {# ── Insights panel ── #}
         <div class="ai-panel" data-ai-panel="insights">
           {% for p in action_proposals %}
           <article class="proposal-card">
@@ -427,10 +181,11 @@
             </div>
           </article>
           {% else %}
-          <div class="proposal-empty">◌ No open insights</div>
+          <div class="proposal-empty">No open insights</div>
           {% endfor %}
         </div>
 
+        {# ── Earnings panel ── #}
         <div class="ai-panel" data-ai-panel="earnings" hidden>
           {% if earnings_analyses %}
           <div class="stack-list">
@@ -464,6 +219,7 @@
           {% endif %}
         </div>
 
+        {# ── Thesis Alerts panel ── #}
         <div class="ai-panel" data-ai-panel="thesis" hidden>
           {% if thesis_breach_alerts %}
           <div class="stack-list">
@@ -471,14 +227,14 @@
             <div class="stack-item" id="breach-alert-{{ a.id }}">
               <div class="proposal-title-row">
                 <div>
-                  <a class="tk-strong" href="/company_file?t={{ a.ticker|urlencode }}">{{ a.ticker }}</a>
+                  <a class="tk-strong" href="/ticker/{{ a.ticker|urlencode }}">{{ a.ticker }}</a>
                   <span class="meta-chip with-gap">{{ a.breach_type or "breach" }}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;">
                   <span class="risk-badge {% if a.severity == 'critical' %}red{% elif a.severity == 'high' %}red{% else %}orange{% endif %}">
                     {{ (a.severity or "medium")|upper }}
                   </span>
-                  <button class="btn-ghost-sm" onclick="dismissBreachAlert({{ a.id }})" title="Dismiss">✕</button>
+                  <button class="btn-ghost-sm" onclick="dismissBreachAlert({{ a.id }})" title="Dismiss">&#x2715;</button>
                 </div>
               </div>
               <div class="stack-text">{{ a.breach_detail or "-" }}</div>
@@ -493,6 +249,7 @@
           {% endif %}
         </div>
 
+        {# ── Cascades panel ── #}
         <div class="ai-panel" data-ai-panel="cascade" hidden>
           {% if cascade_alerts %}
           <div class="stack-list">
@@ -500,16 +257,16 @@
             <div class="stack-item" id="cascade-alert-{{ c.id }}">
               <div class="proposal-title-row">
                 <div>
-                  <a class="tk-strong" href="/company_file?t={{ c.trigger_ticker|urlencode }}">{{ c.trigger_ticker }}</a>
-                  <span class="link-arrow">→</span>
-                  <a class="tk-strong" href="/company_file?t={{ c.affected_ticker|urlencode }}">{{ c.affected_ticker }}</a>
+                  <a class="tk-strong" href="/ticker/{{ c.trigger_ticker|urlencode }}">{{ c.trigger_ticker }}</a>
+                  <span class="link-arrow">&rarr;</span>
+                  <a class="tk-strong" href="/ticker/{{ c.affected_ticker|urlencode }}">{{ c.affected_ticker }}</a>
                   <span class="meta-chip with-gap">{{ c.effect_type or "cascade" }}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;">
                   <span class="risk-badge {% if c.severity == 'critical' %}red{% elif c.severity == 'high' %}red{% else %}orange{% endif %}">
                     {{ "%.0f"|format((c.confidence or 0) * 100) }}% conf
                   </span>
-                  <button class="btn-ghost-sm" onclick="dismissCascadeAlert({{ c.id }})" title="Dismiss">✕</button>
+                  <button class="btn-ghost-sm" onclick="dismissCascadeAlert({{ c.id }})" title="Dismiss">&#x2715;</button>
                 </div>
               </div>
               <div class="stack-text">{{ c.effect_summary or "-" }}</div>
@@ -524,10 +281,9 @@
           {% endif %}
         </div>
 
+        {# ── Accuracy panel ── #}
         <div class="ai-panel" data-ai-panel="accuracy" hidden>
           {% if ai_accuracy and ai_accuracy.get("ok") %}
-
-            {# Row 1: three headline KPI numbers #}
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
               <div class="big-metric">
                 <div class="big-metric-num {% if (ai_accuracy.overall_hit_rate or 0) >= 60 %}good{% elif (ai_accuracy.overall_hit_rate or 0) >= 40 %}mid{% else %}bad{% endif %}">
@@ -542,7 +298,7 @@
                   {{ "%.1f"|format(ai_accuracy.acceptance_rate) }}%
                 </div>
                 {% else %}
-                <div class="big-metric-num mid">—</div>
+                <div class="big-metric-num mid">&mdash;</div>
                 {% endif %}
                 <div class="mini-upd">Acceptance rate</div>
                 <div class="mini-upd">{{ ai_accuracy.proposals_executed or 0 }} executed / {{ ai_accuracy.proposals_total or 0 }} proposed</div>
@@ -553,16 +309,15 @@
                   {{ "%.1f"|format(ai_accuracy.agent_success_rate) }}%
                 </div>
                 {% else %}
-                <div class="big-metric-num mid">—</div>
+                <div class="big-metric-num mid">&mdash;</div>
                 {% endif %}
                 <div class="mini-upd">Agent success rate</div>
                 <div class="mini-upd">{{ ai_accuracy.agent_runs_completed or 0 }} ok / {{ ai_accuracy.agent_runs_total or 0 }} runs</div>
               </div>
             </div>
 
-            {# Row 2: prediction accuracy by window #}
             {% if ai_accuracy.by_window %}
-            <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;">PREDICTION ACCURACY BY WINDOW</div>
+            <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px;">PREDICTION ACCURACY BY WINDOW</div>
             <table class="mini-table" style="margin-bottom:12px;">
               <thead><tr><th>Window</th><th>Total</th><th>Correct</th><th>Hit Rate</th><th>Avg Return</th></tr></thead>
               <tbody>
@@ -579,9 +334,8 @@
             </table>
             {% endif %}
 
-            {# Row 3: proposal funnel #}
             {% if (ai_accuracy.proposals_total or 0) > 0 %}
-            <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;">PROPOSAL FUNNEL (last 90 days)</div>
+            <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px;">PROPOSAL FUNNEL (last 90 days)</div>
             <table class="mini-table">
               <thead><tr><th>Status</th><th>Count</th><th>Share</th></tr></thead>
               <tbody>
@@ -593,7 +347,6 @@
               </tbody>
             </table>
             {% endif %}
-
           {% else %}
           <div class="proposal-empty">No measured outcomes yet — execute proposals to start tracking</div>
           {% endif %}
@@ -607,41 +360,36 @@
           {% set gp = di.gap_prompts_30d or {} %}
           {% set ar = di.agent_runs_7d or {} %}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-
             <div class="mini-card">
-              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">INVESTOR PROFILE</div>
+              <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">INVESTOR PROFILE</div>
               <div class="big-metric-num {% if (prof.pct or 0) >= 80 %}good{% elif (prof.pct or 0) >= 40 %}mid{% else %}bad{% endif %}" style="font-size:28px">{{ prof.pct or 0 }}%</div>
               <div class="mini-upd">{{ prof.filled or 0 }} / {{ prof.total or 0 }} keys filled</div>
               {% if prof.missing_keys %}
               <div style="font-size:10px;color:#94a3b8;margin-top:4px;">Missing: {{ (prof.missing_keys or []) | join(", ") }}</div>
               {% endif %}
             </div>
-
             <div class="mini-card">
-              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">INTERVIEW QUEUE</div>
+              <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">INTERVIEW QUEUE</div>
               <div style="font-size:22px;font-weight:700;{% if (iq.open or 0) > 0 %}color:#f59e0b{% else %}color:#22c55e{% endif %}">
                 {{ iq.open or 0 }} open
               </div>
               <div class="mini-upd">{{ iq.done or 0 }} done</div>
             </div>
-
             <div class="mini-card">
-              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">GAP PROMPTS (30d)</div>
+              <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">GAP PROMPTS (30d)</div>
               <div style="font-size:22px;font-weight:700;{% if (gp.open or 0) > 0 %}color:#f59e0b{% else %}color:#22c55e{% endif %}">
                 {{ gp.open or 0 }} open
               </div>
               <div class="mini-upd">{{ gp.answered or 0 }} answered</div>
             </div>
-
             <div class="mini-card">
-              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">AGENT RUNS (7d)</div>
+              <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;">AGENT RUNS (7d)</div>
               <div style="font-size:22px;font-weight:700;color:#22c55e">{{ ar.success or 0 }} ok</div>
               <div class="mini-upd">
                 <span class="{% if (ar.error or 0) > 0 %}bad{% endif %}">{{ ar.error or 0 }} error</span>
-                {% if (ar.running or 0) > 0 %}&nbsp;· <span class="mid">{{ ar.running }} running</span>{% endif %}
+                {% if (ar.running or 0) > 0 %}&nbsp;&middot; <span class="mid">{{ ar.running }} running</span>{% endif %}
               </div>
             </div>
-
           </div>
         </div>
 
@@ -662,11 +410,11 @@
               {% for ev in ai_audit_timeline %}
               {% set k = ev.kind or "" %}
               <tr>
-                <td style="font-size:10px;white-space:nowrap;color:#64748b">{{ (ev.ts or "")[:19] }}</td>
+                <td style="font-size:10px;white-space:nowrap;color:var(--muted)">{{ (ev.ts or "")[:19] }}</td>
                 <td>
                   {% if k == "agent_run" %}<span class="meta-chip">Agent</span>
-                  {% elif k == "proposal_executed" %}<span class="meta-chip" style="background:#dcfce7;color:#15803d">Executed</span>
-                  {% elif k == "proposal_rejected" or k == "proposal_debate_rejected" %}<span class="meta-chip" style="background:#fee2e2;color:#b91c1c">Rejected</span>
+                  {% elif k == "proposal_executed" %}<span class="meta-chip" style="background:var(--up-soft);color:var(--up-ink)">Executed</span>
+                  {% elif k == "proposal_rejected" or k == "proposal_debate_rejected" %}<span class="meta-chip" style="background:var(--down-soft);color:var(--down-ink)">Rejected</span>
                   {% elif k == "policy_update" %}<span class="meta-chip" style="background:#ede9fe;color:#7c3aed">Policy</span>
                   {% else %}<span class="meta-chip">{{ k }}</span>
                   {% endif %}
@@ -676,25 +424,318 @@
                   {% set st = ev.status or "" %}
                   <span class="{% if st in ('completed','ok','executed','active') %}good{% elif st in ('error','rejected','debate_rejected') %}bad{% else %}mid{% endif %}" style="font-size:11px;font-weight:600">{{ st }}</span>
                 </td>
-                <td style="font-size:11px;color:#64748b">
+                <td style="font-size:11px;color:var(--muted)">
                   {{ ev.detail or "" }}
-                  {% if ev.error %}<span style="color:#dc2626"> ⚠ {{ ev.error[:80] }}</span>{% endif %}
+                  {% if ev.error %}<span style="color:#dc2626"> &#x26A0; {{ ev.error[:80] }}</span>{% endif %}
                 </td>
               </tr>
               {% endfor %}
             </tbody>
           </table>
           {% else %}
-          <div class="proposal-empty">◌ No audit events yet — agent runs and proposal actions will appear here</div>
+          <div class="proposal-empty">No audit events yet — agent runs and proposal actions will appear here</div>
           {% endif %}
         </div>
-      </section>
+      </article>
+    </div>
+
+    {# ── RIGHT COLUMN: News + Earnings + Lows ── #}
+    <div class="intel-right">
+
+      {# Live News Wire #}
+      <article class="dash-card compact wire-live-card">
+        <div class="card-head">
+          <h3 class="card-title">Live News Wire</h3>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="live-badge"><span class="live-dot"></span>LIVE</span>
+            <span class="card-meta">{% if freshness.news and freshness.news != '-' %}{{ freshness.news }}{% else %}Now{% endif %}</span>
+          </div>
+        </div>
+        <div class="wire-list">
+          {% for n in (home.news_general[:3] + home.news_company[:2]) %}
+            {% if n.link %}
+            <a class="wire-item" href="{{ n.link }}" target="_blank" rel="noopener"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</a>
+            {% else %}
+            <span class="wire-item"><span class="wire-tag">[{{ n.source or 'News' }}]</span>{{ (n.ticker ~ ': ') if n.ticker else '' }}{{ n.title }}</span>
+            {% endif %}
+          {% else %}
+            <span class="wire-item"><span class="wire-tag">[News]</span>No headlines available.</span>
+          {% endfor %}
+        </div>
+      </article>
+
+      {# Earnings Calendar #}
+      <article class="dash-card compact accent-amber">
+        <div class="card-head">
+          <h3 class="card-title">Earnings Calendar</h3>
+          <span class="card-meta">{{ report_panels.earnings_updated or "-" }}</span>
+        </div>
+        <div class="card-meta earn-meta">
+          Rows {{ report_panels.earnings_rows_count or 0 }} &middot;
+          Reported {{ report_panels.earnings_reported_count or 0 }} &middot;
+          Upcoming {{ report_panels.earnings_upcoming_count or 0 }}
+        </div>
+        <div class="earn-filters">
+          <button class="earn-filter-btn is-active" type="button" data-earn-filter="all">All</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="reported">Reported</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="upcoming">Upcoming</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="beat">Beat</button>
+          <button class="earn-filter-btn" type="button" data-earn-filter="miss">Miss</button>
+        </div>
+        <div class="feed-scroll earnings-feed">
+          {% set ns = namespace(last_date='') %}
+          {% for r in report_panels.earnings_week %}
+            {% set d = r.date or '-' %}
+            {% if d != ns.last_date %}
+              {% set ns.last_date = d %}
+              <div class="earn-date">{{ d }}</div>
+            {% endif %}
+            {% set tl = (r.time or '')|lower %}
+            {% if 'pre' in tl %}
+              {% set tclass = 'pre' %}
+              {% set ttxt = 'Pre' %}
+            {% elif 'after' in tl or 'post' in tl %}
+              {% set tclass = 'post' %}
+              {% set ttxt = 'Post' %}
+            {% else %}
+              {% set tclass = 'day' %}
+              {% set ttxt = 'Day' %}
+            {% endif %}
+            {% set rep = 'reported' if r.reported == '1' else 'upcoming' %}
+            {% set v = (r.verdict or '')|upper %}
+            {% set verdict_key = 'beat' if v == 'BEAT' else ('miss' if r.reported == '1' else '-') %}
+            <div
+              class="earn-row js-earn-row"
+              data-symbol="{{ r.symbol or '-' }}"
+              data-company="{{ r.company or '-' }}"
+              data-reported="{{ 'Reported' if r.reported == '1' else 'Upcoming' }}"
+              data-eps-actual="{{ r.eps_actual or '-' }}"
+              data-eps-estimate="{{ r.eps_estimate or '-' }}"
+              data-surprise="{{ r.surprise_txt or '-' }}"
+              data-verdict="{{ (r.verdict or '-')|upper }}"
+              data-confidence="{{ r.confidence or '-' }}"
+              data-kind="{{ rep }}"
+              data-result="{{ verdict_key }}"
+            >
+              <span class="earn-time {{ tclass }}">{{ ttxt }}</span>
+              <div class="earn-ident">
+                <a class="tk-strong" href="/ticker/{{ r.symbol|urlencode }}">{{ r.symbol }}</a>
+                <span class="earn-company">{{ r.company or r.name or '-' }}</span>
+              </div>
+              <div class="earn-results">
+                {% if r.reported == '1' %}
+                  {% if (r.verdict or '')|upper == 'BEAT' %}
+                    <span class="risk-badge beat">BEAT {{ r.surprise_txt or '' }}</span>
+                  {% else %}
+                    <span class="risk-badge miss">MISS {{ r.surprise_txt or '' }}</span>
+                  {% endif %}
+                  <span class="risk-badge eps" title="EPS actual vs estimate">EPS {{ r.eps_actual or '-' }} / {{ r.eps_estimate or '-' }}</span>
+                {% endif %}
+              </div>
+              <div class="earn-status">
+                <span class="status-dot {% if r.reported == '1' %}reported{% else %}upcoming{% endif %}" title="{% if r.reported == '1' %}Reported{% else %}Upcoming{% endif %}"></span>
+                {% if r.reported == '1' %}
+                  <span class="risk-badge reported">Reported</span>
+                  {% if (r.confidence or '') == 'verified' %}
+                    <span class="risk-badge verified" title="{{ r.verify_source or '' }} {{ r.verify_form or '' }} {{ r.verify_date or '' }}">Verified</span>
+                  {% else %}
+                    <span class="risk-badge preliminary" title="Waiting for SEC confirmation">Preliminary</span>
+                  {% endif %}
+                {% else %}
+                  <span class="risk-badge upcoming">Upcoming</span>
+                {% endif %}
+              </div>
+            </div>
+          {% else %}
+            <div class="mini-upd">No upcoming earnings rows found.</div>
+          {% endfor %}
+        </div>
+      </article>
+
+      {# 52-Week Lows #}
+      <article class="dash-card compact">
+        <div class="card-head">
+          <h3 class="card-title">52-Week & All-Time Lows</h3>
+          <span class="card-meta">{{ report_panels.appendix_updated or "-" }}</span>
+        </div>
+        <div class="feed-scroll lows-feed">
+          <table class="mini-table">
+            <thead><tr><th>Ticker</th><th>Risk</th><th>% Above</th><th></th></tr></thead>
+            <tbody>
+              {% for r in report_panels.lows_both %}
+              <tr>
+                <td>
+                  <a class="tk-strong" href="/ticker/{{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
+                  <div class="company-sub">{{ r.company or r.name or '-' }}</div>
+                </td>
+                <td><span class="risk-badge red">ALL TIME LOW</span></td>
+                <td>{{ r.above_low }}</td>
+                <td><a class="analyze-btn" href="/ticker/{{ r.ticker|urlencode }}" title="Analyze">&#x1F50D;</a></td>
+              </tr>
+              {% endfor %}
+              {% for r in report_panels.lows_52 %}
+              <tr>
+                <td>
+                  <a class="tk-strong" href="/ticker/{{ r.ticker|urlencode }}">{{ r.ticker }}</a>{% if r.is_at_low %}<span class="atlow-dot" title="At low"></span>{% endif %}
+                  <div class="company-sub">{{ r.company or r.name or '-' }}</div>
+                </td>
+                <td><span class="risk-badge orange">YEAR LOW</span></td>
+                <td>{{ r.above_low }}</td>
+                <td><a class="analyze-btn" href="/ticker/{{ r.ticker|urlencode }}" title="Analyze">&#x1F50D;</a></td>
+              </tr>
+              {% endfor %}
+              {% if (report_panels.lows_both|length + report_panels.lows_52|length) == 0 %}
+              <tr><td colspan="4">No low-lists found in latest appendix.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  {# ════════════════════════ ROW 3: MARKET DATA (collapsible) ════════════════════════ #}
+  <section class="market-data-section">
+    <button type="button" class="market-data-toggle" id="mktDataToggle">
+      <h3>Market Data &middot; Rates, Commodities, Currencies, Cross-Asset</h3>
+      <svg class="market-data-chevron" id="mktDataChevron" viewBox="0 0 20 20" fill="currentColor">
+        <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
+      </svg>
+    </button>
+    <div class="market-data-body" id="mktDataBody">
+
+      <div class="mkt-tabs">
+        <button type="button" class="mkt-tab-btn is-active" data-mkt-tab="rates">Rates & Risk</button>
+        <button type="button" class="mkt-tab-btn" data-mkt-tab="commodities">Commodities</button>
+        <button type="button" class="mkt-tab-btn" data-mkt-tab="currencies">Currencies</button>
+        <button type="button" class="mkt-tab-btn" data-mkt-tab="crossasset">Cross-Asset</button>
+      </div>
+
+      {# ── Rates & Risk ── #}
+      <div class="mkt-panel" data-mkt-panel="rates">
+        <div class="mkt-grid">
+          {% for label, row in [
+            ("US 2Y", us2), ("US 5Y", us5), ("US 10Y", us10), ("US 30Y", us30),
+            ("VIX", vix)
+          ] %}
+          <div class="mkt-item">
+            <div>
+              <div class="mkt-k">{{ label }}</div>
+              <div class="mkt-v">{{ row.price or "-" }}</div>
+            </div>
+            <div>{{ daypill(row.day) }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      {# ── Commodities ── #}
+      <div class="mkt-panel" data-mkt-panel="commodities" hidden>
+        <div class="mkt-grid">
+          {% for label, row in [
+            ("Crude Oil", crude), ("Brent Oil", brent), ("Nat Gas", gas),
+            ("Heating Oil", heatoil), ("Gasoline", gasoline), ("Lumber", lumber),
+            ("Gold", gold), ("Silver", silver), ("Platinum", platinum),
+            ("Palladium", palladium), ("Copper", copper), ("Aluminum", aluminum),
+            ("Iron Ore", ironore), ("Cotton", cotton), ("Sugar", sugar),
+            ("Coffee", coffee), ("Cocoa", cocoa), ("Wheat", wheat),
+            ("Corn", corn), ("Soybeans", soybeans)
+          ] %}
+          {% if row.price and row.price != "-" %}
+          <div class="mkt-item">
+            <div>
+              <div class="mkt-k">{{ label }}</div>
+              <div class="mkt-v{% if label == 'Nat Gas' and (row.day or '-')|string|first == '-' %} critical{% endif %}">{{ row.price or "-" }}</div>
+            </div>
+            <div>
+              {{ daypill(row.day) }}
+              <svg class="spark" viewBox="0 0 44 14" preserveAspectRatio="none" aria-hidden="true">
+                {% if (row.day or '-')|string|first == '-' %}
+                <polyline points="0,2 8,3 16,5 24,6 32,9 44,12" fill="none" stroke="#f43f5e" stroke-width="2"/>
+                {% else %}
+                <polyline points="0,12 8,10 16,9 24,7 32,5 44,3" fill="none" stroke="#10b981" stroke-width="2"/>
+                {% endif %}
+              </svg>
+            </div>
+          </div>
+          {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+
+      {# ── Currencies ── #}
+      <div class="mkt-panel" data-mkt-panel="currencies" hidden>
+        <div class="mkt-grid">
+          {% for label, row in [
+            ("US Dollar Index", dxy), ("EUR/USD", eurusd), ("EUR/GBP", eurgbp),
+            ("USD/JPY", usdjpy), ("GBP/USD", gbpusd), ("USD/CNH", usdcnh)
+          ] %}
+          <div class="mkt-item">
+            <div>
+              <div class="mkt-k">{{ label }}</div>
+              <div class="mkt-v">{{ row.price or "-" }}</div>
+            </div>
+            <div>{{ daypill(row.day) }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      {# ── Cross-Asset ── #}
+      <div class="mkt-panel" data-mkt-panel="crossasset" hidden>
+        <div class="card-head">
+          <h3 class="card-title">Cross-Asset Transmission (v1)</h3>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="mini-upd" id="crossAssetAsOf">Loading...</div>
+            <button class="analyze-btn" type="button" id="crossAssetRefreshBtn">Refresh</button>
+          </div>
+        </div>
+        <div class="mini-upd" style="margin-bottom:8px;">
+          Rolling correlation (20/60/252), beta(60d), and 1D expected-vs-actual gap.
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <span class="mini-upd" id="crossAssetFilterHint">Click a matrix cell to filter.</span>
+          <button class="analyze-btn" type="button" id="crossAssetClearFilterBtn" style="display:none;">Clear Filter</button>
+        </div>
+        <div id="crossAssetMatrixWrap" style="margin-bottom:10px;">
+          <div style="overflow:auto;">
+            <table class="mini-table" id="crossAssetMatrix">
+              <thead id="crossAssetMatrixHead">
+                <tr><th>Asset</th><th>Loading...</th></tr>
+              </thead>
+              <tbody id="crossAssetMatrixBody">
+                <tr><td colspan="2">Loading correlation map...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div id="crossAssetError" class="mini-upd" style="display:none;color:var(--down-ink);margin-bottom:8px;"></div>
+        <div class="feed-scroll" style="max-height:260px;">
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>Driver &rarr; Target</th>
+                <th>Corr20</th>
+                <th>Corr60</th>
+                <th>Corr252</th>
+                <th>Beta60</th>
+                <th>Gap 1D</th>
+              </tr>
+            </thead>
+            <tbody id="crossAssetRows">
+              <tr><td colspan="6">Loading cross-asset snapshot...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
 
     </div>
   </section>
 
 </div>
 
+{# ════════════════════════ OVERLAYS ════════════════════════ #}
 <div id="earnTooltip" class="earn-tooltip" aria-hidden="true"></div>
 <div id="indexDrawerOverlay" class="index-drawer-overlay"></div>
 <aside id="indexDrawer" class="index-drawer" aria-hidden="true">
@@ -719,142 +760,288 @@
 </aside>
 
 <script>
-  (function(){
-    document.querySelectorAll('.js-reject-toggle').forEach(function(btn){
-      btn.addEventListener('click', function(){
-        var id = btn.getAttribute('data-proposal-id');
-        var el = document.getElementById('reject-wrap-' + id);
-        if(!el) return;
-        var hidden = el.hasAttribute('hidden');
-        if(hidden){ el.removeAttribute('hidden'); } else { el.setAttribute('hidden','hidden'); }
-      });
+(function(){
+  /* ── Reject toggle ── */
+  document.querySelectorAll('.js-reject-toggle').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var id = btn.getAttribute('data-proposal-id');
+      var el = document.getElementById('reject-wrap-' + id);
+      if(!el) return;
+      var hidden = el.hasAttribute('hidden');
+      if(hidden){ el.removeAttribute('hidden'); } else { el.setAttribute('hidden','hidden'); }
     });
+  });
 
-    function activateAiTab(name){
-      document.querySelectorAll('[data-ai-tab]').forEach(function(btn){
-        btn.classList.toggle('is-active', btn.getAttribute('data-ai-tab') === name);
-      });
-      document.querySelectorAll('[data-ai-panel]').forEach(function(panel){
-        if (panel.getAttribute('data-ai-panel') === name) {
-          panel.removeAttribute('hidden');
-        } else {
-          panel.setAttribute('hidden', 'hidden');
-        }
-      });
-    }
+  /* ── AI Hub tabs ── */
+  function activateAiTab(name){
     document.querySelectorAll('[data-ai-tab]').forEach(function(btn){
-      btn.addEventListener('click', function(){
-        activateAiTab(btn.getAttribute('data-ai-tab') || 'insights');
-      });
+      btn.classList.toggle('is-active', btn.getAttribute('data-ai-tab') === name);
     });
-    activateAiTab('insights');
+    document.querySelectorAll('[data-ai-panel]').forEach(function(panel){
+      if (panel.getAttribute('data-ai-panel') === name) {
+        panel.removeAttribute('hidden');
+      } else {
+        panel.setAttribute('hidden', 'hidden');
+      }
+    });
+  }
+  document.querySelectorAll('[data-ai-tab]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      activateAiTab(btn.getAttribute('data-ai-tab') || 'insights');
+    });
+  });
+  activateAiTab('morning');
 
-    function applyEarningsFilter(kind){
-      document.querySelectorAll('[data-earn-filter]').forEach(function(btn){
-        btn.classList.toggle('is-active', (btn.getAttribute('data-earn-filter') || 'all') === kind);
-      });
-      document.querySelectorAll('.js-earn-row').forEach(function(row){
-        var rowKind = row.getAttribute('data-kind') || '';
-        var rowRes = (row.getAttribute('data-result') || '').toLowerCase();
-        var show = (kind === 'all')
-          || (kind === 'reported' && rowKind === 'reported')
-          || (kind === 'upcoming' && rowKind === 'upcoming')
-          || (kind === 'beat' && rowRes === 'beat')
-          || (kind === 'miss' && rowRes === 'miss');
-        row.classList.toggle('is-hidden', !show);
-      });
-    }
+  /* ── Market Data tabs ── */
+  function activateMktTab(name){
+    document.querySelectorAll('[data-mkt-tab]').forEach(function(btn){
+      btn.classList.toggle('is-active', btn.getAttribute('data-mkt-tab') === name);
+    });
+    document.querySelectorAll('[data-mkt-panel]').forEach(function(panel){
+      if (panel.getAttribute('data-mkt-panel') === name) {
+        panel.removeAttribute('hidden');
+      } else {
+        panel.setAttribute('hidden', 'hidden');
+      }
+    });
+  }
+  document.querySelectorAll('[data-mkt-tab]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      activateMktTab(btn.getAttribute('data-mkt-tab') || 'rates');
+    });
+  });
+
+  /* ── Market Data collapse ── */
+  var mktToggle = document.getElementById('mktDataToggle');
+  var mktBody = document.getElementById('mktDataBody');
+  var mktChevron = document.getElementById('mktDataChevron');
+  if(mktToggle && mktBody){
+    mktToggle.addEventListener('click', function(){
+      var open = mktBody.classList.toggle('open');
+      if(mktChevron) mktChevron.classList.toggle('open', open);
+    });
+  }
+
+  /* ── Earnings filters ── */
+  function applyEarningsFilter(kind){
     document.querySelectorAll('[data-earn-filter]').forEach(function(btn){
-      btn.addEventListener('click', function(){
-        applyEarningsFilter(btn.getAttribute('data-earn-filter') || 'all');
-      });
+      btn.classList.toggle('is-active', (btn.getAttribute('data-earn-filter') || 'all') === kind);
     });
-    applyEarningsFilter('all');
-
-    var tt = document.getElementById('earnTooltip');
-    function showTip(ev, row){
-      if(!tt || !row) return;
-      var symbol = row.getAttribute('data-symbol') || '-';
-      var company = row.getAttribute('data-company') || '-';
-      var status = row.getAttribute('data-reported') || '-';
-      var epsA = row.getAttribute('data-eps-actual') || '-';
-      var epsE = row.getAttribute('data-eps-estimate') || '-';
-      var surprise = row.getAttribute('data-surprise') || '-';
-      var verdict = row.getAttribute('data-verdict') || '-';
-      var conf = row.getAttribute('data-confidence') || '-';
-      tt.innerHTML = '<div class="tt-head">' + symbol + ' · ' + status + '</div>'
-        + '<div>' + company + '</div>'
-        + '<div>EPS: ' + epsA + ' / ' + epsE + '</div>'
-        + '<div>Surprise: ' + surprise + ' · ' + verdict + '</div>'
-        + '<div>History hint: confidence=' + conf + '</div>';
-      tt.style.display = 'block';
-      moveTip(ev);
-    }
-    function moveTip(ev){
-      if(!tt || tt.style.display !== 'block') return;
-      var x = (ev.clientX || 0) + 14;
-      var y = (ev.clientY || 0) + 12;
-      var maxX = window.innerWidth - tt.offsetWidth - 12;
-      var maxY = window.innerHeight - tt.offsetHeight - 12;
-      tt.style.left = Math.max(8, Math.min(x, maxX)) + 'px';
-      tt.style.top = Math.max(8, Math.min(y, maxY)) + 'px';
-    }
-    function hideTip(){ if(tt){ tt.style.display = 'none'; } }
     document.querySelectorAll('.js-earn-row').forEach(function(row){
-      row.addEventListener('mouseenter', function(ev){ showTip(ev, row); });
-      row.addEventListener('mousemove', moveTip);
-      row.addEventListener('mouseleave', hideTip);
+      var rowKind = row.getAttribute('data-kind') || '';
+      var rowRes = (row.getAttribute('data-result') || '').toLowerCase();
+      var show = (kind === 'all')
+        || (kind === 'reported' && rowKind === 'reported')
+        || (kind === 'upcoming' && rowKind === 'upcoming')
+        || (kind === 'beat' && rowRes === 'beat')
+        || (kind === 'miss' && rowRes === 'miss');
+      row.classList.toggle('is-hidden', !show);
     });
-
-    var drawer = document.getElementById('indexDrawer');
-    var drawerOverlay = document.getElementById('indexDrawerOverlay');
-    var drawerClose = document.getElementById('indexDrawerClose');
-    var drawerTitle = document.getElementById('indexDrawerTitle');
-    var drawerPrice = document.getElementById('indexDrawerPrice');
-    var drawerDay = document.getElementById('indexDrawerDay');
-    function closeDrawer(){
-      if(!drawer || !drawerOverlay) return;
-      drawer.classList.remove('open');
-      drawerOverlay.style.display = 'none';
-      drawer.setAttribute('aria-hidden', 'true');
-    }
-    function openDrawer(card){
-      if(!drawer || !drawerOverlay || !card) return;
-      var idx = card.getAttribute('data-index') || 'Index';
-      if(idx !== 'S&P 500'){ return; }
-      drawerTitle.textContent = idx + ' Detail';
-      drawerPrice.textContent = card.getAttribute('data-price') || '-';
-      drawerDay.textContent = 'Day: ' + (card.getAttribute('data-day') || '-');
-      drawerOverlay.style.display = 'block';
-      drawer.classList.add('open');
-      drawer.setAttribute('aria-hidden', 'false');
-    }
-    document.querySelectorAll('.js-index-card').forEach(function(card){
-      card.addEventListener('click', function(){ openDrawer(card); });
+  }
+  document.querySelectorAll('[data-earn-filter]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      applyEarningsFilter(btn.getAttribute('data-earn-filter') || 'all');
     });
-    if(drawerOverlay){ drawerOverlay.addEventListener('click', closeDrawer); }
-    if(drawerClose){ drawerClose.addEventListener('click', closeDrawer); }
-  })();
+  });
+  applyEarningsFilter('all');
 
-  function dismissBreachAlert(id) {
-    fetch('/api/agent/breach-alerts/' + id + '/dismiss', {method: 'POST'})
+  /* ── Earnings tooltip ── */
+  var tt = document.getElementById('earnTooltip');
+  function showTip(ev, row){
+    if(!tt || !row) return;
+    var symbol = row.getAttribute('data-symbol') || '-';
+    var company = row.getAttribute('data-company') || '-';
+    var status = row.getAttribute('data-reported') || '-';
+    var epsA = row.getAttribute('data-eps-actual') || '-';
+    var epsE = row.getAttribute('data-eps-estimate') || '-';
+    var surprise = row.getAttribute('data-surprise') || '-';
+    var verdict = row.getAttribute('data-verdict') || '-';
+    var conf = row.getAttribute('data-confidence') || '-';
+    tt.innerHTML = '<div class="tt-head">' + symbol + ' \u00B7 ' + status + '</div>'
+      + '<div>' + company + '</div>'
+      + '<div>EPS: ' + epsA + ' / ' + epsE + '</div>'
+      + '<div>Surprise: ' + surprise + ' \u00B7 ' + verdict + '</div>'
+      + '<div>Confidence: ' + conf + '</div>';
+    tt.style.display = 'block';
+    moveTip(ev);
+  }
+  function moveTip(ev){
+    if(!tt || tt.style.display !== 'block') return;
+    var x = (ev.clientX || 0) + 14;
+    var y = (ev.clientY || 0) + 12;
+    var maxX = window.innerWidth - tt.offsetWidth - 12;
+    var maxY = window.innerHeight - tt.offsetHeight - 12;
+    tt.style.left = Math.max(8, Math.min(x, maxX)) + 'px';
+    tt.style.top = Math.max(8, Math.min(y, maxY)) + 'px';
+  }
+  function hideTip(){ if(tt){ tt.style.display = 'none'; } }
+  document.querySelectorAll('.js-earn-row').forEach(function(row){
+    row.addEventListener('mouseenter', function(ev){ showTip(ev, row); });
+    row.addEventListener('mousemove', moveTip);
+    row.addEventListener('mouseleave', hideTip);
+  });
+
+  /* ── Index drawer ── */
+  var drawer = document.getElementById('indexDrawer');
+  var drawerOverlay = document.getElementById('indexDrawerOverlay');
+  var drawerClose = document.getElementById('indexDrawerClose');
+  var drawerTitle = document.getElementById('indexDrawerTitle');
+  var drawerPrice = document.getElementById('indexDrawerPrice');
+  var drawerDay = document.getElementById('indexDrawerDay');
+  function closeDrawer(){
+    if(!drawer || !drawerOverlay) return;
+    drawer.classList.remove('open');
+    drawerOverlay.style.display = 'none';
+    drawer.setAttribute('aria-hidden', 'true');
+  }
+  function openDrawer(card){
+    if(!drawer || !drawerOverlay || !card) return;
+    var idx = card.getAttribute('data-index') || 'Index';
+    if(idx !== 'S&P 500'){ return; }
+    drawerTitle.textContent = idx + ' Detail';
+    drawerPrice.textContent = card.getAttribute('data-price') || '-';
+    drawerDay.textContent = 'Day: ' + (card.getAttribute('data-day') || '-');
+    drawerOverlay.style.display = 'block';
+    drawer.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+  }
+  document.querySelectorAll('.js-index-card').forEach(function(card){
+    card.addEventListener('click', function(){ openDrawer(card); });
+  });
+  if(drawerOverlay){ drawerOverlay.addEventListener('click', closeDrawer); }
+  if(drawerClose){ drawerClose.addEventListener('click', closeDrawer); }
+
+  /* ── Cross-Asset Transmission ── */
+  var caRows = document.getElementById('crossAssetRows');
+  var caErr = document.getElementById('crossAssetError');
+  var caAsOf = document.getElementById('crossAssetAsOf');
+  var caRefresh = document.getElementById('crossAssetRefreshBtn');
+  var caMxHead = document.getElementById('crossAssetMatrixHead');
+  var caMxBody = document.getElementById('crossAssetMatrixBody');
+  var caClearFilterBtn = document.getElementById('crossAssetClearFilterBtn');
+  var caFilterHint = document.getElementById('crossAssetFilterHint');
+  var caSelectedA = '';
+  var caSelectedB = '';
+  var caLastRows = [];
+
+  function fmtPct(v){
+    var n = Number(v || 0);
+    if(!isFinite(n)) n = 0;
+    return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+  }
+  function clsBy(v){
+    var n = Number(v || 0);
+    if(!isFinite(n)) return '';
+    if(n > 0) return 'good';
+    if(n < 0) return 'bad';
+    return 'mid';
+  }
+  function corrStyle(v){
+    var n = Number(v || 0);
+    if(!isFinite(n)) n = 0;
+    var a = Math.min(1, Math.max(0, Math.abs(n)));
+    if(n > 0) return 'background:rgba(16,185,129,' + (0.14 + a * 0.28).toFixed(3) + ');';
+    if(n < 0) return 'background:rgba(244,63,94,' + (0.14 + a * 0.28).toFixed(3) + ');';
+    return 'background:var(--panel2);';
+  }
+  function buildCorrMatrix(rows){
+    if(!caMxHead || !caMxBody) return;
+    var assets = [];
+    var seen = {};
+    rows.forEach(function(r){
+      var d = String(r.driver || '-');
+      var t = String(r.target || '-');
+      if(!seen[d]){ seen[d]=1; assets.push(d); }
+      if(!seen[t]){ seen[t]=1; assets.push(t); }
+    });
+    if(!assets.length){
+      caMxHead.innerHTML = '<tr><th>Asset</th><th>-</th></tr>';
+      caMxBody.innerHTML = '<tr><td colspan="2">No matrix data.</td></tr>';
+      return;
+    }
+    var lookup = {};
+    rows.forEach(function(r){
+      var k = String(r.driver||'-') + '|' + String(r.target||'-');
+      lookup[k] = Number(r.corr60 || 0);
+    });
+    var hdr = '<tr><th></th>';
+    assets.forEach(function(a){ hdr += '<th style="font-size:9px;writing-mode:vertical-lr;transform:rotate(180deg);white-space:nowrap;padding:4px 2px;">' + a + '</th>'; });
+    hdr += '</tr>';
+    caMxHead.innerHTML = hdr;
+    var body = '';
+    assets.forEach(function(a){
+      body += '<tr><td style="font-size:10px;font-weight:700;white-space:nowrap;">' + a + '</td>';
+      assets.forEach(function(b){
+        if(a === b){ body += '<td style="background:var(--panel);text-align:center;font-size:9px;color:var(--muted);">-</td>'; return; }
+        var v = lookup[a+'|'+b];
+        if(v === undefined) v = lookup[b+'|'+a];
+        if(v === undefined) v = 0;
+        body += '<td style="text-align:center;font-size:10px;cursor:pointer;' + corrStyle(v) + '" data-ca-a="' + a + '" data-ca-b="' + b + '">'
+          + (v ? v.toFixed(2) : '-') + '</td>';
+      });
+      body += '</tr>';
+    });
+    caMxBody.innerHTML = body;
+    caMxBody.querySelectorAll('td[data-ca-a]').forEach(function(td){
+      td.addEventListener('click', function(){
+        caSelectedA = td.getAttribute('data-ca-a') || '';
+        caSelectedB = td.getAttribute('data-ca-b') || '';
+        filterCaRows();
+        if(caClearFilterBtn) caClearFilterBtn.style.display = '';
+        if(caFilterHint) caFilterHint.textContent = 'Showing: ' + caSelectedA + ' \u2194 ' + caSelectedB;
+      });
+    });
+  }
+  function filterCaRows(){
+    if(!caRows) return;
+    var trs = caRows.querySelectorAll('tr');
+    trs.forEach(function(tr){
+      if(!caSelectedA){ tr.style.display = ''; return; }
+      var text = tr.textContent || '';
+      var show = text.indexOf(caSelectedA) >= 0 && text.indexOf(caSelectedB) >= 0;
+      tr.style.display = show ? '' : 'none';
+    });
+  }
+  if(caClearFilterBtn){
+    caClearFilterBtn.addEventListener('click', function(){
+      caSelectedA = ''; caSelectedB = '';
+      caClearFilterBtn.style.display = 'none';
+      if(caFilterHint) caFilterHint.textContent = 'Click a matrix cell to filter.';
+      filterCaRows();
+    });
+  }
+  function renderCaRows(rows){
+    if(!caRows) return;
+    caLastRows = rows;
+    var html = '';
+    rows.forEach(function(r){
+      var gap1d = (r.gap_1d !== undefined && r.gap_1d !== null) ? r.gap_1d : r.gap_1d_pct;
+      html += '<tr>'
+        + '<td style="white-space:nowrap;">' + (r.driver||'-') + ' \u2192 ' + (r.target||'-') + '</td>'
+        + '<td class="' + clsBy(r.corr20) + '">' + fmtPct(r.corr20) + '</td>'
+        + '<td class="' + clsBy(r.corr60) + '">' + fmtPct(r.corr60) + '</td>'
+        + '<td class="' + clsBy(r.corr252) + '">' + fmtPct(r.corr252) + '</td>'
+        + '<td>' + Number(r.beta60||0).toFixed(3) + '</td>'
+        + '<td class="' + clsBy(gap1d) + '">' + fmtPct(gap1d) + '</td>'
+        + '</tr>';
+    });
+    caRows.innerHTML = html || '<tr><td colspan="6">No data.</td></tr>';
+  }
+  function loadCrossAsset(){
+    if(caErr) caErr.style.display = 'none';
+    fetch('/dashboard/cross-asset/snapshot')
       .then(function(r){ return r.json(); })
       .then(function(d){
-        if(d.ok) {
-          var el = document.getElementById('breach-alert-' + id);
-          if(el) el.remove();
-        }
-      });
+        if(d.error){ if(caErr){ caErr.textContent = d.error; caErr.style.display = ''; } return; }
+        var asOf = d.as_of || d.asof || '-';
+        if(caAsOf) caAsOf.textContent = 'As of ' + asOf;
+        var rows = d.pairs || d.rows || [];
+        renderCaRows(rows);
+        buildCorrMatrix(rows);
+      })
+      .catch(function(e){ if(caErr){ caErr.textContent = String(e); caErr.style.display = ''; } });
   }
-
-  function dismissCascadeAlert(id) {
-    fetch('/api/agent/cascade-alerts/' + id + '/dismiss', {method: 'POST'})
-      .then(function(r){ return r.json(); })
-      .then(function(d){
-        if(d.ok) {
-          var el = document.getElementById('cascade-alert-' + id);
-          if(el) el.remove();
-        }
-      });
-  }
+  loadCrossAsset();
+  if(caRefresh){ caRefresh.addEventListener('click', loadCrossAsset); }
+})();
 </script>

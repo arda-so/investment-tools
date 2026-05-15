@@ -7,6 +7,7 @@ existing data mutations, memory management, and Google OAuth.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import re
 import urllib.parse
 
@@ -37,6 +38,7 @@ from app.services.organizer_service import (
     list_action_log,
     list_action_queue,
     list_recent_notes,
+    recall,
     resolve_action_queue,
     save_daily_note,
     toggle_task,
@@ -45,6 +47,14 @@ from app.services.organizer_service import (
 
 
 router = APIRouter()
+
+
+@functools.lru_cache(maxsize=1)
+def _workspace_create_record_fn():
+    # Lazy-load once to avoid request-path repeated import locking while staying cycle-safe.
+    from app.services.workspace_os_service import create_record
+
+    return create_record
 
 
 def _safe_day(day: str) -> str:
@@ -294,7 +304,7 @@ def organizer_omnibox_add(
         add_task(task=clean or raw, ticker=tk, category=kind, priority="P2", due_date="")
     # Dual-write to unified investment_records_core
     try:
-        from app.services.workspace_os_service import create_record as _ws_create
+        _ws_create = _workspace_create_record_fn()
         _ws_create(
             kind="action",
             domain="work",
@@ -430,6 +440,5 @@ def organizer_google_send_email(
 
 @router.post("/organizer/recall")
 def organizer_recall_post(question: str = Form("")):
-    from app.services.organizer_service import recall
     ans, sources = recall(question, limit=8) if question else ("", [])
     return JSONResponse({"answer": ans, "sources": sources})

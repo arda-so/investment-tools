@@ -9,7 +9,7 @@ import threading
 from app.core.ticker import normalize_ticker
 from app.core.ticker import yfinance_symbol
 from app.core.config import DATA_DIR
-from app.services.postgres_core_service import core_backend, pg_connect
+from app.services.postgres_core_service import pg_connect
 
 _MCAP_CACHE_PATH = Path(DATA_DIR) / "cache" / "market_cap_cache.json"
 _MCAP_TTL_HOURS = 24
@@ -149,7 +149,7 @@ def _fetch_market_cap_live(ticker: str) -> tuple[str, float]:
     try:
         obj = yf.Ticker(yfinance_symbol(tk))
         fi = obj.fast_info or {}
-        mcap = float(fi.get("market_cap") or 0.0)
+        mcap = float(fi.get("marketCap") or 0.0)
         if mcap <= 0:
             info = obj.info or {}
             mcap = float(info.get("marketCap") or 0.0)
@@ -160,8 +160,6 @@ def _fetch_market_cap_live(ticker: str) -> tuple[str, float]:
 
 def company_name_map(tickers: list[str] | None = None) -> dict[str, str]:
     out: dict[str, str] = {}
-    if core_backend() != "postgres":
-        return out
     con_pg = pg_connect()
     if con_pg is None:
         return out
@@ -198,14 +196,6 @@ def market_cap_map(tickers: list[str] | None = None, *, live_fetch: bool = True)
         return {}
     wanted = sorted(set(wanted))
     out = {t: "-" for t in wanted}
-
-    if core_backend() != "postgres":
-        cache = _load_market_cap_cache()
-        for tk in wanted:
-            cached = _cache_value_valid(cache.get(tk, {}))
-            if cached > 0:
-                out[tk] = _format_market_cap(cached)
-        return out
 
     con_pg = pg_connect()
     if con_pg is not None:

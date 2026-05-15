@@ -32,8 +32,6 @@ from app.services.postgres_core_service import (
     ensure_postgres_core_schema,
     guard_core_backend_cutover,
     strict_postgres_mode,
-    sync_core_from_sqlite,
-    verify_core_counts,
 )
 from app.services.portfolio_memory_service import (
     forget_compact_memory,
@@ -74,6 +72,12 @@ from app.services.user_preferences_service import (
 from tools.llm_engine import ask_ai, ask_ai_vision, get_ai_runtime_metrics
 from tools.sync_us_listed_universe import sync_universe as sync_us_listed_universe_now
 from app.services.memory_engine import OnyxMemory
+
+from app.services.postgres_core_service import pg_connect
+from app.services.postgres_core_service import add_agent_feedback_memory_pg
+from app.services.web_search_service import is_realtime_query, search_news, format_news_text
+from app.services.postgres_core_service import store_ai_response_feedback
+from app.services.web_search_service import get_search_engine_status
 
 
 router = APIRouter()
@@ -557,7 +561,6 @@ def _history_block(ctx: dict, limit: int = 30) -> str:
 def _load_chat_summaries() -> str:
     """Load last 5 LLM-compressed conversation summaries from agent_memory_core."""
     try:
-        from app.services.postgres_core_service import pg_connect
         con = pg_connect()
         if con is None:
             return ""
@@ -606,7 +609,6 @@ def _maybe_summarize_session(session_id: str, history: list[dict]) -> None:
         )
         summary = ask_ai(prompt, context="", mode="fast").strip()
         if summary and len(summary) > 20:
-            from app.services.postgres_core_service import add_agent_feedback_memory_pg
             add_agent_feedback_memory_pg(
                 "__CHAT__",
                 f"[Session {session_id[:20]} · {count} msgs] {summary}",
@@ -733,7 +735,6 @@ def _ai_command_sync(payload: dict) -> dict:
     import logging as _logging
     _ai_log = _logging.getLogger("ai.realtime")
     try:
-        from app.services.web_search_service import is_realtime_query, search_news, format_news_text
         _is_rt = bool(q and is_realtime_query(q))
         _ai_log.info("realtime_check query=%r is_realtime=%s", q[:80] if q else "", _is_rt)
         if _is_rt:
@@ -1066,7 +1067,6 @@ def ai_memory_bootstrap_guardrails():
 @router.post("/ai/feedback")
 def ai_feedback(payload: dict = Body(default={})):
     """Store thumbs-up/down feedback for an AI response."""
-    from app.services.postgres_core_service import store_ai_response_feedback
     rating = str((payload or {}).get("rating") or "").strip().lower()
     if rating not in {"up", "down"}:
         return {"ok": False, "error": "rating must be 'up' or 'down'"}
@@ -1148,7 +1148,11 @@ def ai_proactive_audit():
 def ai_morning_brief():
     cached = get_cached_morning_brief()
     if cached:
-        return cached
+        # Force regen if cached bullets contain filing-metadata garbage
+        _garbage = ('10-K', '10-Q', '8-K', '6-K', '20-F')
+        _cb = [str(b or "") for b in (cached.get("bullets") or [])]
+        if not any(b.endswith(g) for b in _cb for g in _garbage):
+            return cached
     return save_morning_brief_snapshot(limit_holdings=5, source="on_demand")
 
 
@@ -1207,11 +1211,6 @@ def ai_migration_bootstrap():
     return ensure_postgres_core_schema()
 
 
-@router.post("/ai/migration/sync-core")
-def ai_migration_sync_core():
-    return sync_core_from_sqlite()
-
-
 @router.post("/ai/migration/sync-universe")
 def ai_migration_sync_universe(background: int = Query(default=1)):
     if int(background or 0) == 0:
@@ -1241,11 +1240,6 @@ def ai_migration_sync_universe_status():
             "last_result": _SYNC_UNIVERSE_STATE.get("last_result"),
             "run_count": int(_SYNC_UNIVERSE_STATE.get("run_count") or 0),
         }
-
-
-@router.get("/ai/migration/verify-core")
-def ai_migration_verify_core():
-    return verify_core_counts()
 
 
 @router.post("/ai/migration/guard-core")
@@ -1296,7 +1290,6 @@ def ai_search_status():
     """Return the active web search engine tier and whether Brave API key is configured."""
     import os
     try:
-        from app.services.web_search_service import get_search_engine_status
         engine = get_search_engine_status()
     except Exception as exc:
         return {"ok": False, "error": str(exc), "engine": "unknown", "brave_configured": False}

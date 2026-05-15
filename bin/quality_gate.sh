@@ -8,7 +8,7 @@ cd "$ROOT_DIR"
 if [ -x "$ROOT_DIR/.venv-memory/bin/python" ]; then
   PY="$ROOT_DIR/.venv-memory/bin/python"
 else
-  PY=""$PY""
+  PY="python3"
 fi
 
 echo "[quality-gate] Syntax check (py_compile)..."
@@ -19,6 +19,15 @@ ruff check app --select E9,F63,F7,F82
 
 echo "[quality-gate] DRY audit..."
 "$PY" bin/check_dry.py
+
+echo "[quality-gate] Architecture cycles (warn mode)..."
+"$PY" bin/check_import_cycles.py || true
+
+echo "[quality-gate] Architecture structure (warn mode)..."
+"$PY" bin/check_code_structure.py || true
+
+echo "[quality-gate] Hot-path silent-pass guard..."
+"$PY" bin/check_hotpath_silent_pass.py
 
 echo "[quality-gate] AI data-policy audit..."
 "$PY" bin/check_ai_data_policy.py

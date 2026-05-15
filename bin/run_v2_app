@@ -38,22 +38,20 @@ fi
 
 echo "Dashboard URL: http://${HOST}:${PORT}/dashboard"
 
-# Optional one-time bootstrap from SQLite.
-# Disabled by default to keep startup fast and avoid hybrid behavior.
+# Optional one-time Postgres schema/bootstrap check.
+# Disabled by default to keep startup fast.
 if [ "${CORE_DB_BACKEND:-sqlite}" = "postgres" ] && [ "${CORE_DB_BOOTSTRAP_FROM_SQLITE:-0}" = "1" ]; then
   if [ -x "$ROOT/.venv-memory/bin/python" ]; then
     "$ROOT/.venv-memory/bin/python" - <<'PY' >/dev/null 2>&1 || true
-from app.services.postgres_core_service import ensure_postgres_core_schema, sync_core_from_sqlite, verify_core_counts
+from app.services.postgres_core_service import ensure_postgres_core_schema, verify_postgres_core_ready
 ensure_postgres_core_schema()
-sync_core_from_sqlite()
-verify_core_counts()
+verify_postgres_core_ready()
 PY
   else
     python3 - <<'PY' >/dev/null 2>&1 || true
-from app.services.postgres_core_service import ensure_postgres_core_schema, sync_core_from_sqlite, verify_core_counts
+from app.services.postgres_core_service import ensure_postgres_core_schema, verify_postgres_core_ready
 ensure_postgres_core_schema()
-sync_core_from_sqlite()
-verify_core_counts()
+verify_postgres_core_ready()
 PY
   fi
 fi

@@ -188,6 +188,52 @@ def get_today_calendar_events(limit: int = 20) -> list[dict[str, str]]:
     return out
 
 
+def get_month_calendar_events(year: int, month: int, limit: int = 100) -> list[dict[str, str]]:
+    """Fetch all Google Calendar events for a given month."""
+    creds = _credentials()
+    if creds is None:
+        return []
+    from googleapiclient.discovery import build
+    import calendar as _cal
+
+    now = dt.datetime.now().astimezone()
+    first_day = dt.datetime(year, month, 1, tzinfo=now.tzinfo)
+    last_day_num = _cal.monthrange(year, month)[1]
+    last_day = dt.datetime(year, month, last_day_num, 23, 59, 59, tzinfo=now.tzinfo)
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    res = (
+        service.events()
+        .list(
+            calendarId="primary",
+            timeMin=first_day.isoformat(),
+            timeMax=last_day.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=max(1, min(200, int(limit))),
+        )
+        .execute()
+    )
+    out: list[dict[str, str]] = []
+    for it in res.get("items", []) or []:
+        start_obj = it.get("start") or {}
+        raw_time = str(start_obj.get("dateTime") or start_obj.get("date") or "")
+        title = str(it.get("summary") or "(No title)").strip()
+        time_label = "All day"
+        event_date = ""
+        if "T" in raw_time:
+            try:
+                t = dt.datetime.fromisoformat(raw_time.replace("Z", "+00:00")).astimezone(now.tzinfo)
+                time_label = t.strftime("%H:%M")
+                event_date = t.strftime("%Y-%m-%d")
+            except Exception:
+                time_label = raw_time[11:16] if len(raw_time) >= 16 else raw_time
+                event_date = raw_time[:10] if len(raw_time) >= 10 else ""
+        else:
+            event_date = raw_time[:10] if len(raw_time) >= 10 else ""
+        out.append({"date": event_date, "time": time_label, "title": title})
+    return out
+
+
 def get_priority_emails(limit: int = 8) -> list[dict[str, str]]:
     creds = _credentials()
     if creds is None:

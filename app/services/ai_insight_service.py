@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import sqlite3
 from collections import Counter, defaultdict
 from typing import Any
 
-from app.core.db import core_conn as _conn, sqlite_retry
 from app.core.normalize import normalize_text as _norm
 from app.services.portfolio_memory_service import get_holdings, query_report_facts
-from app.services.postgres_core_service import core_backend, pg_connect
+from app.services.postgres_core_service import pg_connect
 
 try:
     from tools.llm_engine import ask_ai
@@ -18,102 +16,59 @@ except Exception:
 
 
 def ensure_ai_insight_schema() -> None:
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is None:
-            return
+    con_pg = pg_connect()
+    if con_pg is None:
+        return
+    try:
+        cur = con_pg.cursor()
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS ai_meta_suggestions_core (
+                id BIGSERIAL PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                priority DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                source TEXT NOT NULL DEFAULT 'heuristic',
+                status TEXT NOT NULL DEFAULT 'open'
+            )"""
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_created ON ai_meta_suggestions_core(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_status ON ai_meta_suggestions_core(status, priority DESC)")
+        con_pg.commit()
+    except Exception:
         try:
-            cur = con_pg.cursor()
-            cur.execute(
-                """CREATE TABLE IF NOT EXISTS ai_meta_suggestions_core (
-                    id BIGSERIAL PRIMARY KEY,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    category TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    priority DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-                    source TEXT NOT NULL DEFAULT 'heuristic',
-                    status TEXT NOT NULL DEFAULT 'open'
-                )"""
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_created ON ai_meta_suggestions_core(created_at DESC)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_core_status ON ai_meta_suggestions_core(status, priority DESC)")
-            con_pg.commit()
-            return
+            con_pg.rollback()
         except Exception:
-            try:
-                con_pg.rollback()
-            except Exception:
-                pass
-            return
-        finally:
-            con_pg.close()
-
-    def _write() -> None:
-        con = _conn()
-        try:
-            con.execute(
-                """CREATE TABLE IF NOT EXISTS ai_meta_suggestions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    detail_json TEXT NOT NULL DEFAULT '{}',
-                    priority REAL NOT NULL DEFAULT 0.0,
-                    source TEXT NOT NULL DEFAULT 'heuristic',
-                    status TEXT NOT NULL DEFAULT 'open'
-                )"""
-            )
-            con.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_created ON ai_meta_suggestions(created_at DESC)")
-            con.execute("CREATE INDEX IF NOT EXISTS idx_ai_meta_suggestions_status ON ai_meta_suggestions(status, priority DESC)")
-            con.commit()
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
+            pass
+    finally:
+        con_pg.close()
 
 
 def _recent_quality_rows(days: int = 30) -> list[dict[str, Any]]:
     ensure_ai_insight_schema()
     since = (dt.datetime.now() - dt.timedelta(days=max(1, int(days or 30)))).isoformat()
-
-    if core_backend() == "postgres":
-        try:
-            con_pg = pg_connect()
-            if con_pg is not None:
-                try:
-                    cur = con_pg.cursor()
-                    cur.execute(
-                        """SELECT created_at, event_type, query, detail_json
-                           FROM ai_quality_log_core
-                           WHERE created_at >= %s
-                           ORDER BY id DESC
-                           LIMIT 6000""",
-                        (since,),
-                    )
-                    cols = [d[0] for d in cur.description] if cur.description else []
-                    return [dict(zip(cols, r)) for r in cur.fetchall()]
-                finally:
-                    con_pg.close()
-        except Exception:
-            pass
-        return []
-
-    con = _conn()
     try:
-        rows = con.execute(
-            """SELECT created_at, event_type, query, detail_json
-               FROM ai_quality_log
-               WHERE created_at >= ?
-               ORDER BY id DESC
-               LIMIT 6000""",
-            (since,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+        con_pg = pg_connect()
+        if con_pg is not None:
+            try:
+                cur = con_pg.cursor()
+                cur.execute(
+                    """SELECT created_at, event_type, query, detail_json
+                       FROM ai_quality_log_core
+                       WHERE created_at >= %s
+                       ORDER BY id DESC
+                       LIMIT 6000""",
+                    (since,),
+                )
+                cols = [d[0] for d in cur.description] if cur.description else []
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+            finally:
+                con_pg.close()
+    except Exception:
+        return []
+    return []
 
 
 def _build_missing_tool_suggestions(rows: list[dict[str, Any]], min_count: int = 4) -> list[dict[str, Any]]:
@@ -364,166 +319,89 @@ def run_ai_meta_suggestions(days: int = 30) -> dict[str, Any]:
     created = 0
     now = dt.datetime.now().isoformat()
 
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is None:
-            return {"ok": False, "created": 0, "items": [], "error": "pg_unavailable"}
+    con_pg = pg_connect()
+    if con_pg is None:
+        return {"ok": False, "created": 0, "items": [], "error": "pg_unavailable"}
+    try:
+        cur = con_pg.cursor()
+        for s in sugg:
+            title = str(s.get("title") or "").strip()
+            category = str(s.get("category") or "").strip()
+            summary = str(s.get("summary") or "").strip()
+            if not title or not category or not summary:
+                continue
+            cur.execute(
+                """SELECT 1 FROM ai_meta_suggestions_core
+                   WHERE title=%s AND created_at>=NOW() - INTERVAL '7 days'
+                   LIMIT 1""",
+                (title,),
+            )
+            if cur.fetchone():
+                continue
+            cur.execute(
+                """INSERT INTO ai_meta_suggestions_core
+                   (created_at, category, title, summary, detail_json, priority, source, status)
+                   VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, 'open')""",
+                (
+                    now,
+                    category[:80],
+                    title[:240],
+                    summary[:1200],
+                    json.dumps(dict(s.get("detail") or {}), ensure_ascii=True),
+                    float(s.get("priority") or 0.0),
+                    str(s.get("source") or "heuristic")[:80],
+                ),
+            )
+            created += 1
+        con_pg.commit()
+        return {"ok": True, "created": created, "items": sugg}
+    except Exception as exc:
         try:
-            cur = con_pg.cursor()
-            for s in sugg:
-                title = str(s.get("title") or "").strip()
-                category = str(s.get("category") or "").strip()
-                summary = str(s.get("summary") or "").strip()
-                if not title or not category or not summary:
-                    continue
-                cur.execute(
-                    """SELECT 1 FROM ai_meta_suggestions_core
-                       WHERE title=%s AND created_at>=NOW() - INTERVAL '7 days'
-                       LIMIT 1""",
-                    (title,),
-                )
-                if cur.fetchone():
-                    continue
-                cur.execute(
-                    """INSERT INTO ai_meta_suggestions_core
-                       (created_at, category, title, summary, detail_json, priority, source, status)
-                       VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, 'open')""",
-                    (
-                        now,
-                        category[:80],
-                        title[:240],
-                        summary[:1200],
-                        json.dumps(dict(s.get("detail") or {}), ensure_ascii=True),
-                        float(s.get("priority") or 0.0),
-                        str(s.get("source") or "heuristic")[:80],
-                    ),
-                )
-                created += 1
-            con_pg.commit()
-            return {"ok": True, "created": created, "items": sugg}
-        except Exception as exc:
-            try:
-                con_pg.rollback()
-            except Exception:
-                pass
-            return {"ok": False, "created": created, "items": sugg, "error": str(exc)}
-        finally:
-            con_pg.close()
-
-    def _write() -> None:
-        nonlocal created
-        con = _conn()
-        try:
-            for s in sugg:
-                title = str(s.get("title") or "").strip()
-                category = str(s.get("category") or "").strip()
-                summary = str(s.get("summary") or "").strip()
-                if not title or not category or not summary:
-                    continue
-                # De-dup recent same title
-                r = con.execute(
-                    """SELECT 1 FROM ai_meta_suggestions
-                       WHERE title=? AND created_at>=?
-                       LIMIT 1""",
-                    (title, (dt.datetime.now() - dt.timedelta(days=7)).isoformat()),
-                ).fetchone()
-                if r:
-                    continue
-                con.execute(
-                    """INSERT INTO ai_meta_suggestions
-                       (created_at, category, title, summary, detail_json, priority, source, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 'open')""",
-                    (
-                        now,
-                        category[:80],
-                        title[:240],
-                        summary[:1200],
-                        json.dumps(dict(s.get("detail") or {}), ensure_ascii=True),
-                        float(s.get("priority") or 0.0),
-                        str(s.get("source") or "heuristic")[:80],
-                    ),
-                )
-                created += 1
-            con.commit()
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
-    return {"ok": True, "created": created, "items": sugg}
+            con_pg.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "created": created, "items": sugg, "error": str(exc)}
+    finally:
+        con_pg.close()
 
 
 def list_ai_meta_suggestions(limit: int = 30, status: str = "open") -> list[dict[str, Any]]:
     ensure_ai_insight_schema()
     st = str(status or "open").strip().lower()
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is None:
-            return []
-        try:
-            cur = con_pg.cursor()
-            cur.execute(
-                """SELECT id, created_at, category, title, summary, detail_json::text, priority, source, status
-                   FROM ai_meta_suggestions_core
-                   WHERE status=%s
-                   ORDER BY priority DESC, id DESC
-                   LIMIT %s""",
-                (st, max(1, min(300, int(limit or 30)))),
-            )
-            rows = cur.fetchall() or []
-        finally:
-            con_pg.close()
-        out: list[dict[str, Any]] = []
-        for r in rows:
-            d: dict[str, Any] = {}
-            try:
-                d = json.loads(str(r[5] or "{}"))
-            except Exception:
-                d = {}
-            out.append(
-                {
-                    "id": int(r[0] or 0),
-                    "created_at": str(r[1] or ""),
-                    "category": str(r[2] or ""),
-                    "title": str(r[3] or ""),
-                    "summary": str(r[4] or ""),
-                    "detail": d if isinstance(d, dict) else {},
-                    "priority": float(r[6] or 0.0),
-                    "source": str(r[7] or ""),
-                    "status": str(r[8] or ""),
-                }
-            )
-        return out
-
-    con = _conn()
+    con_pg = pg_connect()
+    if con_pg is None:
+        return []
     try:
-        rows = con.execute(
-            """SELECT id, created_at, category, title, summary, detail_json, priority, source, status
-               FROM ai_meta_suggestions
-               WHERE status=?
+        cur = con_pg.cursor()
+        cur.execute(
+            """SELECT id, created_at, category, title, summary, detail_json::text, priority, source, status
+               FROM ai_meta_suggestions_core
+               WHERE status=%s
                ORDER BY priority DESC, id DESC
-               LIMIT ?""",
+               LIMIT %s""",
             (st, max(1, min(300, int(limit or 30)))),
-        ).fetchall()
+        )
+        rows = cur.fetchall() or []
     finally:
-        con.close()
+        con_pg.close()
     out: list[dict[str, Any]] = []
     for r in rows:
-        d = {}
+        d: dict[str, Any] = {}
         try:
-            d = json.loads(str(r["detail_json"] or "{}"))
+            d = json.loads(str(r[5] or "{}"))
         except Exception:
             d = {}
         out.append(
             {
-                "id": int(r["id"] or 0),
-                "created_at": str(r["created_at"] or ""),
-                "category": str(r["category"] or ""),
-                "title": str(r["title"] or ""),
-                "summary": str(r["summary"] or ""),
+                "id": int(r[0] or 0),
+                "created_at": str(r[1] or ""),
+                "category": str(r[2] or ""),
+                "title": str(r[3] or ""),
+                "summary": str(r[4] or ""),
                 "detail": d if isinstance(d, dict) else {},
-                "priority": float(r["priority"] or 0.0),
-                "source": str(r["source"] or ""),
-                "status": str(r["status"] or ""),
+                "priority": float(r[6] or 0.0),
+                "source": str(r[7] or ""),
+                "status": str(r[8] or ""),
             }
         )
     return out

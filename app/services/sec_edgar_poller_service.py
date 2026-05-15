@@ -32,15 +32,33 @@ from typing import Any
 from app.core import cloud_files
 from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.events_service import create_event, process_event
-from app.services.postgres_core_service import core_backend, pg_connect
+from app.services.postgres_core_service import pg_connect
 
 # Material forms to poll (Form 4 excluded — high volume, low signal for background polling).
 # Include common proxy forms so /company_file/sec?form=PROXY has coverage from the same ingest path.
-POLL_FORMS = ("8-K", "10-Q", "10-K", "6-K", "20-F", "DEF 14A", "DEFA14A", "PRE 14A", "DEF 14C")
+_POLL_FORMS_DEFAULT = ("8-K", "10-Q", "10-K", "6-K", "20-F", "DEF 14A", "DEFA14A", "PRE 14A", "DEF 14C")
+
+
+def _poll_forms() -> tuple[str, ...]:
+    """Read poll forms from DB config, falling back to module default."""
+    try:
+        from app.services.ai_config_service import get_config
+        val = get_config("poll_forms", None)
+        if isinstance(val, list) and val:
+            return tuple(val)
+    except Exception:
+        pass
+    return _POLL_FORMS_DEFAULT
+
+
+POLL_FORMS = _POLL_FORMS_DEFAULT  # kept for any external references
 # How many recent filings to check per ticker per poll run
 PER_TICKER_LIMIT = 8
 # Keep DB content as a fast excerpt layer; full text stays on disk/GCS.
-FILING_CONTENT_MAX_CHARS = 15000
+# 10-K/10-Q/20-F need more text for risk factor extraction & diff.
+FILING_CONTENT_MAX_CHARS = 300_000
+_ANNUAL_FORMS = {"10-K", "10-Q", "20-F"}
+FILING_CONTENT_MAX_CHARS_ANNUAL = 1_500_000
 
 # Key tickers to monitor for cross-portfolio signals even if not held.
 # Seeded into signal_universe_core on first run; user can add/remove at runtime.
@@ -69,8 +87,6 @@ def _now() -> str:
 
 def ensure_poller_schema() -> None:
     """Create poll state + signal universe tables."""
-    if core_backend() != "postgres":
-        return
     con = pg_connect()
     if con is None:
         return
@@ -278,10 +294,13 @@ def _fetch_filing_metadata(ticker: str, forms: tuple[str, ...], limit: int = PER
         return []
 
 
-def _download_markdown(filing_obj: Any) -> str:
+def _download_markdown(filing_obj: Any, form: str = "") -> str:
     """Download and return filing text as markdown. Returns '' on failure."""
     try:
-        return str(filing_obj.markdown() or "").strip()[:80000]
+        raw = str(filing_obj.markdown() or "").strip()
+        # Annual/quarterly forms can be 200+ pages — allow up to 1.5M chars
+        limit = 1_500_000 if str(form or "").upper() in _ANNUAL_FORMS else 300_000
+        return raw[:limit]
     except Exception:
         return ""
 
@@ -322,13 +341,12 @@ def _upsert_filing_core(
     tk = _safe_ticker(ticker)
     if not tk or not accession:
         return 0
-    if core_backend() != "postgres":
-        return 0
     con = pg_connect()
     if con is None:
         return 0
     try:
-        content_excerpt = str(content or "")[:FILING_CONTENT_MAX_CHARS]
+        max_chars = FILING_CONTENT_MAX_CHARS_ANNUAL if str(form or "") in _ANNUAL_FORMS else FILING_CONTENT_MAX_CHARS
+        content_excerpt = str(content or "")[:max_chars]
         cur = con.cursor()
         # Check if this accession already exists for this ticker
         cur.execute(
@@ -422,7 +440,7 @@ def poll_ticker(
         filing_date = str(fi.get("filing_date") or "").strip()
         doc_url = str(fi.get("doc_url") or "").strip()
 
-        md_text = _download_markdown(fi["_obj"])
+        md_text = _download_markdown(fi["_obj"], form=form)
         path = _save_filing_text(tk, form, accession, md_text) if md_text else ""
 
         filing_id = _upsert_filing_core(
@@ -471,7 +489,7 @@ def poll_ticker(
 
 def poll_and_ingest_tickers(
     tickers: list[str] | None = None,
-    forms: tuple[str, ...] = POLL_FORMS,
+    forms: tuple[str, ...] | None = None,
     held_only: bool = False,
 ) -> dict[str, Any]:
     """
@@ -482,6 +500,8 @@ def poll_and_ingest_tickers(
     held_only=True  → skip signal universe (for 15-min edgar-watch job; reduces scope to
                        held/watchlist tickers only for low-latency detection runs)
     """
+    if forms is None:
+        forms = _poll_forms()
     ensure_poller_schema()
 
     if tickers is None:
@@ -555,7 +575,7 @@ _SHARES_PRICE = re.compile(
 
 def _is_significant_insider_trade(
     markdown_text: str,
-    threshold_usd: float = 500_000,
+    threshold_usd: float | None = None,
 ) -> dict[str, Any]:
     """
     Parse Form 4 markdown and determine if this is a significant insider trade.
@@ -563,6 +583,12 @@ def _is_significant_insider_trade(
     Filters IN: CEO/CFO/President + open-market sale (S) or purchase (P) + value > threshold.
     Filters OUT: option exercises (F/M/X), 10b5-1 plans, small transactions.
     """
+    if threshold_usd is None:
+        try:
+            from app.services.ai_config_service import get_config
+            threshold_usd = float(get_config("insider_trade_min_usd", 500_000))
+        except Exception:
+            threshold_usd = 500_000
     text = str(markdown_text or "")
     low = text.lower()
 
@@ -637,7 +663,7 @@ def poll_form4_for_tickers(
                 if not accession or _has_seen(tk, accession):
                     continue
                 filing_date = str(fi.get("filing_date") or "").strip()
-                md_text = _download_markdown(fi["_obj"])
+                md_text = _download_markdown(fi["_obj"], form="4")
                 if not md_text:
                     _mark_seen(tk, accession, "4", filing_date, 0)
                     continue

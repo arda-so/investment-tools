@@ -1,382 +1,420 @@
 {% extends "base.html" %}
-{% block title %}Portfolio | Investor OS v2{% endblock %}
+{% block title %}Portfolio | Investor OS{% endblock %}
 {% block head_extra %}
 <style>
+  /* ═══════════════════════════════════════════════════════════════
+     MY UNIVERSE — Modern Agentic Design
+  ═══════════════════════════════════════════════════════════════ */
   #uRoot {
     --bg: #f8fafc;
     --panel: #ffffff;
-    --line: #dbe4ee;
-    --ink: #1f2f46;
+    --panel2: #f1f5f9;
+    --line: #e2e8f0;
+    --ink: #1e293b;
     --muted: #64748b;
-    --navy: #1e293b;
     --up: #10b981;
     --down: #ef4444;
     --accent: #f47f5d;
+    --accent-soft: rgba(244,127,93,.08);
+    --accent-ink: #b5472f;
+    --up-soft: rgba(16,185,129,.08);
+    --down-soft: rgba(239,68,68,.08);
+    --down-ink: #b91c1c;
+    --info-soft: rgba(59,130,246,.08);
+    --info-ink: #1d4ed8;
     width: 100%;
     min-height: 100%;
-    overflow: visible;
     background: var(--bg);
     color: var(--ink);
     font-variant-numeric: tabular-nums;
   }
+  body.theme-dark #uRoot {
+    --bg: var(--bg);
+    --panel: var(--panel);
+    --panel2: var(--panel2);
+    --line: var(--border);
+    --ink: var(--text);
+    --muted: var(--muted);
+    --up: var(--up);
+    --down: var(--down);
+    --accent: var(--accent);
+    --accent-soft: rgba(244,127,93,.1);
+    --accent-ink: var(--accent);
+    --up-soft: rgba(16,185,129,.1);
+    --down-soft: rgba(239,68,68,.1);
+    --down-ink: var(--down);
+    --info-soft: rgba(99,102,241,.1);
+    --info-ink: #818cf8;
+  }
 
-  .u-shell { display:block; width:100%; height:auto; overflow:visible; }
-  .u-side { display:none; }
-  .u-brand { margin:0 0 12px 0; font-size:15px; font-weight:800; letter-spacing:.02em; }
-  .u-link {
-    display:block;
-    text-decoration:none;
-    color:#d9e5f4;
-    padding:8px 10px;
-    margin:3px 0;
-    border-left:2px solid transparent;
-    font-size:12px;
-    font-weight:700;
-  }
-  .u-link:hover { background: rgba(255,255,255,.06); border-left-color:#90a4c0; }
-  .u-link.active { background: rgba(255,255,255,.10); border-left-color:#fff; }
-  .u-meta { margin-top:12px; font-size:11px; color:#9fb0c5; line-height:1.4; }
+  /* ── Layout ── */
+  .mu-shell { max-width: 1440px; margin: 0 auto; padding: 0 28px 60px; }
 
-  .u-main { width:100%; height:auto; overflow:visible; background: var(--bg); }
-  .u-content { padding: 0; box-sizing:border-box; }
+  /* ── Header ── */
+  .mu-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 0 16px; gap: 12px; flex-wrap: wrap;
+  }
+  .mu-header-left { display: flex; align-items: baseline; gap: 12px; }
+  .mu-header-left h1 {
+    margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -.01em;
+  }
+  .mu-header-left .mu-sub { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .mu-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .mu-act {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px;
+    font-size: 11px; font-weight: 600; color: var(--ink);
+    background: var(--panel); cursor: pointer; text-decoration: none;
+    transition: all .15s;
+  }
+  .mu-act:hover { border-color: var(--accent); color: var(--accent); }
+  .mu-act.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .mu-act.primary:hover { filter: brightness(1.08); }
+  .mu-act-icon { font-size: 13px; }
 
-  .u-top {
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-    gap:8px;
-    flex-wrap:wrap;
-    margin-bottom: 4px;
+  /* ── Summary strip ── */
+  .mu-summary {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px; margin-bottom: 20px;
   }
-  .u-head-actions{
-    display:flex;
-    gap:6px;
-    align-items:center;
-    flex-wrap:wrap;
+  .mu-stat {
+    background: var(--panel); border-radius: 10px;
+    padding: 14px 16px; position: relative; overflow: hidden;
   }
-  .u-head-actions input,
-  .u-head-actions select{
-    width:100%;
-    box-sizing:border-box;
-    border:1px solid var(--line);
-    border-radius:10px;
-    height:34px;
-    padding:0 10px;
-    font-size:11px;
-    background:#fff;
-    color:var(--ink);
-  }
-  .u-head-actions input{ min-width:88px; }
-  .u-head-actions .ticker { min-width:92px; max-width:120px; }
-  .u-head-actions .qty { min-width:70px; max-width:90px; }
-  .u-head-actions .px { min-width:80px; max-width:100px; }
-  .u-head-actions .rs { min-width:110px; max-width:160px; }
+  .mu-stat-label { font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .mu-stat-val { font-size: 22px; font-weight: 800; margin: 2px 0 0; line-height: 1.15; }
+  .mu-stat-val.hero { font-size: 28px; font-weight: 900; }
+  .mu-stat-sub { font-size: 11px; font-weight: 600; margin-top: 2px; }
+  .mu-stat-sub.up { color: var(--up); }
+  .mu-stat-sub.down { color: var(--down); }
 
-  /* Ticker autocomplete dropdown */
-  .tkac-wrap { position:relative; display:inline-block; min-width:92px; max-width:180px; }
-  .tkac-wrap input {
-    width:100%; box-sizing:border-box;
-    border:1px solid var(--line); border-radius:10px;
-    height:34px; padding:0 10px; font-size:11px;
-    background:#fff; color:var(--ink);
+  /* ── Pipeline sections ── */
+  .mu-pipeline { display: flex; flex-direction: column; gap: 0; }
+  .mu-stage {
+    background: transparent; border: none;
+    border-radius: 0; padding: 4px 0 16px; margin-bottom: 8px;
+    border-bottom: 1px solid var(--line);
   }
-  .tkac-wrap input.tkac-confirmed { border-color:#10b981; background:#f0fdf4; }
-  .tkac-wrap input.tkac-error { border-color:#ef4444; }
-  .tkac-drop {
-    position:absolute; top:calc(100% + 3px); left:0; right:0; z-index:200;
-    background:#fff; border:1px solid var(--line); border-radius:10px;
-    box-shadow:0 8px 24px rgba(15,23,42,.14);
-    max-height:220px; overflow-y:auto; display:none;
+  .mu-stage:last-child { border-bottom: none; }
+  .mu-stage-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px; gap: 10px; flex-wrap: wrap;
   }
-  .tkac-drop.open { display:block; }
-  .tkac-item {
-    padding:7px 11px; cursor:pointer; font-size:11px;
-    display:flex; align-items:baseline; gap:7px;
+  .mu-stage-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 800; margin: 0;
   }
-  .tkac-item:hover, .tkac-item.focused { background:#f1f5f9; }
-  .tkac-item .tkac-sym { font-weight:700; color:var(--ink); min-width:44px; }
-  .tkac-item .tkac-nm { color:var(--muted); font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:120px; }
-  .tkac-item .tkac-ind { color:#94a3b8; font-size:9px; margin-left:auto; white-space:nowrap; }
-  .tkac-empty { padding:7px 11px; font-size:11px; color:var(--muted); }
-  .u-modal .tkac-wrap { min-width:0; max-width:100%; width:100%; }
-  .u-modal .tkac-wrap input { height:36px; font-size:12px; }
-  .edit-only{ display:none; }
-  #uRoot.edit-mode .edit-only{ display:flex; }
+  .mu-stage-badge {
+    font-size: 10px; font-weight: 700; padding: 2px 8px;
+    border-radius: 20px; background: var(--panel2); color: var(--muted);
+  }
+  .mu-stage-links { display: flex; gap: 6px; align-items: center; }
+  .mu-stage-link {
+    font-size: 11px; font-weight: 600; color: var(--accent);
+    text-decoration: none; padding: 4px 10px; border: 1px solid var(--accent);
+    border-radius: 7px; transition: all .15s;
+  }
+  .mu-stage-link:hover { background: var(--accent); color: #fff; }
+  .mu-flow-arrow { display: none; }
+
+  /* ── Portfolio table ── */
+  .mu-table-wrap {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden;
+  }
+  .mu-table { width: 100%; border-collapse: collapse; }
+  .mu-table th {
+    font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--muted); padding: 8px 10px; text-align: left;
+    border-bottom: 1px solid var(--line); font-weight: 700;
+    background: var(--panel2);
+  }
+  .mu-table td {
+    font-size: 13px; color: var(--ink); padding: 10px;
+    border-bottom: 1px solid var(--line); vertical-align: middle;
+  }
+  .mu-table tbody tr:last-child td { border-bottom: none; }
+  .mu-table tbody tr { transition: background .1s; }
+  .mu-table tbody tr:hover { background: var(--panel2); }
+  .mu-table .mu-tk {
+    font-weight: 800; font-size: 13px; letter-spacing: .01em;
+    text-decoration: none; color: var(--ink);
+  }
+  .mu-table .mu-tk:hover { color: var(--accent); }
+  .mu-table .mu-name { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .mu-day-pill {
+    display: inline-block; border-radius: 20px; padding: 2px 8px;
+    font-size: 11px; font-weight: 700; color: #fff;
+  }
+  .mu-day-pill.up { background: var(--up); }
+  .mu-day-pill.down { background: var(--down); }
+  .mu-weight-bar {
+    width: 100%; height: 5px; border-radius: 999px;
+    background: var(--panel2); overflow: hidden; margin-top: 3px;
+  }
+  .mu-weight-fill {
+    height: 100%; border-radius: 999px;
+    background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  }
+  .mu-weight-val { font-size: 11px; color: var(--muted); font-weight: 600; }
+  /* ── Edit mode ── */
+  .edit-only { display: none; }
+  #uRoot.edit-mode .edit-only { display: flex; }
   #uRoot.edit-mode th.edit-only,
-  #uRoot.edit-mode td.edit-only{ display:table-cell; }
-  #uRoot.edit-mode .edit-only.block{ display:block; }
-  .u-hidden{ display:none !important; }
+  #uRoot.edit-mode td.edit-only { display: table-cell; }
+  #uRoot.edit-mode .edit-only.block { display: block; }
 
-  .u-modal-backdrop{
-    position:fixed; inset:0; background:rgba(15,23,42,.35);
-    z-index:80; display:none; align-items:center; justify-content:center; padding:14px;
+  .mu-mini-actions { display: flex; gap: 5px; }
+  .mu-mini-act {
+    border: 1px solid var(--line); background: var(--panel);
+    border-radius: 6px; padding: 3px 8px; font-size: 10px;
+    font-weight: 700; cursor: pointer; color: var(--ink);
   }
-  .u-modal{
-    width:min(480px, 96vw); background:#fff; border:1px solid var(--line); border-radius:12px; padding:12px;
-    box-shadow:0 10px 30px rgba(15,23,42,.22);
-  }
-  .u-modal h4{ margin:0 0 8px 0; font-size:16px; }
-  .u-modal-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .u-modal input,.u-modal select{
-    width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:10px; height:36px; padding:0 10px; font-size:12px;
-  }
-  .u-modal-actions{ display:flex; justify-content:flex-end; gap:8px; margin-top:10px; }
-  .u-title { margin:0; font-size:24px; font-weight:800; letter-spacing:.01em; }
-  .u-sub { margin:2px 0 0 0; font-size:12px; color:var(--muted); }
-  .u-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  .u-btn {
-    border:1px solid var(--line);
-    background:#fff;
-    color:var(--ink);
-    border-radius:10px;
-    padding:7px 11px;
-    font-size:11px;
-    font-weight:700;
-    text-decoration:none;
-    cursor:pointer;
-  }
-  .u-btn.primary { border-color:var(--accent); background:var(--accent); color:#fff; }
+  .mu-mini-act.danger { border-color: var(--down); color: var(--down-ink); background: var(--down-soft); }
+  .mu-mini-act.primary { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
 
-  .u-score {
-    background: var(--panel);
-    border:1px solid var(--line);
-    border-radius:14px;
-    box-shadow: 0 4px 14px rgba(20,42,66,.04);
-    display:grid;
-    grid-template-columns:1.5fr 1fr 1fr 1fr;
-    gap:0;
-    overflow:hidden;
-    margin-bottom:12px;
+  /* ── Ticker autocomplete ── */
+  .tkac-wrap { position: relative; display: inline-block; min-width: 92px; max-width: 180px; }
+  .tkac-wrap input {
+    width: 100%; box-sizing: border-box;
+    border: 1px solid var(--line); border-radius: 8px;
+    height: 32px; padding: 0 10px; font-size: 11px;
+    background: var(--panel); color: var(--ink);
   }
-  .u-score .cell {
-    padding:7px 10px 6px;
-    border-right:1px solid #e7edf4;
-    position:relative;
-    overflow:hidden;
+  .tkac-wrap input.tkac-confirmed { border-color: var(--up); background: var(--up-soft); }
+  .tkac-wrap input.tkac-error { border-color: var(--down); }
+  .tkac-drop {
+    position: absolute; top: calc(100% + 3px); left: 0; right: 0; z-index: 200;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(15,23,42,.14);
+    max-height: 200px; overflow-y: auto; display: none;
   }
-  .u-score .cell:last-child { border-right:none; }
-  .u-k { font-size:11px; color:var(--muted); }
-  .u-v { font-size:18px; font-weight:800; line-height:1.2; }
-  .u-aum { font-size:30px; font-weight:900; line-height:1.05; letter-spacing:.01em; }
-  .u-pnl { margin-top:1px; font-size:11px; font-weight:800; }
-  .u-kpi-sub { margin-top:1px; font-size:10px; color:var(--muted); }
-  .u-pnl.up { color: var(--up); }
-  .u-pnl.down { color: var(--down); }
-  .u-sparkline {
-    position:absolute;
-    right:7px;
-    bottom:2px;
-    width:96px;
-    height:24px;
-    opacity:.25;
-    pointer-events:none;
+  .tkac-drop.open { display: block; }
+  .tkac-item {
+    padding: 7px 11px; cursor: pointer; font-size: 11px;
+    display: flex; align-items: baseline; gap: 7px;
   }
-  .u-sparkline path {
-    fill:none;
-    stroke:#5b7fa3;
-    stroke-width:2;
-    stroke-linecap:round;
-    stroke-linejoin:round;
-  }
-  .u-sparkline.up path { stroke:#10b981; }
-  .u-sparkline.down path { stroke:#ef4444; }
+  .tkac-item:hover, .tkac-item.focused { background: var(--panel2); }
+  .tkac-item .tkac-sym { font-weight: 700; color: var(--ink); min-width: 44px; }
+  .tkac-item .tkac-nm { color: var(--muted); font-size: 10px; }
+  .tkac-item .tkac-ind { color: var(--muted); font-size: 9px; margin-left: auto; }
+  .tkac-empty { padding: 7px 11px; font-size: 11px; color: var(--muted); }
 
-  .u-grid {
-    display:grid;
-    grid-template-columns: 1fr;
-    gap:12px;
-    align-items:start;
+  /* ── Quick add forms ── */
+  .mu-add-form {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
   }
-  .u-grid-bottom {
-    display:grid;
-    grid-template-columns: 1fr;
-    gap:12px;
+  .mu-add-form input, .mu-add-form select {
+    height: 32px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 0 10px; font-size: 11px; background: var(--panel); color: var(--ink);
+    box-sizing: border-box;
   }
-  @media (min-width:1100px){
-    .u-grid-bottom { grid-template-columns: 1fr 1fr; }
-  }
+  .mu-add-form .ticker { min-width: 92px; max-width: 120px; }
+  .mu-add-form .qty { min-width: 70px; max-width: 90px; }
+  .mu-add-form .px { min-width: 80px; max-width: 100px; }
+  .mu-add-form .rs { min-width: 100px; max-width: 150px; }
 
-  .u-card {
-    background:#fff;
-    border:1px solid var(--line);
-    border-radius:12px;
-    padding:12px;
-    box-shadow:0 2px 8px rgba(20,42,66,.03);
+  /* ── Watchlist / Blue Chips card grid ── */
+  .mu-card-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 10px;
   }
-  .u-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
-  .u-head h3 { margin:0; font-size:17px; font-weight:800; }
-  .u-note { font-size:12px; color:var(--muted); }
-
-  table { width:100%; border-collapse:collapse; }
-  th, td { border-bottom:1px solid #e7edf4; text-align:left; vertical-align:top; }
-  th { font-size:10px; letter-spacing:.05em; text-transform:uppercase; color:#6b8197; padding:6px 6px; }
-  td { font-size:12px; color:#2d4258; padding:6px 6px; }
-  .u-ticker { font-weight:800; letter-spacing:.01em; }
-  .u-ticker-pill {
-    display:inline-block;
-    border:1px solid #cfdbeb;
-    background:#eef5ff;
-    border-radius:999px;
-    padding:2px 8px;
-    font-size:10px;
-    font-weight:800;
-    color:#335273;
-    text-decoration:none;
+  .mu-ticker-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; transition: all .15s; position: relative;
+    display: flex; flex-direction: column; gap: 8px;
   }
-  .u-day-pill {
-    display:inline-block;
-    border-radius:999px;
-    padding:2px 8px;
-    font-size:10px;
-    font-weight:800;
-    color:#fff;
+  .mu-ticker-card:hover { border-color: var(--accent); box-shadow: 0 2px 12px rgba(15,23,42,.06); }
+  .mu-ticker-card-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
   }
-  .u-day-pill.up { background: var(--up); }
-  .u-day-pill.down { background: var(--down); }
-  .u-weight {
-    min-width:120px;
+  .mu-ticker-card-left { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .mu-ticker-card .mu-tk {
+    font-weight: 800; font-size: 15px; text-decoration: none; color: var(--ink);
+    letter-spacing: .01em;
   }
-  .u-weight-val { font-size:11px; color:#4f6277; margin-bottom:3px; }
-  .u-weight-bar {
-    width:100%;
-    height:6px;
-    border-radius:999px;
-    background:#e8eef6;
-    overflow:hidden;
+  .mu-ticker-card .mu-tk:hover { color: var(--accent); }
+  .mu-ticker-card .mu-cname {
+    font-size: 11px; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; min-width: 0;
   }
-  .u-weight-fill {
-    height:100%;
-    background:linear-gradient(90deg, #5c84b8, #2f5f98);
+  .mu-ticker-card-price {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .mu-ticker-card-px { font-size: 14px; font-weight: 700; color: var(--ink); }
+  .mu-ticker-card-day {
+    font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 20px;
+  }
+  .mu-ticker-card-day.up { background: var(--up-soft); color: var(--up); }
+  .mu-ticker-card-day.down { background: var(--down-soft); color: var(--down); }
+  .mu-ticker-card-meta {
+    display: flex; gap: 12px; font-size: 11px; color: var(--muted);
+  }
+  .mu-ticker-card-meta span { white-space: nowrap; }
+  .mu-ticker-card-meta .label { font-weight: 600; color: var(--muted); }
+  .mu-ticker-card-meta .val { font-weight: 700; color: var(--ink); }
+  .mu-ticker-card-meta .val.up { color: var(--up); }
+  .mu-ticker-card-meta .val.down { color: var(--down); }
+  .mu-ticker-card-thesis {
+    font-size: 11px; color: var(--muted); line-height: 1.45;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .mu-ticker-card-thesis a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .mu-ticker-card-thesis a:hover { text-decoration: underline; }
+  .mu-ticker-card-target {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: 700; color: var(--info-ink);
+    background: var(--info-soft); padding: 2px 8px; border-radius: 20px;
+  }
+  .mu-ticker-card-remove {
+    display: none; position: absolute; top: 8px; right: 8px;
+    border: 1px solid var(--down); color: var(--down-ink);
+    background: var(--down-soft); border-radius: 6px; padding: 2px 8px;
+    font-size: 10px; font-weight: 700; cursor: pointer;
+  }
+  .edit-mode .mu-ticker-card-remove { display: inline-block; }
+  .mu-card-empty {
+    grid-column: 1 / -1; text-align: center; padding: 24px;
+    color: var(--muted); font-size: 12px;
   }
 
-  .u-radar-name {
-    font-size:11px;
-    color:var(--muted);
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis;
+  /* ── Idea List ── */
+  .mu-idea-list { display: flex; flex-direction: column; gap: 0; }
+  .mu-idea-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-bottom: 1px solid var(--line);
+  }
+  .mu-idea-row:last-child { border-bottom: none; }
+  .mu-idea-title { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; }
+  .mu-idea-ticker {
+    font-size: 11px; font-weight: 700; color: var(--accent);
+    background: var(--accent-soft); padding: 2px 8px; border-radius: 20px;
+  }
+  .mu-idea-meta { font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .mu-idea-actions { display: flex; gap: 4px; }
+  .mu-idea-act {
+    font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    cursor: pointer;
+  }
+  .mu-idea-act:hover { border-color: var(--accent); color: var(--accent); }
+  .mu-idea-act.promote { border-color: var(--up); color: var(--up); }
+  .mu-idea-act.promote:hover { background: var(--up); color: #fff; }
+
+  /* ── Idea capture bar ── */
+  .mu-idea-capture {
+    display: flex; gap: 8px; align-items: center; padding: 10px 0 0;
+    border-top: 1px solid var(--line);
+  }
+  .mu-idea-input {
+    flex: 1; height: 32px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 0 12px; font-size: 12px; background: var(--panel); color: var(--ink);
+    box-sizing: border-box;
+  }
+  .mu-idea-input:focus { outline: none; border-color: var(--accent); }
+  .mu-idea-save {
+    padding: 6px 14px; background: var(--accent); color: #fff;
+    border: none; border-radius: 8px; font-size: 11px; font-weight: 700;
+    cursor: pointer;
   }
 
-  .u-insights {
-    margin-top:12px;
-    display:grid;
-    grid-template-columns:1fr;
-    gap:10px;
+  /* ── Insights feed ── */
+  .mu-insights {
+    display: grid; grid-template-columns: 1fr; gap: 10px;
+    margin: 8px 0 20px;
   }
-  @media (min-width:1100px){ .u-insights { grid-template-columns:1fr 1fr; } }
-  .u-insight {
-    border:1px solid #dbe4ee;
-    border-radius:12px;
-    padding:10px 12px;
-    background:#fff8e8;
-    font-size:12px;
-    color:#4f6277;
+  @media (min-width: 900px) { .mu-insights { grid-template-columns: 1fr 1fr; } }
+  .mu-insight-card {
+    border-left: 3px solid #eab308; border-radius: 10px;
+    padding: 12px 16px; background: rgba(234,179,8,.06);
+    font-size: 12px; color: var(--ink);
   }
-  .u-insight.blue { background:#eef6ff; }
+  .mu-insight-card.blue { border-left-color: #6366f1; background: var(--info-soft); }
+  .mu-insight-card strong { font-size: 13px; }
+  .mu-insight-card ul { margin: 6px 0 0 16px; padding: 0; }
+  .mu-insight-card li { margin-bottom: 3px; }
 
-  .u-timeline {
-    margin-top:12px;
-    border:1px solid #dbe4ee;
-    border-radius:12px;
-    background:#fff;
-    overflow:hidden;
+  /* ── Activity timeline ── */
+  .mu-timeline { margin-top: 0; }
+  .mu-timeline-toggle {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 700; color: var(--muted);
+    cursor: pointer; padding: 10px 0; user-select: none;
+    border: none; background: none;
   }
-  .u-timeline table { width:100%; border-collapse:collapse; }
-  .u-timeline th, .u-timeline td { padding:8px 10px; border-bottom:1px solid #edf2f8; font-size:12px; }
-  .u-timeline th { background:#f8fbff; font-size:10px; color:#6b8197; text-transform:uppercase; letter-spacing:.05em; }
-  .u-timeline .kind {
-    display:inline-block;
-    border-radius:999px;
-    padding:2px 8px;
-    font-size:10px;
-    font-weight:800;
-    border:1px solid #d3deed;
-    background:#f4f8ff;
-    color:#365273;
+  .mu-timeline-toggle:hover { color: var(--ink); }
+  .mu-timeline-chevron { transition: transform .2s; display: inline-block; }
+  .mu-timeline-chevron.open { transform: rotate(90deg); }
+  .mu-timeline-body { display: none; }
+  .mu-timeline-body.open { display: block; }
+  .mu-tl-item {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 7px 0; border-bottom: 1px solid var(--line);
+    font-size: 12px;
   }
-  .u-timeline .detail {
-    max-width:420px;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis;
+  .mu-tl-item:last-child { border-bottom: none; }
+  .mu-tl-icon {
+    width: 26px; height: 26px; border-radius: 7px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; flex-shrink: 0; background: var(--panel2);
   }
-  @media (max-width:980px){
-    .u-timeline .detail { max-width:220px; }
-  }
+  .mu-tl-icon.buy { background: var(--up-soft); }
+  .mu-tl-icon.sell { background: var(--down-soft); }
+  .mu-tl-icon.watch { background: var(--info-soft); }
+  .mu-tl-icon.cash { background: rgba(234,179,8,.1); }
+  .mu-tl-body { flex: 1; min-width: 0; }
+  .mu-tl-text { color: var(--ink); }
+  .mu-tl-text strong { font-weight: 700; }
+  .mu-tl-time { font-size: 10px; color: var(--muted); margin-top: 1px; }
 
-  .u-drawer { margin-top:8px; display:none; gap:8px; }
-  .u-drawer.open { display:grid; }
-  .u-drawer.positions { grid-template-columns:140px 120px 120px 1fr auto; }
-  .u-drawer.cash { grid-template-columns:120px 1fr auto; }
-  .u-drawer input {
-    border:1px solid var(--line);
-    border-radius:10px;
-    height:40px;
-    padding:0 10px;
-    font-size:12px;
-    box-sizing:border-box;
-    width:100%;
+  /* ── Modal ── */
+  .mu-modal-backdrop {
+    position: fixed; inset: 0; background: rgba(15,23,42,.35);
+    z-index: 80; display: none; align-items: center; justify-content: center; padding: 14px;
   }
-  .u-drawer select {
-    border:1px solid var(--line);
-    border-radius:10px;
-    height:40px;
-    padding:0 10px;
-    font-size:12px;
-    box-sizing:border-box;
-    width:100%;
-    background:#fff;
-    color:var(--ink);
+  .mu-modal {
+    width: min(480px, 96vw); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px; box-shadow: 0 10px 30px rgba(15,23,42,.22);
   }
+  .mu-modal h4 { margin: 0 0 10px; font-size: 16px; font-weight: 800; }
+  .mu-modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .mu-modal input, .mu-modal select {
+    width: 100%; box-sizing: border-box; border: 1px solid var(--line);
+    border-radius: 8px; height: 36px; padding: 0 10px; font-size: 12px;
+    background: var(--panel); color: var(--ink);
+  }
+  .mu-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 
-  .u-mini-actions{display:flex; gap:6px; flex-wrap:wrap;}
-  .u-mini-action{
-    border:1px solid #d7e2ef;
-    background:#fff;
-    border-radius:8px;
-    padding:3px 8px;
-    font-size:10px;
-    font-weight:700;
-    cursor:pointer;
-    color:#2d4258;
+  .sv { } /* privacy mask target */
+  .u-privacy-mask { letter-spacing: .08em; }
+
+  /* ── Drag & drop ── */
+  .mu-dnd-row { cursor: grab; }
+  .mu-dropzone {
+    border: 1px dashed var(--line); background: var(--panel2); color: var(--muted);
+    border-radius: 8px; padding: 6px 8px; font-size: 10px; font-weight: 700;
   }
-  .u-mini-action.danger{border-color:#fecaca;color:#b91c1c;background:#fff5f5;}
-  .u-mini-action.primary{border-color:#f9b39f;background:#fff3ef;color:#b5472f;}
-  .u-dnd-row{ cursor:grab; }
-  .u-dropzone{
-    border:1px dashed #cbd5e1;
-    background:#f8fafc;
-    color:#475569;
-    border-radius:8px;
-    padding:6px 8px;
-    font-size:10px;
-    font-weight:700;
-  }
-  .u-dropzone.drag-over{
-    border-color:#f47f5d;
-    background:#fff3ef;
-    color:#b5472f;
-  }
-  .u-card.drop-over{
-    box-shadow: 0 0 0 2px #f47f5d inset;
-    background:#fffaf7;
+  .mu-dropzone.drag-over { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+  .mu-stage.drop-over { background: var(--accent-soft); border-radius: 12px; }
+
+  /* ── Cash quick form ── */
+  .mu-cash-form { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+  .mu-cash-form select, .mu-cash-form input {
+    height: 32px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 0 10px; font-size: 11px; background: var(--panel); color: var(--ink);
+    box-sizing: border-box;
   }
 
-  .u-tabs { display:flex; gap:8px; flex-wrap:wrap; }
-  .u-tab.active { border-color:#f47f5d; background:#fff1ec; color:#b5472f; }
-  .u-privacy-mask{letter-spacing:.08em;}
-
-  @media (max-width:900px){
-    .u-shell { display:block; height:auto; }
-    .u-side { display:none; }
-    .u-content { padding:0; }
-    .u-score { grid-template-columns:1fr 1fr; }
-    .u-score .cell:nth-child(2) { border-right:none; }
-    .u-head-actions{ width:100%; }
-    .u-drawer.positions, .u-drawer.cash { grid-template-columns:1fr; }
+  @media (max-width: 768px) {
+    .mu-summary { grid-template-columns: 1fr 1fr; }
+    .mu-header { flex-direction: column; align-items: flex-start; }
+    .mu-card-grid { grid-template-columns: 1fr; }
   }
 </style>
 {% endblock %}
+
 {% block body %}
 {% set tv = (tab|default('all')|lower) %}
 {% if tv not in ['all', 'portfolio', 'watchlist', 'bluechips'] %}{% set tv = 'all' %}{% endif %}
@@ -388,278 +426,357 @@
 {% set cash_pct_of_aum = (((metrics.cash_value_usd or 0) / (metrics.aum_usd or 1) * 100) if (metrics.aum_usd or 0) > 0 else 0.0) %}
 
 <div id="uRoot">
-  <div class="u-shell">
-    <aside class="u-side">
-      <h3 class="u-brand">Investor OS v2</h3>
-      <a class="u-link" href="/dashboard">Home</a>
-      <a class="u-link {% if tv in ['all','portfolio'] %}active{% endif %}" href="/my_universe?tab=portfolio">Portfolio</a>
-      <a class="u-link {% if tv == 'watchlist' %}active{% endif %}" href="/my_universe?tab=watchlist">Watchlist</a>
-      <a class="u-link {% if tv == 'bluechips' %}active{% endif %}" href="/my_universe?tab=bluechips">Blue Chips</a>
-      <a class="u-link" href="/company_file">Files</a>
-      <a class="u-link" href="/memory">Memory</a>
-      <div class="u-meta">Generated: {{ generated_at or '-' }}</div>
-    </aside>
+<div class="mu-shell">
 
-    <main class="u-main">
-      <div class="u-content">
-        <div class="u-top">
-          <div>
-            <h2 class="u-title">Portfolio</h2>
-            <div class="u-sub">Overview</div>
-          </div>
-          <div class="u-actions">
-            <form method="post" action="/company_file/sec-sync-my?return_to=my_universe" style="margin:0;">
-              <button type="submit" class="u-btn">Sync SEC</button>
-            </form>
-            <button type="button" class="u-btn" id="toggleEdit">Edit</button>
-            <button type="button" class="u-btn" id="togglePrivacy">Show Values</button>
-          </div>
-        </div>
-
-        <div class="u-score">
-          <div class="cell">
-            <div class="u-k">Net Liquidity (AUM)</div>
-            <div class="u-aum"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.aum_usd or 0))|e }}">{{ (metrics.aum_usd or 0)|abbr_money }}</span></div>
-            <div class="u-pnl {% if aum_day_pnl >= 0 %}up{% else %}down{% endif %}">
-              Today: <span class="sv" data-raw="{{ ('{:+,.2f}'.format(aum_day_pnl or 0))|e }}">{{ "{:+,.2f}".format(aum_day_pnl or 0) }}</span> (<span class="sv" data-raw="{{ ('{:+.2f}%'.format(aum_day_pct or 0))|e }}">{{ "{:+.2f}%".format(aum_day_pct or 0) }}</span>)
-            </div>
-            <svg class="u-sparkline {% if aum_day_pct >= 0 %}up{% else %}down{% endif %}" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
-              <path d="M2 20 L12 18 L22 19 L32 15 L42 14 L52 12 L62 11 L72 9 L82 10 L92 7"></path>
-            </svg>
-          </div>
-          <div class="cell">
-            <div class="u-k">Stock Value</div>
-            <div class="u-v"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.stock_value_usd or 0))|e }}">{{ (metrics.stock_value_usd or 0)|abbr_money }}</span></div>
-            <div class="u-kpi-sub {% if stock_day_pnl >= 0 %}u-pnl up{% else %}u-pnl down{% endif %}">Today: <span class="sv" data-raw="{{ ('{:+,.2f}'.format(stock_day_pnl or 0))|e }}">{{ "{:+,.2f}".format(stock_day_pnl or 0) }}</span> (<span class="sv" data-raw="{{ ('{:+.2f}%'.format(stock_day_pct or 0))|e }}">{{ "{:+.2f}%".format(stock_day_pct or 0) }}</span>)</div>
-            <svg class="u-sparkline {% if stock_day_pct >= 0 %}up{% else %}down{% endif %}" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
-              <path d="M2 19 L12 18 L22 17 L32 16 L42 15 L52 13 L62 12 L72 10 L82 9 L92 8"></path>
-            </svg>
-          </div>
-          <div class="cell">
-            <div class="u-k">Cash</div>
-            <div class="u-v"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.cash_value_usd or 0))|e }}">{{ (metrics.cash_value_usd or 0)|abbr_money }}</span></div>
-            <div class="u-kpi-sub">AUM share: <span class="sv" data-raw="{{ ('{:.2f}%'.format(cash_pct_of_aum or 0))|e }}">{{ "{:.2f}%".format(cash_pct_of_aum or 0) }}</span></div>
-            <form id="cashQuickForm" class="u-head-actions edit-only" style="margin-top:4px;">
-              <select id="cqAction" class="qty">
-                <option value="add">+ Cash</option>
-                <option value="remove">- Cash</option>
-              </select>
-              <input id="cqAmount" class="qty" placeholder="Amount">
-              <button type="submit" class="u-btn">Apply</button>
-            </form>
-            <svg class="u-sparkline" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
-              <path d="M2 16 L12 16 L22 15 L32 16 L42 15 L52 15 L62 14 L72 14 L82 13 L92 13"></path>
-            </svg>
-          </div>
-          <div class="cell">
-            <div class="u-k">Cash Drag</div>
-            <div class="u-v"><span class="sv" data-raw="{{ ('{:.2f}%'.format(metrics.cash_drag_pct or 0))|e }}">{{ "{:.2f}%".format(metrics.cash_drag_pct or 0) }}</span></div>
-            <div class="u-kpi-sub">Based on current stock vs cash mix</div>
-            <svg class="u-sparkline" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
-              <path d="M2 10 L12 10 L22 11 L32 11 L42 12 L52 13 L62 13 L72 14 L82 15 L92 16"></path>
-            </svg>
-          </div>
-        </div>
-
-        <div class="u-grid">
-          <section class="u-card">
-            <div class="u-head">
-              <h3>Portfolio</h3>
-              <form id="portfolioQuickForm" class="u-head-actions edit-only">
-                <select id="pqAction" class="qty">
-                  <option value="buy">Buy</option>
-                  <option value="sell">Sell</option>
-                  <option value="exit">Exit</option>
-                </select>
-                <div class="tkac-wrap">
-                  <input id="pqTicker" class="ticker tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
-                  <div id="pqDrop" class="tkac-drop"></div>
-                </div>
-                <input id="pqShares" class="qty" placeholder="Shares">
-                <input id="pqPrice" class="px" placeholder="Price">
-                <input id="pqReason" class="rs" placeholder="Reason">
-                <button type="submit" class="u-btn">Apply</button>
-              </form>
-            </div>
-            <table>
-                <thead><tr><th>Ticker</th><th>Shares</th><th>Avg Cost</th><th>Price</th><th>Day %</th><th>Market Value</th><th>Weight</th><th class="edit-only">Edit</th></tr></thead>
-                <tbody>
-                {% for r in metrics.portfolio_rows %}
-                <tr class="u-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="portfolio">
-                  <td>
-                    <a class="u-ticker" href="/company_file?t={{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
-                    <div class="u-note">{{ r.name or '-' }}</div>
-                  </td>
-                  <td>{{ r.shares or '-' }}</td>
-                  <td>{% if (r.cost_num or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.cost_num or 0))|e }}">{{ "USD {:,.2f}".format(r.cost_num or 0) }}</span>{% else %}-{% endif %}</td>
-                  <td>{% if (r.price_live or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.price_live or 0))|e }}">{{ "USD {:,.2f}".format(r.price_live or 0) }}</span>{% else %}-{% endif %}</td>
-                  <td>
-                    {% if r.day_pct is not none %}
-                    <span class="u-day-pill {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>
-                    {% else %}-{% endif %}
-                  </td>
-                  <td>{% if (r.value_usd or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.value_usd or 0))|e }}">{{ "USD {:,.2f}".format(r.value_usd or 0) }}</span>{% else %}-{% endif %}</td>
-                  <td class="u-weight">
-                    <div class="u-weight-val">{{ "{:.2f}%".format(r.weight_pct or 0) }}</div>
-                    <div class="u-weight-bar"><div class="u-weight-fill" style="width: {{ [r.weight_pct or 0, 100]|min }}%;"></div></div>
-                  </td>
-                  <td class="edit-only">
-                    <div class="u-mini-actions">
-                      <button type="button" class="u-mini-action primary js-open-trade" data-side="buy" data-ticker="{{ (r.ticker or '')|e }}">Buy</button>
-                      <button type="button" class="u-mini-action js-open-trade" data-side="sell" data-ticker="{{ (r.ticker or '')|e }}">Sell</button>
-                      <button type="button" class="u-mini-action danger js-exit-pos" data-ticker="{{ (r.ticker or '')|e }}">Remove</button>
-                    </div>
-                  </td>
-                </tr>
-                {% else %}
-                <tr><td colspan="8" class="u-note">No portfolio holdings yet.</td></tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </section>
-
-          <div class="u-grid-bottom">
-            <section class="u-card" data-drop-target="watchlist">
-              <div class="u-head">
-                <h3>Watchlist</h3>
-                <form id="watchlistQuickForm" class="u-head-actions edit-only">
-                  <div class="tkac-wrap">
-                    <input id="wqTicker" class="ticker tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
-                    <div id="wqDrop" class="tkac-drop"></div>
-                  </div>
-                  <button type="button" id="wqAdd" class="u-btn">Add</button>
-                  <button type="button" id="wqRemove" class="u-btn">Remove</button>
-                </form>
-                <div class="u-dropzone edit-only block" data-drop-target="watchlist">Drop ticker here to move</div>
-              </div>
-              {% set radar = watchlist_full|sort(attribute='day_abs_pct', reverse=true) %}
-              <table>
-                <thead><tr><th>Ticker</th><th>Price</th><th>Day %</th><th>Since Added</th><th>Mkt Cap</th><th class="edit-only">Edit</th></tr></thead>
-                <tbody>
-                  {% for r in radar %}
-                  <tr class="u-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="watchlist">
-                    <td>
-                      <a class="u-ticker" href="/company_file?t={{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
-                      <div class="u-radar-name">{{ r.name or '-' }}</div>
-                    </td>
-                    <td>{% if (r.price_now or 0) > 0 %}{{ "USD {:,.2f}".format(r.price_now or 0) }}{% else %}-{% endif %}</td>
-                    <td>{% if r.day_pct is not none %}<span class="u-day-pill {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>{% else %}-{% endif %}</td>
-                    <td>
-                      {% if r.since_added_pct is not none %}
-                      <span class="u-day-pill {% if (r.since_added_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.since_added_pct or 0) }}</span>
-                      {% else %}-{% endif %}
-                    </td>
-                    <td>{% if (r.market_cap or 0) > 0 %}{{ (r.market_cap or 0)|abbr_money }}{% else %}-{% endif %}</td>
-                    <td class="edit-only"><button type="button" class="u-mini-action danger js-wl-remove-row" data-ticker="{{ (r.ticker or '')|e }}">Remove</button></td>
-                  </tr>
-                  {% else %}
-                  <tr><td colspan="6" class="u-note">No watchlist names yet.</td></tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </section>
-
-            <section class="u-card" data-drop-target="bluechips">
-              <div class="u-head">
-                <h3>Blue Chips</h3>
-                <form id="bluechipsQuickForm" class="u-head-actions edit-only">
-                  <div class="tkac-wrap">
-                    <input id="bqTicker" class="ticker tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
-                    <div id="bqDrop" class="tkac-drop"></div>
-                  </div>
-                  <button type="button" id="bqAdd" class="u-btn">Add</button>
-                  <button type="button" id="bqRemove" class="u-btn">Remove</button>
-                  <button type="button" id="bqSeed" class="u-btn">Seed</button>
-                </form>
-                <div class="u-dropzone edit-only block" data-drop-target="bluechips">Drop ticker here to move</div>
-              </div>
-              {% set bradar = bluechips_full|sort(attribute='day_abs_pct', reverse=true) %}
-              <table>
-                <thead><tr><th>Ticker</th><th>Price</th><th>Day %</th><th>Since Added</th><th>Mkt Cap</th><th class="edit-only">Edit</th></tr></thead>
-                <tbody>
-                  {% for r in bradar %}
-                  <tr class="u-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="bluechips">
-                    <td>
-                      <a class="u-ticker" href="/company_file?t={{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
-                      <div class="u-radar-name">{{ r.name or '-' }}</div>
-                    </td>
-                    <td>{% if (r.price_now or 0) > 0 %}{{ "USD {:,.2f}".format(r.price_now or 0) }}{% else %}-{% endif %}</td>
-                    <td>{% if r.day_pct is not none %}<span class="u-day-pill {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>{% else %}-{% endif %}</td>
-                    <td>
-                      {% if r.since_added_pct is not none %}
-                      <span class="u-day-pill {% if (r.since_added_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.since_added_pct or 0) }}</span>
-                      {% else %}-{% endif %}
-                    </td>
-                    <td>{% if (r.market_cap or 0) > 0 %}{{ (r.market_cap or 0)|abbr_money }}{% else %}-{% endif %}</td>
-                    <td class="edit-only"><button type="button" class="u-mini-action danger js-bc-remove-row" data-ticker="{{ (r.ticker or '')|e }}">Remove</button></td>
-                  </tr>
-                  {% else %}
-                  <tr><td colspan="6" class="u-note">No blue chip names yet.</td></tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </section>
-          </div>
-        </div>
-
-        <div class="u-insights">
-          <div class="u-insight">
-            <strong>⚠ Portfolio Intelligence</strong>
-            <ul style="margin:8px 0 0 16px; padding:0;">
-              {% for ln in universe_portfolio_report %}<li>{{ ln }}</li>{% else %}<li class="u-note">No portfolio insights yet.</li>{% endfor %}
-            </ul>
-          </div>
-          <div class="u-insight blue">
-            <strong>💡 Watchlist Intelligence</strong>
-            <ul style="margin:8px 0 0 16px; padding:0;">
-              {% for ln in universe_watchlist_report %}<li>{{ ln }}</li>{% else %}<li class="u-note">No watchlist insights yet.</li>{% endfor %}
-            </ul>
-          </div>
-        </div>
-
-        <section class="u-card">
-          <div class="u-head">
-            <h3>Change Timeline</h3>
-            <div class="u-note">Archived actions for portfolio, watchlist, and cash.</div>
-          </div>
-          <div class="u-timeline">
-            <table>
-              <thead>
-                <tr><th>Time</th><th>Type</th><th>Action</th><th>Ticker</th><th>Details</th><th>Source</th></tr>
-              </thead>
-              <tbody>
-                {% for e in timeline_events %}
-                <tr>
-                  <td>{{ e.ts or '-' }}</td>
-                  <td><span class="kind">{{ e.kind or '-' }}</span></td>
-                  <td>{{ e.action or '-' }}</td>
-                  <td>{{ e.ticker or '-' }}</td>
-                  <td class="detail" title="{{ e.summary or '-' }}">{{ e.summary or '-' }}</td>
-                  <td>{{ e.source or '-' }}</td>
-                </tr>
-                {% else %}
-                <tr><td colspan="6" class="u-note">No history yet.</td></tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-      </div>
-    </main>
+  <!-- ══════════ HEADER ══════════ -->
+  <div class="mu-header">
+    <div class="mu-header-left">
+      <h1>Portfolio</h1>
+      <span class="mu-sub">{{ generated_at or '' }}</span>
+    </div>
+    <div class="mu-actions">
+      <form method="post" action="/company_file/sec-sync-my?return_to=my_universe" style="margin:0;">
+        <button type="submit" class="mu-act"><span class="mu-act-icon">🔄</span> Sync SEC</button>
+      </form>
+      <button type="button" class="mu-act" id="toggleEdit"><span class="mu-act-icon">✏️</span> Edit</button>
+      <button type="button" class="mu-act" id="togglePrivacy"><span class="mu-act-icon">👁</span> Show Values</button>
+    </div>
   </div>
-</div>
-<!-- tickerHints datalist removed — replaced by .tkac-wrap autocomplete -->
-<div id="tradeModalBackdrop" class="u-modal-backdrop">
-  <div class="u-modal">
+
+  <!-- ══════════ SUMMARY STRIP ══════════ -->
+  <div class="mu-summary">
+    <div class="mu-stat">
+      <div class="mu-stat-label">Net Liquidity (AUM)</div>
+      <div class="mu-stat-val hero"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.aum_usd or 0))|e }}">{{ (metrics.aum_usd or 0)|abbr_money }}</span></div>
+      <div class="mu-stat-sub {% if aum_day_pnl >= 0 %}up{% else %}down{% endif %}">
+        Today: <span class="sv" data-raw="{{ ('{:+,.2f}'.format(aum_day_pnl or 0))|e }}">{{ "{:+,.2f}".format(aum_day_pnl or 0) }}</span>
+        (<span class="sv" data-raw="{{ ('{:+.2f}%'.format(aum_day_pct or 0))|e }}">{{ "{:+.2f}%".format(aum_day_pct or 0) }}</span>)
+      </div>
+    </div>
+    <div class="mu-stat">
+      <div class="mu-stat-label">Stock Value</div>
+      <div class="mu-stat-val"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.stock_value_usd or 0))|e }}">{{ (metrics.stock_value_usd or 0)|abbr_money }}</span></div>
+      <div class="mu-stat-sub {% if stock_day_pnl >= 0 %}up{% else %}down{% endif %}">
+        Today: <span class="sv" data-raw="{{ ('{:+,.2f}'.format(stock_day_pnl or 0))|e }}">{{ "{:+,.2f}".format(stock_day_pnl or 0) }}</span>
+        (<span class="sv" data-raw="{{ ('{:+.2f}%'.format(stock_day_pct or 0))|e }}">{{ "{:+.2f}%".format(stock_day_pct or 0) }}</span>)
+      </div>
+    </div>
+    <div class="mu-stat">
+      <div class="mu-stat-label">Cash</div>
+      <div class="mu-stat-val"><span class="sv" data-raw="{{ ('USD {:,.2f}'.format(metrics.cash_value_usd or 0))|e }}">{{ (metrics.cash_value_usd or 0)|abbr_money }}</span></div>
+      <div class="mu-stat-sub">{{ "{:.1f}%".format(cash_pct_of_aum) }} of AUM</div>
+      <form id="cashQuickForm" class="mu-cash-form edit-only">
+        <select id="cqAction" style="max-width:90px;">
+          <option value="add">+ Cash</option>
+          <option value="remove">- Cash</option>
+        </select>
+        <input id="cqAmount" placeholder="Amount" style="max-width:100px;">
+        <button type="submit" class="mu-act" style="padding:5px 10px;">Apply</button>
+      </form>
+    </div>
+    <div class="mu-stat">
+      <div class="mu-stat-label">Cash Drag</div>
+      <div class="mu-stat-val"><span class="sv" data-raw="{{ ('{:.2f}%'.format(metrics.cash_drag_pct or 0))|e }}">{{ "{:.2f}%".format(metrics.cash_drag_pct or 0) }}</span></div>
+      <div class="mu-stat-sub" style="color:var(--muted)">Stock vs cash mix</div>
+    </div>
+  </div>
+
+  <!-- ══════════ PIPELINE ══════════ -->
+  <div class="mu-pipeline">
+
+    <!-- ── Stage 1: Portfolio ── -->
+    <div class="mu-stage" data-drop-target="portfolio">
+      <div class="mu-stage-header">
+        <h3 class="mu-stage-title">
+          Portfolio
+          <span class="mu-stage-badge">{{ (metrics.portfolio_rows or [])|length }} positions</span>
+        </h3>
+        <div class="mu-stage-links">
+          <form id="portfolioQuickForm" class="mu-add-form edit-only">
+            <select id="pqAction" class="qty">
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
+              <option value="exit">Exit</option>
+            </select>
+            <div class="tkac-wrap">
+              <input id="pqTicker" class="tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
+              <div id="pqDrop" class="tkac-drop"></div>
+            </div>
+            <input id="pqShares" class="qty" placeholder="Shares">
+            <input id="pqPrice" class="px" placeholder="Price">
+            <input id="pqReason" class="rs" placeholder="Reason">
+            <button type="submit" class="mu-act primary" style="padding:5px 10px;">Apply</button>
+          </form>
+        </div>
+      </div>
+      <div class="mu-table-wrap">
+      <table class="mu-table">
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th>Shares</th>
+            <th>Avg Cost</th>
+            <th>Price</th>
+            <th>Day</th>
+            <th>Market Value</th>
+            <th>Weight</th>
+            <th>Thesis</th>
+            <th>Actions</th>
+            <th class="edit-only"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in metrics.portfolio_rows %}
+          <tr class="mu-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="portfolio" draggable="true">
+            <td>
+              <a class="mu-tk" href="/ticker/{{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
+              <div class="mu-name">{{ r.name or '-' }}</div>
+            </td>
+            <td>{{ r.shares or '-' }}</td>
+            <td>{% if (r.cost_num or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.cost_num or 0))|e }}">{{ "USD {:,.2f}".format(r.cost_num or 0) }}</span>{% else %}-{% endif %}</td>
+            <td>{% if (r.price_live or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.price_live or 0))|e }}">{{ "USD {:,.2f}".format(r.price_live or 0) }}</span>{% else %}-{% endif %}</td>
+            <td>
+              {% if r.day_pct is not none %}
+              <span class="mu-day-pill {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>
+              {% else %}-{% endif %}
+            </td>
+            <td>{% if (r.value_usd or 0) > 0 %}<span class="sv" data-raw="{{ ('USD {:,.2f}'.format(r.value_usd or 0))|e }}">{{ "USD {:,.2f}".format(r.value_usd or 0) }}</span>{% else %}-{% endif %}</td>
+            <td>
+              <div class="mu-weight-val">{{ "{:.1f}%".format(r.weight_pct or 0) }}</div>
+              <div class="mu-weight-bar"><div class="mu-weight-fill" style="width: {{ [r.weight_pct or 0, 100]|min }}%;"></div></div>
+            </td>
+            <td style="max-width:200px;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ (thesis_map.get(r.ticker, {}).thesis or '')|e }}">{% if thesis_map.get(r.ticker, {}).thesis %}{{ thesis_map.get(r.ticker, {}).thesis[:60] }}{% if thesis_map.get(r.ticker, {}).thesis|length > 60 %}...{% endif %}{% else %}<a href="/ticker/{{ (r.ticker or '')|urlencode }}" style="color:var(--accent);font-size:10px;">Write thesis</a>{% endif %}</td>
+            <td>
+              <div class="mu-mini-actions" style="opacity:1;">
+                <button type="button" class="mu-mini-act js-open-trade" data-side="edit" data-ticker="{{ (r.ticker or '')|e }}" data-shares="{{ (r.shares or '')|e }}" data-cost="{{ (r.cost or r.avg_cost or '')|e }}" style="border-color:var(--accent,#6366f1);color:var(--accent,#6366f1);">✎ Edit</button>
+              </div>
+            </td>
+            <td class="edit-only">
+              <div class="mu-mini-actions">
+                <button type="button" class="mu-mini-act primary js-open-trade" data-side="buy" data-ticker="{{ (r.ticker or '')|e }}">Buy</button>
+                <button type="button" class="mu-mini-act js-open-trade" data-side="sell" data-ticker="{{ (r.ticker or '')|e }}">Sell</button>
+                <button type="button" class="mu-mini-act danger js-exit-pos" data-ticker="{{ (r.ticker or '')|e }}">Remove</button>
+              </div>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="10" style="text-align:center;padding:20px;color:var(--muted);">No portfolio holdings yet. Click Edit to add positions.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="mu-flow-arrow">↓</div>
+
+    <!-- ── Stage 2: Watchlist ── -->
+    <div class="mu-stage" data-drop-target="watchlist">
+      <div class="mu-stage-header">
+        <h3 class="mu-stage-title">
+          Watchlist
+          <span class="mu-stage-badge">{{ watchlist_full|length }} watching</span>
+        </h3>
+        <div class="mu-stage-links">
+          <form id="watchlistQuickForm" class="mu-add-form edit-only" style="margin:0;">
+            <div class="tkac-wrap">
+              <input id="wqTicker" class="tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
+              <div id="wqDrop" class="tkac-drop"></div>
+            </div>
+            <button type="button" id="wqAdd" class="mu-act" style="padding:5px 10px;">Add</button>
+            <button type="button" id="wqRemove" class="mu-act" style="padding:5px 10px;">Remove</button>
+          </form>
+        </div>
+      </div>
+      <div class="mu-dropzone edit-only block" data-drop-target="watchlist" style="margin-bottom:8px;">Drop ticker here to add to Watchlist</div>
+      {% set radar = watchlist_full|sort(attribute='day_abs_pct', reverse=true) %}
+      <div class="mu-card-grid">
+        {% for r in radar %}
+        {% set th = thesis_map.get(r.ticker, {}) %}
+        <div class="mu-ticker-card mu-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="watchlist" draggable="true">
+          <button type="button" class="mu-ticker-card-remove js-wl-remove-row" data-ticker="{{ (r.ticker or '')|e }}">Remove</button>
+          <div class="mu-ticker-card-top">
+            <div class="mu-ticker-card-left">
+              <a class="mu-tk" href="/ticker/{{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
+              <span class="mu-cname">{{ r.name or '' }}</span>
+            </div>
+            <div class="mu-ticker-card-price">
+              <span class="mu-ticker-card-px">{% if (r.price_now or 0) > 0 %}${{ "{:,.2f}".format(r.price_now or 0) }}{% else %}-{% endif %}</span>
+              {% if r.day_pct is not none %}<span class="mu-ticker-card-day {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>{% endif %}
+            </div>
+          </div>
+          <div class="mu-ticker-card-meta">
+            {% if r.since_added_pct is not none %}<span><span class="label">Since add</span> <span class="val {% if (r.since_added_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.1f}%".format(r.since_added_pct or 0) }}</span></span>{% endif %}
+            {% if th.target_price %}<span class="mu-ticker-card-target">Target ${{ "{:,.0f}".format(th.target_price) }}</span>{% endif %}
+            {% if th.phase %}<span><span class="label">Phase</span> <span class="val">{{ th.phase }}</span></span>{% endif %}
+          </div>
+          <div class="mu-ticker-card-thesis">
+            {% if th.thesis %}{{ th.thesis[:120] }}{% if th.thesis|length > 120 %}...{% endif %}{% else %}<a href="/ticker/{{ (r.ticker or '')|urlencode }}">Add thesis &rarr;</a>{% endif %}
+          </div>
+        </div>
+        {% else %}
+        <div class="mu-card-empty">No watchlist names yet.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="mu-flow-arrow">↓</div>
+
+    <!-- ── Stage 3: Blue Chips ── -->
+    <div class="mu-stage" data-drop-target="bluechips">
+      <div class="mu-stage-header">
+        <h3 class="mu-stage-title">
+          Blue Chips
+          <span class="mu-stage-badge">{{ bluechips_full|length }} radar</span>
+        </h3>
+        <div class="mu-stage-links">
+          <form id="bluechipsQuickForm" class="mu-add-form edit-only" style="margin:0;">
+            <div class="tkac-wrap">
+              <input id="bqTicker" class="tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
+              <div id="bqDrop" class="tkac-drop"></div>
+            </div>
+            <button type="button" id="bqAdd" class="mu-act" style="padding:5px 10px;">Add</button>
+            <button type="button" id="bqRemove" class="mu-act" style="padding:5px 10px;">Remove</button>
+            <button type="button" id="bqSeed" class="mu-act" style="padding:5px 10px;">Seed</button>
+          </form>
+        </div>
+      </div>
+      <div class="mu-dropzone edit-only block" data-drop-target="bluechips" style="margin-bottom:8px;">Drop ticker here to add to Blue Chips</div>
+      {% set bradar = bluechips_full|sort(attribute='day_abs_pct', reverse=true) %}
+      <div class="mu-card-grid">
+        {% for r in bradar %}
+        <div class="mu-ticker-card mu-dnd-row" data-dnd-ticker="{{ (r.ticker or '')|e }}" data-dnd-source="bluechips" draggable="true">
+          <button type="button" class="mu-ticker-card-remove js-bc-remove-row" data-ticker="{{ (r.ticker or '')|e }}">Remove</button>
+          <div class="mu-ticker-card-top">
+            <div class="mu-ticker-card-left">
+              <a class="mu-tk" href="/ticker/{{ (r.ticker or '')|urlencode }}">{{ r.ticker or '-' }}</a>
+              <span class="mu-cname">{{ r.name or '' }}</span>
+            </div>
+            <div class="mu-ticker-card-price">
+              <span class="mu-ticker-card-px">{% if (r.price_now or 0) > 0 %}${{ "{:,.2f}".format(r.price_now or 0) }}{% else %}-{% endif %}</span>
+              {% if r.day_pct is not none %}<span class="mu-ticker-card-day {% if (r.day_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.day_pct or 0) }}</span>{% endif %}
+            </div>
+          </div>
+          <div class="mu-ticker-card-meta">
+            {% if r.since_added_pct is not none %}<span><span class="label">Since add</span> <span class="val {% if (r.since_added_pct or 0) >= 0 %}up{% else %}down{% endif %}">{{ "{:+.1f}%".format(r.since_added_pct or 0) }}</span></span>{% endif %}
+            {% if (r.market_cap or 0) > 0 %}<span><span class="label">Mkt cap</span> <span class="val">{{ (r.market_cap or 0)|abbr_money }}</span></span>{% endif %}
+          </div>
+        </div>
+        {% else %}
+        <div class="mu-card-empty">No blue chip names yet.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="mu-flow-arrow">↓</div>
+
+    <!-- ── Stage 4: Ideas ── -->
+    <div class="mu-stage" id="ideaListSection">
+      <div class="mu-stage-header">
+        <h3 class="mu-stage-title">
+          Ideas
+          <span class="mu-stage-badge" id="ideaCount"></span>
+        </h3>
+      </div>
+      <div class="mu-idea-list" id="ideaBody">
+        <div style="padding:12px;text-align:center;color:var(--muted);font-size:12px;">Loading ideas...</div>
+      </div>
+      <div class="mu-idea-capture">
+        <input type="text" class="mu-idea-input" id="ideaTitle" placeholder="Quick idea — e.g. Look into copper miners, $ASML dip…">
+        <input type="text" class="mu-idea-input" id="ideaTicker" placeholder="Ticker" style="max-width:90px;">
+        <button class="mu-idea-save" onclick="saveNewIdea()">Capture</button>
+      </div>
+    </div>
+
+  </div><!-- /pipeline -->
+
+  <!-- ══════════ INSIGHTS ══════════ -->
+  <div class="mu-insights">
+    <div class="mu-insight-card">
+      <strong>Portfolio Insights</strong>
+      <ul>
+        {% for ln in universe_portfolio_report %}<li>{{ ln }}</li>{% else %}<li style="color:var(--muted)">No portfolio insights yet.</li>{% endfor %}
+      </ul>
+    </div>
+    <div class="mu-insight-card blue">
+      <strong>Watchlist Insights</strong>
+      <ul>
+        {% for ln in universe_watchlist_report %}<li>{{ ln }}</li>{% else %}<li style="color:var(--muted)">No watchlist insights yet.</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  <!-- ══════════ QUARTERLY REVIEWS (collapsible) ══════════ -->
+  {% if quarterly_reviews %}
+  <div class="mu-stage mu-timeline">
+    <button class="mu-timeline-toggle" onclick="toggleQR()">
+      <span class="mu-timeline-chevron" id="qrChevron">›</span>
+      Quarterly Reviews
+      <span class="mu-stage-badge">{{ quarterly_reviews|length }}</span>
+    </button>
+    <div class="mu-timeline-body" id="qrBody">
+      {% for qr in quarterly_reviews %}
+      <div class="mu-tl-item">
+        <div class="mu-tl-icon">📋</div>
+        <div class="mu-tl-body">
+          <div class="mu-tl-text">
+            <strong>{{ qr.quarter }} {{ qr.year }}</strong>
+            {% if qr.portfolio_return is not none %} · Portfolio: {{ "{:+.1f}%".format(qr.portfolio_return) }}{% endif %}
+            {% if qr.benchmark_return is not none %} · Benchmark: {{ "{:+.1f}%".format(qr.benchmark_return) }}{% endif %}
+          </div>
+          {% if qr.notes %}<div class="mu-tl-time" style="white-space:pre-wrap;">{{ qr.notes[:300] }}{% if qr.notes|length > 300 %}...{% endif %}</div>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ══════════ ACTIVITY TIMELINE (collapsible) ══════════ -->
+  <div class="mu-stage mu-timeline">
+    <button class="mu-timeline-toggle" onclick="toggleTimeline()">
+      <span class="mu-timeline-chevron" id="tlChevron">›</span>
+      Activity Feed
+      <span class="mu-stage-badge">{{ timeline_events|length }} events</span>
+    </button>
+    <div class="mu-timeline-body" id="tlBody">
+      {% for e in timeline_events %}
+      <div class="mu-tl-item"{% if loop.index > 15 %} style="display:none" data-tl-extra{% endif %}>
+        <div class="mu-tl-icon {% if (e.action or '')|lower in ['buy','add'] %}buy{% elif (e.action or '')|lower in ['sell','exit','remove'] %}sell{% elif (e.kind or '')|lower == 'watchlist' %}watch{% elif (e.kind or '')|lower == 'cash' %}cash{% endif %}">
+          {% if (e.action or '')|lower in ['buy','add'] %}📈{% elif (e.action or '')|lower in ['sell','exit','remove'] %}📉{% elif (e.kind or '')|lower == 'watchlist' %}👁{% elif (e.kind or '')|lower == 'cash' %}💵{% else %}📋{% endif %}
+        </div>
+        <div class="mu-tl-body">
+          <div class="mu-tl-text">
+            <strong>{{ e.action or e.kind or '-' }}</strong>
+            {% if e.ticker %} <a class="mu-tk" href="/ticker/{{ (e.ticker or '')|urlencode }}" style="font-size:12px;">{{ e.ticker }}</a>{% endif %}
+            {% if e.summary %} — {{ e.summary }}{% endif %}
+          </div>
+          <div class="mu-tl-time">{{ e.ts or '-' }}{% if e.source %} · {{ e.source }}{% endif %}</div>
+        </div>
+      </div>
+      {% else %}
+      <div style="padding:16px;text-align:center;color:var(--muted);font-size:12px;">No activity yet.</div>
+      {% endfor %}
+      {% if timeline_events|length > 15 %}
+      <button class="mu-timeline-toggle" onclick="toggleTimelineMore()" id="tlMoreBtn" style="padding:6px 0;font-size:11px;color:var(--accent);">Show {{ timeline_events|length - 15 }} more</button>
+      {% endif %}
+    </div>
+  </div>
+
+</div><!-- /mu-shell -->
+</div><!-- /uRoot -->
+
+<!-- Trade Modal -->
+<div id="tradeModalBackdrop" class="mu-modal-backdrop">
+  <div class="mu-modal">
     <h4 id="tradeModalTitle">Trade</h4>
     <form id="tradeModalForm">
-      <div class="u-modal-grid">
+      <div class="mu-modal-grid">
         <select id="tmSide">
           <option value="buy">Buy</option>
           <option value="sell">Sell</option>
+          <option value="edit">Edit Position</option>
         </select>
-        <div class="tkac-wrap" style="grid-column:span 1">
+        <div class="tkac-wrap" style="grid-column:span 1;max-width:100%;width:100%;">
           <input id="tmTicker" class="tkac-input" autocomplete="off" placeholder="Ticker or name" data-confirmed-ticker="">
           <div id="tmDrop" class="tkac-drop"></div>
         </div>
@@ -667,489 +784,426 @@
         <input id="tmPrice" placeholder="Price">
         <input id="tmReason" style="grid-column:1/-1;" placeholder="Reason (optional)">
       </div>
-      <div class="u-modal-actions">
-        <button type="button" class="u-btn" id="tmCancel">Cancel</button>
-        <button type="submit" class="u-btn primary">Apply</button>
+      <div class="mu-modal-actions">
+        <button type="button" class="mu-act" id="tmCancel">Cancel</button>
+        <button type="submit" class="mu-act primary">Apply</button>
       </div>
     </form>
   </div>
 </div>
-<div id="moveConfirmBackdrop" class="u-modal-backdrop">
-  <div class="u-modal">
+<div id="moveConfirmBackdrop" class="mu-modal-backdrop">
+  <div class="mu-modal">
     <h4>Move to Watchlist</h4>
-    <div class="u-note" id="moveConfirmText">Move ticker?</div>
-    <div class="u-modal-actions">
-      <button type="button" class="u-btn" id="mcCancel">Cancel</button>
-      <button type="button" class="u-btn primary" id="mcConfirm">Confirm</button>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px;" id="moveConfirmText">Move ticker?</div>
+    <div class="mu-modal-actions">
+      <button type="button" class="mu-act" id="mcCancel">Cancel</button>
+      <button type="button" class="mu-act primary" id="mcConfirm">Confirm</button>
     </div>
   </div>
 </div>
 
 <script>
+(function(){
+  function postKV(url, obj, cb){
+    var fd = new URLSearchParams();
+    Object.keys(obj || {}).forEach(function(k){ fd.set(k, String(obj[k] == null ? '' : obj[k])); });
+    fetch(url, {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
+      body:fd.toString()
+    }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok, data:d||{}}; }); })
+      .then(function(res){ if(cb) cb(res); }).catch(function(){ if(cb) cb({ok:false, data:{}}); });
+  }
+
+  var root = document.getElementById('uRoot');
+  var privacyBtn = document.getElementById('togglePrivacy');
+  var editBtn = document.getElementById('toggleEdit');
+
+  /* ── Privacy mask ── */
+  var privacyKey = 'portfolioPrivacyMaskV1';
+  function maskText(raw){
+    var s = String(raw || '').trim();
+    if(!s) return '••••••';
+    if(s.indexOf('USD ') === 0) return 'USD ••••••';
+    if(s.indexOf('%') >= 0) return '•••%';
+    return '••••••';
+  }
+  function applyPrivacy(masked){
+    document.querySelectorAll('.sv').forEach(function(el){
+      var raw = String(el.getAttribute('data-raw') || el.textContent || '').trim();
+      if(!el.getAttribute('data-raw')) el.setAttribute('data-raw', raw);
+      el.textContent = masked ? maskText(raw) : raw;
+      if(masked) el.classList.add('u-privacy-mask'); else el.classList.remove('u-privacy-mask');
+    });
+    if(privacyBtn) privacyBtn.innerHTML = '<span class="mu-act-icon">' + (masked ? '👁' : '🙈') + '</span> ' + (masked ? 'Show Values' : 'Hide Values');
+    try{ localStorage.setItem(privacyKey, masked ? '1' : '0'); }catch(_e){}
+  }
+  var maskedOnLoad = true;
+  try{ if(localStorage.getItem(privacyKey) === '0') maskedOnLoad = false; }catch(_e){}
+  applyPrivacy(maskedOnLoad);
+  if(privacyBtn) privacyBtn.addEventListener('click', function(){
+    var nowMasked = localStorage.getItem(privacyKey) !== '0';
+    applyPrivacy(!nowMasked);
+  });
+
+  /* ── Edit mode ── */
+  var editKey = 'myUniverseEditModeV1';
+  function applyEditMode(on){
+    if(!root) return;
+    if(on) root.classList.add('edit-mode'); else root.classList.remove('edit-mode');
+    if(editBtn) editBtn.innerHTML = '<span class="mu-act-icon">✏️</span> ' + (on ? 'Done' : 'Edit');
+    try{ localStorage.setItem(editKey, on ? '1' : '0'); }catch(_e){}
+  }
+  var editOn = false;
+  try{ editOn = localStorage.getItem(editKey) === '1'; }catch(_e){}
+  applyEditMode(editOn);
+  if(editBtn) editBtn.addEventListener('click', function(){ applyEditMode(!root.classList.contains('edit-mode')); });
+
+  /* ── Ticker Autocomplete Engine ── */
   (function(){
-    function postKV(url, obj, cb){
-      var fd = new URLSearchParams();
-      Object.keys(obj || {}).forEach(function(k){ fd.set(k, String(obj[k] == null ? '' : obj[k])); });
-      fetch(url, {
-        method:'POST',
-        headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
-        body:fd.toString()
-      }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok, data:d||{}}; }); })
-        .then(function(res){ if(cb) cb(res); }).catch(function(){ if(cb) cb({ok:false, data:{}}); });
-    }
-
-    var root = document.getElementById('uRoot');
-    var privacyBtn = document.getElementById('togglePrivacy');
-    var editBtn = document.getElementById('toggleEdit');
-
-    var privacyKey = 'portfolioPrivacyMaskV1';
-    function maskText(raw){
-      var s = String(raw || '').trim();
-      if(!s){ return '••••••'; }
-      if(s.indexOf('USD ') === 0){ return 'USD ••••••'; }
-      if(s.indexOf('%') >= 0){ return '•••%'; }
-      return '••••••';
-    }
-    function applyPrivacy(masked){
-      document.querySelectorAll('.sv').forEach(function(el){
-        var raw = String(el.getAttribute('data-raw') || el.textContent || '').trim();
-        if(!el.getAttribute('data-raw')){ el.setAttribute('data-raw', raw); }
-        el.textContent = masked ? maskText(raw) : raw;
-        if(masked){ el.classList.add('u-privacy-mask'); } else { el.classList.remove('u-privacy-mask'); }
-      });
-      if(privacyBtn){ privacyBtn.textContent = masked ? 'Show Values' : 'Hide Values'; }
-      try{ localStorage.setItem(privacyKey, masked ? '1' : '0'); }catch(_e){}
-    }
-    var maskedOnLoad = true;
-    try{
-      var saved = localStorage.getItem(privacyKey);
-      if(saved === '0'){ maskedOnLoad = false; }
-    }catch(_e){}
-    applyPrivacy(maskedOnLoad);
-    if(privacyBtn){
-      privacyBtn.addEventListener('click', function(){
-        var nowMasked = privacyBtn.textContent === 'Show Values';
-        applyPrivacy(!nowMasked);
-      });
-    }
-    var editKey = 'myUniverseEditModeV1';
-    function applyEditMode(on){
-      if(!root) return;
-      if(on){ root.classList.add('edit-mode'); } else { root.classList.remove('edit-mode'); }
-      if(editBtn){ editBtn.textContent = on ? 'Done' : 'Edit'; }
-      try{ localStorage.setItem(editKey, on ? '1' : '0'); }catch(_e){}
-    }
-    var editOn = false;
-    try{ editOn = localStorage.getItem(editKey) === '1'; }catch(_e){}
-    applyEditMode(editOn);
-    if(editBtn){
-      editBtn.addEventListener('click', function(){ applyEditMode(!root.classList.contains('edit-mode')); });
-    }
-
-    // ── Ticker Autocomplete Engine ──────────────────────────────────────────
-    // Each .tkac-input gets a live dropdown from /api/ticker-search.
-    // On selection the confirmed ticker is stored in data-confirmed-ticker.
-    // bindTickerAction reads data-confirmed-ticker, not raw .value, to prevent
-    // adding a company by full name (e.g. "MASTERCARD") instead of its ticker.
-    (function(){
-      var acTimer = null;
-      function buildAC(inp, drop){
-        if(!inp || !drop) return;
-        var focusIdx = -1;
-        function getItems(){ return Array.prototype.slice.call(drop.querySelectorAll('.tkac-item')); }
-        function close(){
-          drop.classList.remove('open');
-          focusIdx = -1;
+    var acTimer = null;
+    function buildAC(inp, drop){
+      if(!inp || !drop) return;
+      var focusIdx = -1;
+      function getItems(){ return Array.prototype.slice.call(drop.querySelectorAll('.tkac-item')); }
+      function close(){ drop.classList.remove('open'); focusIdx = -1; }
+      function confirm(ticker, name){
+        inp.value = ticker;
+        inp.dataset.confirmedTicker = ticker;
+        inp.classList.add('tkac-confirmed');
+        inp.classList.remove('tkac-error');
+        inp.title = name ? ticker + ' · ' + name : ticker;
+        close();
+      }
+      function renderResults(results){
+        drop.innerHTML = '';
+        if(!results || !results.length){
+          var em = document.createElement('div');
+          em.className = 'tkac-empty'; em.textContent = 'No matches';
+          drop.appendChild(em);
+        } else {
+          results.forEach(function(r){
+            var item = document.createElement('div');
+            item.className = 'tkac-item'; item.dataset.ticker = r.ticker; item.dataset.name = r.name || '';
+            var sym = document.createElement('span'); sym.className = 'tkac-sym'; sym.textContent = r.ticker;
+            var nm = document.createElement('span'); nm.className = 'tkac-nm'; nm.textContent = r.name || '';
+            var ind = document.createElement('span'); ind.className = 'tkac-ind'; ind.textContent = r.industry || '';
+            item.appendChild(sym); item.appendChild(nm); item.appendChild(ind);
+            item.addEventListener('mousedown', function(e){ e.preventDefault(); confirm(r.ticker, r.name || ''); });
+            drop.appendChild(item);
+          });
         }
-        function confirm(ticker, name){
-          inp.value = ticker;
-          inp.dataset.confirmedTicker = ticker;
-          inp.classList.add('tkac-confirmed');
-          inp.classList.remove('tkac-error');
-          inp.title = name ? ticker + ' · ' + name : ticker;
+        drop.classList.add('open'); focusIdx = -1;
+      }
+      function fetchSuggestions(q){
+        if(!q || q.length < 1){ close(); return; }
+        fetch('/api/ticker-search?q=' + encodeURIComponent(q) + '&limit=10')
+          .then(function(r){ return r.json(); })
+          .then(function(d){ renderResults((d && d.results) || []); })
+          .catch(function(){ close(); });
+      }
+      inp.addEventListener('input', function(){
+        var v = String(inp.value || '').trim();
+        inp.dataset.confirmedTicker = '';
+        inp.classList.remove('tkac-confirmed', 'tkac-error');
+        inp.title = '';
+        if(acTimer) clearTimeout(acTimer);
+        if(!v){ close(); return; }
+        acTimer = setTimeout(function(){ fetchSuggestions(v); }, 150);
+      });
+      inp.addEventListener('focus', function(){
+        var v = String(inp.value || '').trim();
+        if(v && !inp.dataset.confirmedTicker) fetchSuggestions(v);
+      });
+      inp.addEventListener('blur', function(){
+        setTimeout(function(){
           close();
-        }
-        function renderResults(results){
-          drop.innerHTML = '';
-          if(!results || !results.length){
-            var em = document.createElement('div');
-            em.className = 'tkac-empty';
-            em.textContent = 'No matches';
-            drop.appendChild(em);
-          } else {
-            results.forEach(function(r, i){
-              var item = document.createElement('div');
-              item.className = 'tkac-item';
-              item.dataset.ticker = r.ticker;
-              item.dataset.name = r.name || '';
-              var sym = document.createElement('span');
-              sym.className = 'tkac-sym';
-              sym.textContent = r.ticker;
-              var nm = document.createElement('span');
-              nm.className = 'tkac-nm';
-              nm.textContent = r.name || '';
-              var ind = document.createElement('span');
-              ind.className = 'tkac-ind';
-              ind.textContent = r.industry || '';
-              item.appendChild(sym); item.appendChild(nm); item.appendChild(ind);
-              item.addEventListener('mousedown', function(e){
-                e.preventDefault();
-                confirm(r.ticker, r.name || '');
-              });
-              drop.appendChild(item);
-            });
-          }
-          drop.classList.add('open');
-          focusIdx = -1;
-        }
-        function fetchSuggestions(q){
-          if(!q || q.length < 1){ close(); return; }
-          fetch('/api/ticker-search?q=' + encodeURIComponent(q) + '&limit=10')
-            .then(function(r){ return r.json(); })
-            .then(function(d){ renderResults((d && d.results) || []); })
-            .catch(function(){ close(); });
-        }
-        inp.addEventListener('input', function(){
-          var v = String(inp.value || '').trim();
-          // Reset confirmed state when user edits
-          inp.dataset.confirmedTicker = '';
-          inp.classList.remove('tkac-confirmed', 'tkac-error');
-          inp.title = '';
-          if(acTimer) clearTimeout(acTimer);
-          if(!v){ close(); return; }
-          acTimer = setTimeout(function(){ fetchSuggestions(v); }, 150);
-        });
-        inp.addEventListener('focus', function(){
-          var v = String(inp.value || '').trim();
-          if(v && !inp.dataset.confirmedTicker) fetchSuggestions(v);
-        });
-        inp.addEventListener('blur', function(){
-          setTimeout(function(){
-            close();
-            // If user typed something but didn't pick from dropdown, try exact ticker match
-            var v = String(inp.value || '').trim().toUpperCase();
-            if(v && !inp.dataset.confirmedTicker){
-              // Accept exact ticker entry (e.g. "MA" typed directly)
-              inp.dataset.confirmedTicker = v;
-              inp.title = v;
-            }
-          }, 180);
-        });
-        inp.addEventListener('keydown', function(e){
-          var items = getItems();
-          if(e.key === 'ArrowDown'){
-            e.preventDefault();
-            focusIdx = Math.min(focusIdx + 1, items.length - 1);
-            items.forEach(function(it, i){ it.classList.toggle('focused', i === focusIdx); });
-          } else if(e.key === 'ArrowUp'){
-            e.preventDefault();
-            focusIdx = Math.max(focusIdx - 1, 0);
-            items.forEach(function(it, i){ it.classList.toggle('focused', i === focusIdx); });
-          } else if(e.key === 'Enter' || e.key === 'Tab'){
-            if(drop.classList.contains('open') && focusIdx >= 0 && items[focusIdx]){
-              e.preventDefault();
-              var it = items[focusIdx];
-              confirm(it.dataset.ticker, it.dataset.name || '');
-            }
-          } else if(e.key === 'Escape'){
-            close();
-          }
-        });
-      }
-      // Wire up all ticker inputs
-      [
-        ['wqTicker','wqDrop'],
-        ['bqTicker','bqDrop'],
-        ['pqTicker','pqDrop'],
-        ['tmTicker','tmDrop'],
-      ].forEach(function(pair){
-        buildAC(document.getElementById(pair[0]), document.getElementById(pair[1]));
+          var v = String(inp.value || '').trim().toUpperCase();
+          if(v && !inp.dataset.confirmedTicker){ inp.dataset.confirmedTicker = v; inp.title = v; }
+        }, 180);
       });
-    })();
-
-    // ── Portfolio / Watchlist / Bluechip form elements ──────────────────────
-    var pqForm    = document.getElementById('portfolioQuickForm');
-    var pqAction  = document.getElementById('pqAction');
-    var pqTicker  = document.getElementById('pqTicker');
-    var pqShares  = document.getElementById('pqShares');
-    var pqPrice   = document.getElementById('pqPrice');
-    var pqReason  = document.getElementById('pqReason');
-    var wqTicker  = document.getElementById('wqTicker');
-    var wqAdd     = document.getElementById('wqAdd');
-    var wqRemove  = document.getElementById('wqRemove');
-
-    function submitPortfolio(side, ticker, shares, price, reason){
-      return postKV('/my_universe/portfolio/upsert', {ticker:ticker, side:side, shares:shares, cost:(price||'0'), trade_reason:reason, note:''}, function(){ window.location.reload(); });
-    }
-
-    // Read confirmed ticker from data attribute (set by autocomplete on selection)
-    function getConfirmedTicker(input){
-      var confirmed = String((input && input.dataset && input.dataset.confirmedTicker) || '').trim().toUpperCase();
-      if(confirmed) return confirmed;
-      // Fallback: accept if raw value looks like a valid ticker (1-6 uppercase letters/numbers)
-      var raw = String((input && input.value) || '').trim().toUpperCase();
-      if(/^[A-Z][A-Z0-9.\-]{0,9}$/.test(raw)) return raw;
-      return '';
-    }
-
-    if(pqForm){
-      pqForm.addEventListener('submit', function(e){
-        e.preventDefault();
-        var a = String((pqAction && pqAction.value) || '');
-        var t = getConfirmedTicker(pqTicker);
-        if(!t){ if(pqTicker){ pqTicker.classList.add('tkac-error'); pqTicker.focus(); } return; }
-        var sh = String((pqShares && pqShares.value) || '').trim();
-        var px = String((pqPrice && pqPrice.value) || '').trim();
-        var rs = String((pqReason && pqReason.value) || '').trim();
-        if(a === 'exit'){ return submitPortfolio('sell', t, '0', '0', rs); }
-        return submitPortfolio(a, t, sh, px, rs);
+      inp.addEventListener('keydown', function(e){
+        var items = getItems();
+        if(e.key === 'ArrowDown'){ e.preventDefault(); focusIdx = Math.min(focusIdx + 1, items.length - 1); items.forEach(function(it, i){ it.classList.toggle('focused', i === focusIdx); }); }
+        else if(e.key === 'ArrowUp'){ e.preventDefault(); focusIdx = Math.max(focusIdx - 1, 0); items.forEach(function(it, i){ it.classList.toggle('focused', i === focusIdx); }); }
+        else if(e.key === 'Enter' || e.key === 'Tab'){ if(drop.classList.contains('open') && focusIdx >= 0 && items[focusIdx]){ e.preventDefault(); confirm(items[focusIdx].dataset.ticker, items[focusIdx].dataset.name || ''); } }
+        else if(e.key === 'Escape'){ close(); }
       });
     }
-
-    function bindTickerAction(btn, input, url, extra){
-      if(!btn) return;
-      btn.addEventListener('click', function(){
-        var t = getConfirmedTicker(input);
-        if(!t){
-          if(input){ input.classList.add('tkac-error'); input.focus(); }
-          return;
-        }
-        var payload = {ticker:t};
-        if(extra && typeof extra === 'object'){
-          Object.keys(extra).forEach(function(k){ payload[k] = extra[k]; });
-        }
-        postKV(url, payload, function(){ window.location.reload(); });
-      });
-    }
-    bindTickerAction(wqAdd, wqTicker, '/my_universe/watchlist/add', {reason:''});
-    bindTickerAction(wqRemove, wqTicker, '/my_universe/watchlist/remove', {});
-
-    var bqTicker = document.getElementById('bqTicker');
-    var bqAdd = document.getElementById('bqAdd');
-    var bqRemove = document.getElementById('bqRemove');
-    var bqSeed = document.getElementById('bqSeed');
-    bindTickerAction(bqAdd, bqTicker, '/my_universe/bluechips/add', {reason:''});
-    bindTickerAction(bqRemove, bqTicker, '/my_universe/bluechips/remove', {});
-    if(bqSeed){
-      bqSeed.addEventListener('click', function(){
-        postKV('/my_universe/bluechips/seed', {}, function(){ window.location.reload(); });
-      });
-    }
-
-    var cqForm = document.getElementById('cashQuickForm');
-    var cqAction = document.getElementById('cqAction');
-    var cqAmount = document.getElementById('cqAmount');
-    if(cqForm){
-      cqForm.addEventListener('submit', function(e){
-        e.preventDefault();
-        var amt = Number((cqAmount && cqAmount.value) || '0');
-        if(!amt) return;
-        var sign = (String((cqAction && cqAction.value) || 'add') === 'remove') ? -1 : 1;
-        postKV('/my_universe/cash/upsert', {currency:'USD', amount:String(sign * Math.abs(amt))}, function(){ window.location.reload(); });
-      });
-    }
-
-    function moveTickerBetweenLists(ticker, from, to){
-      ticker = String(ticker || '').trim().toUpperCase();
-      if(!ticker || !to){ return; }
-      from = String(from || '');
-      if(from && from === to){ return; }
-      function moveRowDom(ticker, to){
-        ticker = String(ticker || '').toUpperCase();
-        var srcRow = document.querySelector('tr[data-dnd-ticker="' + ticker + '"]');
-        if(!srcRow) return false;
-        var targetTable = null;
-        if(to === 'watchlist'){
-          targetTable = document.querySelector('section[data-drop-target="watchlist"] table tbody');
-        } else if(to === 'bluechips'){
-          targetTable = document.querySelector('section[data-drop-target="bluechips"] table tbody');
-        }
-        if(!targetTable) return false;
-        var cloned = srcRow.cloneNode(true);
-        cloned.setAttribute('data-dnd-source', to);
-        // remove edit-only buttons that do not fit target list semantics
-        var editCell = cloned.querySelector('td.edit-only');
-        if(editCell){
-          if(to === 'watchlist'){
-            editCell.innerHTML = '<button type="button" class="u-mini-action danger js-wl-remove-row" data-ticker="' + ticker + '">Remove</button>';
-          } else if(to === 'bluechips'){
-            editCell.innerHTML = '<button type="button" class="u-mini-action danger js-bc-remove-row" data-ticker="' + ticker + '">Remove</button>';
-          }
-        }
-        // Keep first 3 columns for list tables (ticker/price/day + optional since/mcap/edit)
-        while(cloned.children.length > 6){
-          cloned.removeChild(cloned.lastElementChild);
-        }
-        targetTable.insertBefore(cloned, targetTable.firstChild);
-        srcRow.remove();
-        return true;
-      }
-      function doneToTab(tab, ticker){
-        if(moveRowDom(ticker, tab)){
-          return;
-        }
-        var q = new URLSearchParams(window.location.search || '');
-        q.set('tab', tab);
-        window.location.search = q.toString();
-      }
-      function showErr(res, fallback){
-        var msg = (res && res.data && (res.data.message || res.data.error)) ? String(res.data.message || res.data.error) : String(fallback || 'Could not move ticker.');
-        alert(msg);
-      }
-      if(from === 'portfolio' && to === 'watchlist'){
-        requestPortfolioToWatchlistMove(ticker);
-        return;
-      }
-      if(to === 'watchlist'){
-        postKV('/my_universe/watchlist/add', {ticker:ticker, reason:''}, function(res){
-          if(!(res && res.ok)){ return showErr(res, 'Could not add to Watchlist.'); }
-          doneToTab('watchlist', ticker);
-        });
-        return;
-      }
-      if(to === 'bluechips'){
-        postKV('/my_universe/bluechips/add', {ticker:ticker, reason:''}, function(res){
-          if(!(res && res.ok)){ return showErr(res, 'Could not add to Blue Chips.'); }
-          doneToTab('bluechips', ticker);
-        });
-      }
-    }
-
-    var draggedTicker = '';
-    var draggedSource = '';
-    Array.prototype.slice.call(document.querySelectorAll('tr[data-dnd-ticker]')).forEach(function(row){
-      row.setAttribute('draggable', 'true');
-      row.addEventListener('dragstart', function(e){
-        draggedTicker = String(row.getAttribute('data-dnd-ticker') || '').toUpperCase();
-        draggedSource = String(row.getAttribute('data-dnd-source') || '');
-        try{ e.dataTransfer.setData('text/plain', JSON.stringify({ticker:draggedTicker, source:draggedSource})); }catch(_e){}
-      });
-      row.addEventListener('dragend', function(){
-        draggedTicker = '';
-        draggedSource = '';
-      });
+    [['wqTicker','wqDrop'],['bqTicker','bqDrop'],['pqTicker','pqDrop'],['tmTicker','tmDrop']].forEach(function(pair){
+      buildAC(document.getElementById(pair[0]), document.getElementById(pair[1]));
     });
-    Array.prototype.slice.call(document.querySelectorAll('[data-drop-target]')).forEach(function(zone){
-      zone.addEventListener('dragover', function(e){
-        e.preventDefault();
-        zone.classList.add('drag-over');
-        zone.classList.add('drop-over');
-      });
-      zone.addEventListener('dragleave', function(){
-        zone.classList.remove('drag-over');
-        zone.classList.remove('drop-over');
-      });
-      zone.addEventListener('drop', function(e){
-        e.preventDefault();
-        zone.classList.remove('drag-over');
-        zone.classList.remove('drop-over');
-        var payload = null;
-        try{
-          payload = JSON.parse(e.dataTransfer.getData('text/plain') || '{}');
-        }catch(_e){
-          payload = null;
-        }
-        var ticker = String((payload && payload.ticker) || draggedTicker || '').toUpperCase();
-        var from = String((payload && payload.source) || draggedSource || '');
-        var to = String(zone.getAttribute('data-drop-target') || '');
-        moveTickerBetweenLists(ticker, from, to);
-      });
-    });
-
-    var mcBackdrop = document.getElementById('moveConfirmBackdrop');
-    var mcText = document.getElementById('moveConfirmText');
-    var mcCancel = document.getElementById('mcCancel');
-    var mcConfirm = document.getElementById('mcConfirm');
-    var pendingMoveTicker = '';
-    function requestPortfolioToWatchlistMove(ticker){
-      pendingMoveTicker = String(ticker || '').toUpperCase();
-      if(!pendingMoveTicker || !mcBackdrop){ return; }
-      if(mcText){ mcText.textContent = 'Add ' + pendingMoveTicker + ' to Watchlist and remove it from Portfolio?'; }
-      mcBackdrop.style.display = 'flex';
-    }
-    function closeMoveConfirm(){
-      if(mcBackdrop) mcBackdrop.style.display = 'none';
-      pendingMoveTicker = '';
-    }
-    if(mcCancel){ mcCancel.addEventListener('click', closeMoveConfirm); }
-    if(mcBackdrop){
-      mcBackdrop.addEventListener('click', function(e){ if(e.target === mcBackdrop) closeMoveConfirm(); });
-    }
-    if(mcConfirm){
-      mcConfirm.addEventListener('click', function(){
-        var t = String(pendingMoveTicker || '').toUpperCase();
-        if(!t){ return closeMoveConfirm(); }
-        postKV('/my_universe/watchlist/add', {ticker:t, reason:'moved_from_portfolio'}, function(res){
-          if(!(res && res.ok)){ return closeMoveConfirm(); }
-          postKV('/my_universe/portfolio/upsert', {ticker:t, side:'sell', shares:'0', cost:'0', trade_reason:'other', note:'moved_to_watchlist'}, function(){ window.location.reload(); });
-        });
-      });
-    }
-
-    var tmBackdrop = document.getElementById('tradeModalBackdrop');
-    var tmForm = document.getElementById('tradeModalForm');
-    var tmSide = document.getElementById('tmSide');
-    var tmTicker = document.getElementById('tmTicker');
-    var tmShares = document.getElementById('tmShares');
-    var tmPrice = document.getElementById('tmPrice');
-    var tmReason = document.getElementById('tmReason');
-    var tmCancel = document.getElementById('tmCancel');
-    var tmTitle = document.getElementById('tradeModalTitle');
-    function openTradeModal(side, ticker){
-      if(!tmBackdrop) return;
-      if(tmSide) tmSide.value = side || 'buy';
-      if(tmTicker){
-        var tk = String(ticker || '').toUpperCase();
-        tmTicker.value = tk;
-        tmTicker.dataset.confirmedTicker = tk;  // pre-confirmed from row button
-        if(tk){ tmTicker.classList.add('tkac-confirmed'); }
-      }
-      if(tmShares) tmShares.value = '';
-      if(tmPrice) tmPrice.value = '';
-      if(tmReason) tmReason.value = '';
-      if(tmTitle) tmTitle.textContent = (side === 'sell' ? 'Sell Stock' : 'Buy Stock');
-      tmBackdrop.style.display = 'flex';
-      if(tmShares) tmShares.focus();
-    }
-    function closeTradeModal(){
-      if(tmBackdrop) tmBackdrop.style.display = 'none';
-    }
-    if(tmCancel){ tmCancel.addEventListener('click', closeTradeModal); }
-    if(tmBackdrop){
-      tmBackdrop.addEventListener('click', function(e){ if(e.target === tmBackdrop) closeTradeModal(); });
-    }
-    if(tmForm){
-      tmForm.addEventListener('submit', function(e){
-        e.preventDefault();
-        var side = String((tmSide && tmSide.value) || 'buy');
-        var ticker = getConfirmedTicker(tmTicker);
-        if(!ticker){ if(tmTicker){ tmTicker.classList.add('tkac-error'); tmTicker.focus(); } return; }
-        var shares = String((tmShares && tmShares.value) || '').trim();
-        var price = String((tmPrice && tmPrice.value) || '').trim();
-        var reason = String((tmReason && tmReason.value) || '').trim();
-        submitPortfolio(side, ticker, shares, price, reason);
-      });
-    }
-    document.addEventListener('click', function(e){
-      var el = e.target;
-      if(!(el && el.getAttribute)) return;
-      if(el.classList.contains('js-open-trade')){
-        return openTradeModal(String(el.getAttribute('data-side') || 'buy'), String(el.getAttribute('data-ticker') || ''));
-      }
-      if(el.classList.contains('js-exit-pos')){
-        var tk = String(el.getAttribute('data-ticker') || '').toUpperCase();
-        return submitPortfolio('sell', tk, '0', '0', 'other');
-      }
-      if(el.classList.contains('js-wl-remove-row')){
-        var tw = String(el.getAttribute('data-ticker') || '').toUpperCase();
-        return postKV('/my_universe/watchlist/remove', {ticker:tw}, function(){ window.location.reload(); });
-      }
-      if(el.classList.contains('js-bc-remove-row')){
-        var tb = String(el.getAttribute('data-ticker') || '').toUpperCase();
-        return postKV('/my_universe/bluechips/remove', {ticker:tb}, function(){ window.location.reload(); });
-      }
-    });
-
   })();
+
+  /* ── Form bindings ── */
+  function getConfirmedTicker(input){
+    var confirmed = String((input && input.dataset && input.dataset.confirmedTicker) || '').trim().toUpperCase();
+    if(confirmed) return confirmed;
+    var raw = String((input && input.value) || '').trim().toUpperCase();
+    if(/^[A-Z][A-Z0-9.\-]{0,9}$/.test(raw)) return raw;
+    return '';
+  }
+  function submitPortfolio(side, ticker, shares, price, reason){
+    return postKV('/my_universe/portfolio/upsert', {ticker:ticker, side:side, shares:shares, cost:(price||'0'), trade_reason:reason, note:''}, function(){ window.location.reload(); });
+  }
+
+  var pqForm = document.getElementById('portfolioQuickForm');
+  var pqAction = document.getElementById('pqAction');
+  var pqTicker = document.getElementById('pqTicker');
+  var pqShares = document.getElementById('pqShares');
+  var pqPrice = document.getElementById('pqPrice');
+  var pqReason = document.getElementById('pqReason');
+  if(pqForm){
+    pqForm.addEventListener('submit', function(e){
+      e.preventDefault();
+      var a = String((pqAction && pqAction.value) || '');
+      var t = getConfirmedTicker(pqTicker);
+      if(!t){ if(pqTicker){ pqTicker.classList.add('tkac-error'); pqTicker.focus(); } return; }
+      if(a === 'exit') return submitPortfolio('sell', t, '0', '0', '');
+      return submitPortfolio(a, t, String((pqShares && pqShares.value) || '').trim(), String((pqPrice && pqPrice.value) || '').trim(), String((pqReason && pqReason.value) || '').trim());
+    });
+  }
+
+  function bindTickerAction(btn, input, url, extra){
+    if(!btn) return;
+    btn.addEventListener('click', function(){
+      var t = getConfirmedTicker(input);
+      if(!t){ if(input){ input.classList.add('tkac-error'); input.focus(); } return; }
+      var payload = {ticker:t};
+      if(extra) Object.keys(extra).forEach(function(k){ payload[k] = extra[k]; });
+      postKV(url, payload, function(){ window.location.reload(); });
+    });
+  }
+  var wqTicker = document.getElementById('wqTicker');
+  bindTickerAction(document.getElementById('wqAdd'), wqTicker, '/my_universe/watchlist/add', {reason:''});
+  bindTickerAction(document.getElementById('wqRemove'), wqTicker, '/my_universe/watchlist/remove', {});
+  var bqTicker = document.getElementById('bqTicker');
+  bindTickerAction(document.getElementById('bqAdd'), bqTicker, '/my_universe/bluechips/add', {reason:''});
+  bindTickerAction(document.getElementById('bqRemove'), bqTicker, '/my_universe/bluechips/remove', {});
+  var bqSeed = document.getElementById('bqSeed');
+  if(bqSeed) bqSeed.addEventListener('click', function(){ postKV('/my_universe/bluechips/seed', {}, function(){ window.location.reload(); }); });
+
+  var cqForm = document.getElementById('cashQuickForm');
+  if(cqForm){
+    cqForm.addEventListener('submit', function(e){
+      e.preventDefault();
+      var amt = Number((document.getElementById('cqAmount') || {}).value || '0');
+      if(!amt) return;
+      var sign = (String((document.getElementById('cqAction') || {}).value || 'add') === 'remove') ? -1 : 1;
+      postKV('/my_universe/cash/upsert', {currency:'USD', amount:String(sign * Math.abs(amt))}, function(){ window.location.reload(); });
+    });
+  }
+
+  /* ── Drag & drop ── */
+  function moveTickerBetweenLists(ticker, from, to){
+    ticker = String(ticker || '').trim().toUpperCase();
+    if(!ticker || !to) return;
+    if(from === to) return;
+    if(from === 'portfolio' && to === 'watchlist'){ requestPortfolioToWatchlistMove(ticker); return; }
+    if(to === 'watchlist'){
+      postKV('/my_universe/watchlist/add', {ticker:ticker, reason:''}, function(res){ if(res && res.ok) window.location.reload(); });
+    } else if(to === 'bluechips'){
+      postKV('/my_universe/bluechips/add', {ticker:ticker, reason:''}, function(res){ if(res && res.ok) window.location.reload(); });
+    }
+  }
+  var draggedTicker = '', draggedSource = '';
+  document.querySelectorAll('[data-dnd-ticker]').forEach(function(row){
+    row.setAttribute('draggable', 'true');
+    row.addEventListener('dragstart', function(e){
+      draggedTicker = String(row.getAttribute('data-dnd-ticker') || '').toUpperCase();
+      draggedSource = String(row.getAttribute('data-dnd-source') || '');
+      try{ e.dataTransfer.setData('text/plain', JSON.stringify({ticker:draggedTicker, source:draggedSource})); }catch(_){}
+    });
+    row.addEventListener('dragend', function(){ draggedTicker = ''; draggedSource = ''; });
+  });
+  document.querySelectorAll('[data-drop-target]').forEach(function(zone){
+    zone.addEventListener('dragover', function(e){ e.preventDefault(); zone.classList.add('drag-over','drop-over'); });
+    zone.addEventListener('dragleave', function(){ zone.classList.remove('drag-over','drop-over'); });
+    zone.addEventListener('drop', function(e){
+      e.preventDefault(); zone.classList.remove('drag-over','drop-over');
+      var payload = null;
+      try{ payload = JSON.parse(e.dataTransfer.getData('text/plain') || '{}'); }catch(_){}
+      var tk = String((payload && payload.ticker) || draggedTicker || '').toUpperCase();
+      var from = String((payload && payload.source) || draggedSource || '');
+      var to = String(zone.getAttribute('data-drop-target') || '');
+      moveTickerBetweenLists(tk, from, to);
+    });
+  });
+
+  /* ── Move confirm modal ── */
+  var mcBackdrop = document.getElementById('moveConfirmBackdrop');
+  var mcText = document.getElementById('moveConfirmText');
+  var mcCancel = document.getElementById('mcCancel');
+  var mcConfirm = document.getElementById('mcConfirm');
+  var pendingMoveTicker = '';
+  function requestPortfolioToWatchlistMove(ticker){
+    pendingMoveTicker = String(ticker || '').toUpperCase();
+    if(!pendingMoveTicker || !mcBackdrop) return;
+    if(mcText) mcText.textContent = 'Add ' + pendingMoveTicker + ' to Watchlist and remove from Portfolio?';
+    mcBackdrop.style.display = 'flex';
+  }
+  function closeMoveConfirm(){ if(mcBackdrop) mcBackdrop.style.display = 'none'; pendingMoveTicker = ''; }
+  if(mcCancel) mcCancel.addEventListener('click', closeMoveConfirm);
+  if(mcBackdrop) mcBackdrop.addEventListener('click', function(e){ if(e.target === mcBackdrop) closeMoveConfirm(); });
+  if(mcConfirm) mcConfirm.addEventListener('click', function(){
+    var t = String(pendingMoveTicker || '').toUpperCase();
+    if(!t) return closeMoveConfirm();
+    postKV('/my_universe/watchlist/add', {ticker:t, reason:'moved_from_portfolio'}, function(res){
+      if(!(res && res.ok)) return closeMoveConfirm();
+      postKV('/my_universe/portfolio/upsert', {ticker:t, side:'sell', shares:'0', cost:'0', trade_reason:'other', note:'moved_to_watchlist'}, function(){ window.location.reload(); });
+    });
+  });
+
+  /* ── Trade modal ── */
+  var tmBackdrop = document.getElementById('tradeModalBackdrop');
+  var tmForm = document.getElementById('tradeModalForm');
+  var tmSide = document.getElementById('tmSide');
+  var tmTicker = document.getElementById('tmTicker');
+  var tmShares = document.getElementById('tmShares');
+  var tmPrice = document.getElementById('tmPrice');
+  var tmReason = document.getElementById('tmReason');
+  var tmCancel = document.getElementById('tmCancel');
+  var tmTitle = document.getElementById('tradeModalTitle');
+  function openTradeModal(side, ticker, prefillShares, prefillCost){
+    if(!tmBackdrop) return;
+    if(tmSide) tmSide.value = side || 'buy';
+    if(tmTicker){ var tk = String(ticker || '').toUpperCase(); tmTicker.value = tk; tmTicker.dataset.confirmedTicker = tk; if(tk) tmTicker.classList.add('tkac-confirmed'); }
+    if(tmShares) tmShares.value = prefillShares || '';
+    if(tmPrice) tmPrice.value = prefillCost || '';
+    if(tmReason) tmReason.value = '';
+    var titles = {buy:'Buy Stock', sell:'Sell Stock', edit:'Edit Position'};
+    if(tmTitle) tmTitle.textContent = titles[side] || 'Trade';
+    if(side === 'edit'){
+      if(tmShares) tmShares.placeholder = 'Total shares';
+      if(tmPrice) tmPrice.placeholder = 'Avg cost';
+    } else {
+      if(tmShares) tmShares.placeholder = 'Shares';
+      if(tmPrice) tmPrice.placeholder = 'Price';
+    }
+    tmBackdrop.style.display = 'flex';
+    if(tmShares) tmShares.focus();
+  }
+  function closeTradeModal(){ if(tmBackdrop) tmBackdrop.style.display = 'none'; }
+  if(tmCancel) tmCancel.addEventListener('click', closeTradeModal);
+  if(tmBackdrop) tmBackdrop.addEventListener('click', function(e){ if(e.target === tmBackdrop) closeTradeModal(); });
+  if(tmForm) tmForm.addEventListener('submit', function(e){
+    e.preventDefault();
+    var side = String((tmSide && tmSide.value) || 'buy');
+    var ticker = getConfirmedTicker(tmTicker);
+    if(!ticker){ if(tmTicker){ tmTicker.classList.add('tkac-error'); tmTicker.focus(); } return; }
+    submitPortfolio(side, ticker, String((tmShares && tmShares.value) || '').trim(), String((tmPrice && tmPrice.value) || '').trim(), String((tmReason && tmReason.value) || '').trim());
+  });
+  document.addEventListener('click', function(e){
+    var el = e.target;
+    if(!(el && el.getAttribute)) return;
+    if(el.classList.contains('js-open-trade')) return openTradeModal(String(el.getAttribute('data-side') || 'buy'), String(el.getAttribute('data-ticker') || ''), el.getAttribute('data-shares') || '', el.getAttribute('data-cost') || '');
+    if(el.classList.contains('js-exit-pos')) return submitPortfolio('sell', String(el.getAttribute('data-ticker') || '').toUpperCase(), '0', '0', 'other');
+    if(el.classList.contains('js-wl-remove-row')) return postKV('/my_universe/watchlist/remove', {ticker:String(el.getAttribute('data-ticker') || '').toUpperCase()}, function(){ window.location.reload(); });
+    if(el.classList.contains('js-bc-remove-row')) return postKV('/my_universe/bluechips/remove', {ticker:String(el.getAttribute('data-ticker') || '').toUpperCase()}, function(){ window.location.reload(); });
+  });
+
+})();
+
+/* ── Quarterly Reviews ── */
+function toggleQR(){
+  var body = document.getElementById('qrBody');
+  var chev = document.getElementById('qrChevron');
+  var open = body.classList.contains('open');
+  body.classList.toggle('open', !open);
+  chev.classList.toggle('open', !open);
+}
+
+/* ── Timeline ── */
+function toggleTimeline(){
+  var body = document.getElementById('tlBody');
+  var chev = document.getElementById('tlChevron');
+  var open = body.classList.contains('open');
+  body.classList.toggle('open', !open);
+  chev.classList.toggle('open', !open);
+}
+function toggleTimelineMore(){
+  var extras = document.querySelectorAll('[data-tl-extra]');
+  var btn = document.getElementById('tlMoreBtn');
+  var showing = extras.length && extras[0].style.display !== 'none';
+  extras.forEach(function(el){ el.style.display = showing ? 'none' : 'flex'; });
+  if(btn) btn.textContent = showing ? 'Show ' + extras.length + ' more' : 'Show less';
+}
+
+/* ── Ideas ── */
+function esc(s){ var d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+function loadIdeas(){
+  fetch('/api/ideas?status=open')
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var ideas = data.ideas || [];
+      var body = document.getElementById('ideaBody');
+      var countEl = document.getElementById('ideaCount');
+      if(countEl) countEl.textContent = ideas.length ? ideas.length + ' ideas' : '0 ideas';
+      if(!ideas.length){
+        body.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px;">No open ideas yet — capture one below.</div>';
+        return;
+      }
+      var html = '';
+      ideas.forEach(function(idea){
+        var d = idea.created_at ? new Date(idea.created_at).toLocaleDateString() : '';
+        html += '<div class="mu-idea-row">'
+          +'<div class="mu-idea-title">'+esc(idea.title)+'</div>'
+          +(idea.ticker ? '<span class="mu-idea-ticker">$'+esc(idea.ticker)+'</span>' : '')
+          +'<span class="mu-idea-meta">'+esc(idea.source)+' · '+d+'</span>'
+          +'<div class="mu-idea-actions">'
+            +(idea.ticker ? '<button class="mu-idea-act promote" onclick="promoteIdea('+idea.id+',\''+esc(idea.ticker)+'\')">→ Watchlist</button>' : '<button class="mu-idea-act promote" onclick="promoteIdea('+idea.id+',\'\')">Promote</button>')
+            +'<button class="mu-idea-act" onclick="archiveIdea('+idea.id+')">Archive</button>'
+          +'</div></div>';
+      });
+      body.innerHTML = html;
+    });
+}
+function saveNewIdea(){
+  var title = (document.getElementById('ideaTitle').value || '').trim();
+  if(!title) return;
+  var ticker = (document.getElementById('ideaTicker').value || '').trim().toUpperCase() || null;
+  fetch('/api/ideas', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({title:title, ticker:ticker, notes:'', source:'manual'})
+  }).then(function(r){ return r.json(); })
+    .then(function(data){
+      if(data.ok){
+        document.getElementById('ideaTitle').value = '';
+        document.getElementById('ideaTicker').value = '';
+        loadIdeas();
+      }
+    });
+}
+function promoteIdea(ideaId, ticker){
+  fetch('/api/ideas/'+ideaId+'/status', {
+    method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({status:'promoted'})
+  }).then(function(r){ return r.json(); })
+    .then(function(data){
+      if(data.ok){
+        if(ticker){
+          fetch('/my_universe/watchlist/add', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ticker:ticker, reason:'promoted_from_idea_list'})
+          }).then(function(){ window.location.reload(); })
+            .catch(function(){ window.location.reload(); });
+        } else {
+          loadIdeas();
+        }
+      }
+    });
+}
+function archiveIdea(ideaId){
+  fetch('/api/ideas/'+ideaId+'/status', {
+    method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({status:'archived'})
+  }).then(function(){ loadIdeas(); });
+}
+loadIdeas();
+
 </script>
 {% endblock %}

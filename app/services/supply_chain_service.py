@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.db import core_conn as _conn_core
-from app.services.postgres_core_service import core_backend, pg_connect
+from app.services.postgres_core_service import pg_connect
 
 
 def ensure_supply_chain_schema() -> dict[str, Any]:
@@ -30,66 +29,27 @@ def ensure_supply_chain_schema() -> dict[str, Any]:
             UNIQUE (source_company_id, target_company_id, relationship_type, evidence_text)
         )
     """
-    if core_backend() == "postgres":
-        con = pg_connect()
-        if con is None:
-            return {"ok": False, "error": "pg_not_available"}
-        try:
-            cur = con.cursor()
-            cur.execute(ddl_companies)
-            cur.execute(ddl_relationships)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_ticker ON companies(ticker)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_company_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_company_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_relationships_confidence ON relationships(confidence_score)")
-            con.commit()
-            return {"ok": True}
-        except Exception as exc:
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            return {"ok": False, "error": str(exc)}
-        finally:
-            con.close()
-
-    con_sq = _conn_core()
+    con = pg_connect()
+    if con is None:
+        return {"ok": False, "error": "pg_not_available"}
     try:
-        con_sq.execute(
-            """
-            CREATE TABLE IF NOT EXISTS companies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                market_cap REAL,
-                sector TEXT,
-                created_at TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-        con_sq.execute(
-            """
-            CREATE TABLE IF NOT EXISTS relationships (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_company_id INTEGER NOT NULL,
-                target_company_id INTEGER NOT NULL,
-                relationship_type TEXT NOT NULL,
-                evidence_text TEXT NOT NULL,
-                source_url TEXT,
-                confidence_score INTEGER NOT NULL,
-                created_at TEXT NOT NULL DEFAULT '',
-                UNIQUE (source_company_id, target_company_id, relationship_type, evidence_text)
-            )
-            """
-        )
-        con_sq.execute("CREATE INDEX IF NOT EXISTS idx_companies_ticker ON companies(ticker)")
-        con_sq.execute("CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_company_id)")
-        con_sq.execute("CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_company_id)")
-        con_sq.execute("CREATE INDEX IF NOT EXISTS idx_relationships_confidence ON relationships(confidence_score)")
-        con_sq.commit()
+        cur = con.cursor()
+        cur.execute(ddl_companies)
+        cur.execute(ddl_relationships)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_ticker ON companies(ticker)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_company_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_company_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_relationships_confidence ON relationships(confidence_score)")
+        con.commit()
         return {"ok": True}
+    except Exception as exc:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "error": str(exc)}
     finally:
-        con_sq.close()
+        con.close()
 
 
 def _edge_style(confidence_score: int) -> dict[str, Any]:
@@ -192,91 +152,11 @@ def _fetch_network_rows_pg(ticker: str) -> tuple[list[dict[str, Any]], list[dict
         con.close()
 
 
-def _fetch_network_rows_sqlite(ticker: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    con = _conn_core()
-    try:
-        cur = con.execute("SELECT id, ticker, name, market_cap, sector FROM companies WHERE UPPER(ticker) = UPPER(?) LIMIT 1", (ticker,))
-        root = cur.fetchone()
-        if not root:
-            return ([], [])
-        root_id = int(root["id"] or 0)
-        edge_rows = con.execute(
-            """
-            WITH first_edges AS (
-              SELECT id, source_company_id, target_company_id, relationship_type, evidence_text, source_url, confidence_score
-              FROM relationships
-              WHERE source_company_id = ? OR target_company_id = ?
-            ),
-            first_nodes AS (
-              SELECT source_company_id AS id FROM first_edges
-              UNION
-              SELECT target_company_id AS id FROM first_edges
-            ),
-            second_edges AS (
-              SELECT r.id, r.source_company_id, r.target_company_id, r.relationship_type, r.evidence_text, r.source_url, r.confidence_score
-              FROM relationships r
-              JOIN first_nodes fn ON r.source_company_id = fn.id OR r.target_company_id = fn.id
-            ),
-            all_edges AS (
-              SELECT * FROM first_edges
-              UNION
-              SELECT * FROM second_edges
-            )
-            SELECT DISTINCT id, source_company_id, target_company_id, relationship_type, evidence_text, source_url, confidence_score
-            FROM all_edges
-            """,
-            (root_id, root_id),
-        ).fetchall()
-        node_ids: set[int] = {root_id}
-        for r in edge_rows:
-            if int(r["source_company_id"] or 0) > 0:
-                node_ids.add(int(r["source_company_id"]))
-            if int(r["target_company_id"] or 0) > 0:
-                node_ids.add(int(r["target_company_id"]))
-        if not node_ids:
-            return ([], [])
-        placeholders = ",".join(["?"] * len(node_ids))
-        node_rows = con.execute(
-            f"SELECT id, ticker, name, market_cap, sector FROM companies WHERE id IN ({placeholders})",
-            tuple(node_ids),
-        ).fetchall()
-        nodes = [
-            {
-                "id": str(int(n["id"] or 0)),
-                "ticker": str(n["ticker"] or ""),
-                "name": str(n["name"] or ""),
-                "market_cap": float(n["market_cap"]) if n["market_cap"] is not None else None,
-                "sector": str(n["sector"] or ""),
-            }
-            for n in node_rows
-        ]
-        edges = []
-        for r in edge_rows:
-            c = int(r["confidence_score"] or 0)
-            edge = {
-                "id": str(int(r["id"] or 0)),
-                "source": str(int(r["source_company_id"] or 0)),
-                "target": str(int(r["target_company_id"] or 0)),
-                "relationship_type": str(r["relationship_type"] or ""),
-                "evidence_text": str(r["evidence_text"] or ""),
-                "source_url": str(r["source_url"] or ""),
-                "confidence_score": c,
-            }
-            edge["style"] = _edge_style(c)
-            edges.append(edge)
-        return (nodes, edges)
-    finally:
-        con.close()
-
-
 def get_network_graph(ticker: str) -> dict[str, Any]:
     t = str(ticker or "").strip().upper()
     if not t:
         return {"nodes": [], "edges": []}
-    if core_backend() == "postgres":
-        nodes, edges = _fetch_network_rows_pg(t)
-    else:
-        nodes, edges = _fetch_network_rows_sqlite(t)
+    nodes, edges = _fetch_network_rows_pg(t)
     return {"ticker": t, "nodes": nodes, "edges": edges}
 
 
@@ -311,28 +191,6 @@ def _upsert_company_pg(ticker: str, name: str = "") -> int:
         con.close()
 
 
-def _upsert_company_sqlite(ticker: str, name: str = "") -> int:
-    con = _conn_core()
-    try:
-        row = con.execute("SELECT id FROM companies WHERE UPPER(ticker)=UPPER(?) LIMIT 1", (ticker,)).fetchone()
-        if row:
-            cid = int(row["id"] or 0)
-            if name:
-                con.execute("UPDATE companies SET name=? WHERE id=?", ((name or ticker)[:200], cid))
-                con.commit()
-            return cid
-        cur = con.execute(
-            "INSERT INTO companies(ticker, name, created_at) VALUES (?, ?, datetime('now'))",
-            (str(ticker or "").upper()[:16], (name or ticker)[:200]),
-        )
-        con.commit()
-        return int(cur.lastrowid or 0)
-    except Exception:
-        return 0
-    finally:
-        con.close()
-
-
 def ingest_sec_relationship_to_network(
     *,
     source_ticker: str,
@@ -356,87 +214,48 @@ def ingest_sec_relationship_to_network(
     ev = str(evidence_text or "").strip()[:1200]
     src_url = str(source_url or "").strip()[:1000]
 
-    if core_backend() == "postgres":
-        sid = _upsert_company_pg(src_tk, source_name or src_tk)
-        tid = _upsert_company_pg(tgt_tk, target_name or tgt_tk)
-        if sid <= 0 or tid <= 0:
-            return False
-        con = pg_connect()
-        if con is None:
-            return False
-        try:
-            cur = con.cursor()
-            cur.execute(
-                """SELECT id, confidence_score
-                   FROM relationships
-                   WHERE source_company_id=%s AND target_company_id=%s AND relationship_type=%s
-                   ORDER BY id DESC LIMIT 1""",
-                (sid, tid, rel),
-            )
-            row = cur.fetchone()
-            if row:
-                rid = int((row[0] if isinstance(row, (tuple, list)) else row["id"]) or 0)
-                prev_conf = int((row[1] if isinstance(row, (tuple, list)) else row["confidence_score"]) or 0)
-                if conf >= prev_conf:
-                    cur.execute(
-                        """UPDATE relationships
-                           SET evidence_text=%s, source_url=%s, confidence_score=%s
-                           WHERE id=%s""",
-                        (ev or f"SEC extracted link: {src_tk}->{tgt_tk}", src_url, conf, rid),
-                    )
-                con.commit()
-                return True
-            cur.execute(
-                """INSERT INTO relationships
-                   (source_company_id, target_company_id, relationship_type, evidence_text, source_url, confidence_score)
-                   VALUES (%s,%s,%s,%s,%s,%s)""",
-                (sid, tid, rel, ev or f"SEC extracted link: {src_tk}->{tgt_tk}", src_url, conf),
-            )
-            con.commit()
-            return True
-        except Exception:
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            return False
-        finally:
-            con.close()
-
-    sid = _upsert_company_sqlite(src_tk, source_name or src_tk)
-    tid = _upsert_company_sqlite(tgt_tk, target_name or tgt_tk)
+    sid = _upsert_company_pg(src_tk, source_name or src_tk)
+    tid = _upsert_company_pg(tgt_tk, target_name or tgt_tk)
     if sid <= 0 or tid <= 0:
         return False
-    con = _conn_core()
+    con = pg_connect()
+    if con is None:
+        return False
     try:
-        row = con.execute(
+        cur = con.cursor()
+        cur.execute(
             """SELECT id, confidence_score
                FROM relationships
-               WHERE source_company_id=? AND target_company_id=? AND relationship_type=?
+               WHERE source_company_id=%s AND target_company_id=%s AND relationship_type=%s
                ORDER BY id DESC LIMIT 1""",
             (sid, tid, rel),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         if row:
-            rid = int(row["id"] or 0)
-            prev_conf = int(row["confidence_score"] or 0)
+            rid = int((row[0] if isinstance(row, (tuple, list)) else row["id"]) or 0)
+            prev_conf = int((row[1] if isinstance(row, (tuple, list)) else row["confidence_score"]) or 0)
             if conf >= prev_conf:
-                con.execute(
+                cur.execute(
                     """UPDATE relationships
-                       SET evidence_text=?, source_url=?, confidence_score=?
-                       WHERE id=?""",
+                       SET evidence_text=%s, source_url=%s, confidence_score=%s
+                       WHERE id=%s""",
                     (ev or f"SEC extracted link: {src_tk}->{tgt_tk}", src_url, conf, rid),
                 )
-                con.commit()
+            con.commit()
             return True
-        con.execute(
+        cur.execute(
             """INSERT INTO relationships
-               (source_company_id, target_company_id, relationship_type, evidence_text, source_url, confidence_score, created_at)
-               VALUES (?,?,?,?,?,?,datetime('now'))""",
+               (source_company_id, target_company_id, relationship_type, evidence_text, source_url, confidence_score)
+               VALUES (%s,%s,%s,%s,%s,%s)""",
             (sid, tid, rel, ev or f"SEC extracted link: {src_tk}->{tgt_tk}", src_url, conf),
         )
         con.commit()
         return True
     except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
         return False
     finally:
         con.close()

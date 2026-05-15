@@ -5,14 +5,13 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 from typing import Any
 
 from app.core.config import ROOT
-from app.core.db import core_conn as _conn, sqlite_retry
 from app.core.date import parse_datetime_flexible
 from app.core.ticker import safe_ticker as _safe_ticker
 from app.services.postgres_core_service import (
+    ensure_postgres_core_schema,
     list_investor_style_memory_pg,
     list_watchlist_thesis_pg,
     pg_connect,
@@ -64,58 +63,12 @@ If their profile is perfectly airtight with no blind spots or missing context, r
 
 
 def ensure_daily_operator_schema() -> None:
-    def _write() -> None:
-        con = _conn()
-        try:
-            con.execute(
-                """CREATE TABLE IF NOT EXISTS daily_operator_state (
-                    state_key TEXT PRIMARY KEY,
-                    state_value TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL
-                )"""
-            )
-            con.execute(
-                """CREATE TABLE IF NOT EXISTS daily_operator_gap_prompts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    prompt_id TEXT NOT NULL UNIQUE,
-                    user_name TEXT NOT NULL DEFAULT '',
-                    prompt_text TEXT NOT NULL DEFAULT '',
-                    context_json TEXT NOT NULL DEFAULT '{}',
-                    context_fingerprint TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL DEFAULT 'open',
-                    answered_at TEXT NOT NULL DEFAULT '',
-                    answer_text TEXT NOT NULL DEFAULT '',
-                    resolved_json TEXT NOT NULL DEFAULT '{}'
-                )"""
-            )
-            con.execute("CREATE INDEX IF NOT EXISTS idx_daily_gap_status ON daily_operator_gap_prompts(status, id DESC)")
-            con.execute(
-                """CREATE TABLE IF NOT EXISTS daily_operator_gap_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    reason TEXT NOT NULL DEFAULT '',
-                    saved_count INTEGER NOT NULL DEFAULT 0,
-                    prompt_id TEXT NOT NULL DEFAULT '',
-                    details_json TEXT NOT NULL DEFAULT '{}'
-                )"""
-            )
-            con.execute("CREATE INDEX IF NOT EXISTS idx_daily_gap_audit_created ON daily_operator_gap_audit(id DESC)")
-            con.commit()
-        finally:
-            con.close()
-
-    if not (pg_enabled() and strict_postgres_mode()):
-        try:
-            sqlite_retry(_write)
-        except sqlite3.OperationalError:
-            # Avoid blocking chat/dashboard paths under transient DB write locks.
-            return
-        except RuntimeError:
-            # Strict-postgres guard can forbid sqlite in some runtime paths.
-            pass
     if pg_enabled():
+        try:
+            ensure_postgres_core_schema()
+        except Exception:
+            if strict_postgres_mode():
+                return
         con_pg = pg_connect()
         if con_pg is not None:
             try:
@@ -150,20 +103,6 @@ def _stale_hours() -> int:
         return 48
 
 
-def _state_get_sqlite(con: sqlite3.Connection, key: str) -> str:
-    row = con.execute("SELECT state_value FROM daily_operator_state WHERE state_key=? LIMIT 1", (str(key),)).fetchone()
-    return str((row[0] if row else "") or "")
-
-
-def _state_set_sqlite(con: sqlite3.Connection, key: str, value: str) -> None:
-    now = dt.datetime.now().isoformat()
-    con.execute(
-        "INSERT INTO daily_operator_state(state_key, state_value, updated_at) VALUES(?, ?, ?) "
-        "ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value, updated_at=excluded.updated_at",
-        (str(key), str(value or ""), now),
-    )
-
-
 def _state_get(key: str) -> str:
     if pg_enabled():
         con_pg = pg_connect()
@@ -174,20 +113,14 @@ def _state_get(key: str) -> str:
                 row = cur.fetchone()
                 return str((row[0] if row else "") or "")
             except Exception:
-                if strict_postgres_mode():
-                    return ""
+                return ""
             finally:
                 con_pg.close()
-    con = _conn()
-    try:
-        return _state_get_sqlite(con, key)
-    finally:
-        con.close()
+    return ""
 
 
 def _state_set(key: str, value: str) -> None:
     now = dt.datetime.now().isoformat()
-    wrote_pg = False
     if pg_enabled():
         con_pg = pg_connect()
         if con_pg is not None:
@@ -199,24 +132,13 @@ def _state_set(key: str, value: str) -> None:
                     (str(key), str(value or ""), now),
                 )
                 con_pg.commit()
-                wrote_pg = True
             except Exception:
                 try:
                     con_pg.rollback()
                 except Exception:
                     pass
-                if strict_postgres_mode():
-                    return
             finally:
                 con_pg.close()
-    if wrote_pg and strict_postgres_mode():
-        return
-    con = _conn()
-    try:
-        _state_set_sqlite(con, key, value)
-        con.commit()
-    finally:
-        con.close()
 
 
 def _expire_stale_open_prompts() -> None:
@@ -240,25 +162,11 @@ def _expire_stale_open_prompts() -> None:
                     pass
             finally:
                 con_pg.close()
-    if strict_postgres_mode() and pg_enabled():
-        return
-    con = _conn()
-    try:
-        con.execute(
-            "UPDATE daily_operator_gap_prompts "
-            "SET status='expired', updated_at=? "
-            "WHERE status='open' AND created_at < ?",
-            (dt.datetime.now().isoformat(), cutoff_iso),
-        )
-        con.commit()
-    finally:
-        con.close()
 
 
 def _insert_open_prompt(prompt_id: str, user_name: str, prompt_text: str, context_json: str, context_fingerprint: str) -> None:
     now = dt.datetime.now().isoformat()
     _expire_stale_open_prompts()
-    wrote_pg = False
     if pg_enabled():
         con_pg = pg_connect()
         if con_pg is not None:
@@ -275,29 +183,13 @@ def _insert_open_prompt(prompt_id: str, user_name: str, prompt_text: str, contex
                     (now, now, prompt_id, user_name, prompt_text, context_json, context_fingerprint),
                 )
                 con_pg.commit()
-                wrote_pg = True
             except Exception:
                 try:
                     con_pg.rollback()
                 except Exception:
                     pass
-                if strict_postgres_mode():
-                    return
             finally:
                 con_pg.close()
-    if wrote_pg and strict_postgres_mode():
-        return
-    con = _conn()
-    try:
-        con.execute(
-            "INSERT OR REPLACE INTO daily_operator_gap_prompts "
-            "(created_at, updated_at, prompt_id, user_name, prompt_text, context_json, context_fingerprint, status, answered_at, answer_text, resolved_json) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, 'open', '', '', '{}')",
-            (now, now, prompt_id, user_name, prompt_text, context_json, context_fingerprint),
-        )
-        con.commit()
-    finally:
-        con.close()
 
 
 def _latest_open_prompt() -> dict[str, Any]:
@@ -321,35 +213,15 @@ def _latest_open_prompt() -> dict[str, Any]:
                     }
                 return {}
             except Exception:
-                if strict_postgres_mode():
-                    return {}
+                return {}
             finally:
                 con_pg.close()
-    con = _conn()
-    try:
-        row = con.execute(
-            """SELECT id, prompt_id, prompt_text, context_json
-               FROM daily_operator_gap_prompts
-               WHERE status='open'
-               ORDER BY id DESC
-               LIMIT 1"""
-        ).fetchone()
-        if not row:
-            return {}
-        return {
-            "id": int(row["id"] or 0),
-            "prompt_id": str(row["prompt_id"] or ""),
-            "prompt_text": str(row["prompt_text"] or ""),
-            "context_json": str(row["context_json"] or "{}"),
-        }
-    finally:
-        con.close()
+    return {}
 
 
 def _mark_prompt_answered(row_id: int, answer_text: str, resolved_obj: dict[str, Any]) -> None:
     now = dt.datetime.now().isoformat()
     payload = json.dumps(resolved_obj or {}, ensure_ascii=True)
-    wrote_pg = False
     if pg_enabled():
         con_pg = pg_connect()
         if con_pg is not None:
@@ -362,27 +234,13 @@ def _mark_prompt_answered(row_id: int, answer_text: str, resolved_obj: dict[str,
                     (now, str(answer_text or "")[:4000], payload, now, int(row_id or 0)),
                 )
                 con_pg.commit()
-                wrote_pg = True
             except Exception:
                 try:
                     con_pg.rollback()
                 except Exception:
                     pass
-                if strict_postgres_mode():
-                    return
             finally:
                 con_pg.close()
-    if wrote_pg and strict_postgres_mode():
-        return
-    con = _conn()
-    try:
-        con.execute(
-            "UPDATE daily_operator_gap_prompts SET status='answered', answered_at=?, answer_text=?, resolved_json=?, updated_at=? WHERE id=?",
-            (now, str(answer_text or "")[:4000], payload, now, int(row_id or 0)),
-        )
-        con.commit()
-    finally:
-        con.close()
 
 
 def _log_gap_audit(reason: str, saved_count: int = 0, prompt_id: str = "", details: dict[str, Any] | None = None) -> None:
@@ -406,17 +264,6 @@ def _log_gap_audit(reason: str, saved_count: int = 0, prompt_id: str = "", detai
                     pass
             finally:
                 con_pg.close()
-    if strict_postgres_mode() and pg_enabled():
-        return
-    con = _conn()
-    try:
-        con.execute(
-            "INSERT INTO daily_operator_gap_audit(created_at, reason, saved_count, prompt_id, details_json) VALUES(?, ?, ?, ?, ?)",
-            (now, str(reason or "")[:80], int(saved_count or 0), str(prompt_id or "")[:120], detail_json),
-        )
-        con.commit()
-    finally:
-        con.close()
 
 
 def _read_portfolio_csv() -> list[dict[str, Any]]:
@@ -601,104 +448,21 @@ def _build_context_payload() -> dict[str, Any]:
                     "six_month_performance_vs_benchmark": "unavailable",
                     "recently_added_to_watchlist": watchlist_file[:8],
                 }
-    con = _conn()
-    try:
-        wt_rows = con.execute(
-            """SELECT ticker, COALESCE(thesis_summary,'') AS thesis_summary, COALESCE(time_horizon,'') AS time_horizon,
-                      COALESCE(invalidation_criteria,'') AS invalidation_criteria, COALESCE(strategy_tag,'') AS strategy_tag,
-                      COALESCE(created_at,'') AS created_at, COALESCE(updated_at,'') AS updated_at
-               FROM watchlist_thesis
-               ORDER BY updated_at DESC
-               LIMIT 300"""
-        ).fetchall()
-        style_rows = con.execute(
-            """SELECT COALESCE(key,'') AS key, COALESCE(answer,'') AS answer, COALESCE(updated_at,'') AS updated_at
-               FROM investor_style_memory
-               ORDER BY updated_at DESC
-               LIMIT 300"""
-        ).fetchall()
-        tx = con.execute(
-            "SELECT COALESCE(created_at,'') AS created_at FROM portfolio_transactions ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        tx_stats = con.execute(
-            """SELECT
-                 COUNT(*) AS cnt,
-                 COUNT(DISTINCT COALESCE(ticker,'')) AS ticker_cnt,
-                 COALESCE(MIN(created_at),'') AS min_ts,
-                 COALESCE(MAX(created_at),'') AS max_ts
-               FROM portfolio_transactions"""
-        ).fetchone()
-        tx_recent_rows = con.execute(
-            """SELECT COALESCE(created_at,'') AS created_at, COALESCE(ticker,'') AS ticker,
-                      COALESCE(action,'') AS action, COALESCE(shares,0) AS shares, COALESCE(price,0) AS price
-               FROM portfolio_transactions
-               ORDER BY id DESC
-               LIMIT 20"""
-        ).fetchall()
-        days_since_trade = None
-        if tx and str(tx["created_at"] or "").strip():
-            t0 = parse_datetime_flexible(str(tx["created_at"]))
-            if t0 is not None:
-                days_since_trade = int(max(0.0, (dt.datetime.now() - t0).total_seconds() / 86400.0))
-            else:
-                days_since_trade = None
-        tx_recent = [
-            {
-                "created_at": str(r["created_at"] or ""),
-                "ticker": _safe_ticker(str(r["ticker"] or "")),
-                "action": str(r["action"] or "").lower()[:12],
-                "shares": float(r["shares"] or 0.0),
-                "price": float(r["price"] or 0.0),
-            }
-            for r in tx_recent_rows
-            if _safe_ticker(str(r["ticker"] or ""))
-        ]
-        watchlist_rows = []
-        for r in wt_rows:
-            tk = _safe_ticker(str(r["ticker"] or ""))
-            if not tk:
-                continue
-            watchlist_rows.append(
-                {
-                    "ticker": tk,
-                    "thesis_summary": str(r["thesis_summary"] or "")[:260],
-                    "time_horizon": str(r["time_horizon"] or "")[:64],
-                    "invalidation_criteria": str(r["invalidation_criteria"] or "")[:260],
-                    "strategy_tag": str(r["strategy_tag"] or "")[:32],
-                    "created_at": str(r["created_at"] or ""),
-                    "updated_at": str(r["updated_at"] or ""),
-                }
-            )
-        added_recent = []
-        for r in sorted(watchlist_rows, key=lambda x: str(x.get("created_at") or ""), reverse=True):
-            tk = str(r.get("ticker") or "")
-            if tk and tk not in added_recent:
-                added_recent.append(tk)
-            if len(added_recent) >= 8:
-                break
-        style_mem = [
-            {"key": str(r["key"] or "")[:80], "answer": str(r["answer"] or "")[:300], "updated_at": str(r["updated_at"] or "")}
-            for r in style_rows
-            if str(r["key"] or "").strip() and str(r["answer"] or "").strip()
-        ]
-        portfolio_live = {"holdings_count": len(portfolio_rows), "positions": portfolio_rows[:80]}
-        return {
-            "portfolio_live": portfolio_live,
-            "portfolio_transaction_history": {
-                "transactions_count": int((tx_stats["cnt"] if tx_stats else 0) or 0),
-                "distinct_tickers_traded": int((tx_stats["ticker_cnt"] if tx_stats else 0) or 0),
-                "first_trade_at": str((tx_stats["min_ts"] if tx_stats else "") or ""),
-                "last_trade_at": str((tx_stats["max_ts"] if tx_stats else "") or ""),
-                "recent_trades": tx_recent[:12],
-            },
-            "watchlist_thesis": watchlist_rows[:120],
-            "investor_style_memory": style_mem[:120],
-            "days_since_last_trade": days_since_trade if days_since_trade is not None else "unknown",
-            "six_month_performance_vs_benchmark": _six_month_perf_vs_benchmark(portfolio_rows, benchmark="SPY"),
-            "recently_added_to_watchlist": added_recent if added_recent else watchlist_file[:8],
-        }
-    finally:
-        con.close()
+    return {
+        "portfolio_live": {"holdings_count": len(portfolio_rows), "positions": portfolio_rows[:80]},
+        "portfolio_transaction_history": {
+            "transactions_count": 0,
+            "distinct_tickers_traded": 0,
+            "first_trade_at": "",
+            "last_trade_at": "",
+            "recent_trades": [],
+        },
+        "watchlist_thesis": [],
+        "investor_style_memory": [],
+        "days_since_last_trade": "unknown",
+        "six_month_performance_vs_benchmark": "unavailable",
+        "recently_added_to_watchlist": watchlist_file[:8],
+    }
 
 
 def _context_fingerprint(payload: dict[str, Any]) -> str:
@@ -766,41 +530,15 @@ def get_dynamic_gap_prompt(user_name: str = "Arda") -> dict[str, Any]:
         return {"ok": True, "needs_attention": False, "prompt_id": "", "message": "", "kind": "none"}
 
 
-def _upsert_style_kv(con: sqlite3.Connection | None, key: str, value: str) -> bool:
+def _upsert_style_kv(key: str, value: str) -> bool:
     k = str(key or "").strip().lower()[:80]
     v = str(value or "").strip()[:2000]
     if not k or not v:
         return False
-    now = dt.datetime.now().isoformat()
-    ok_sql = True
-    if not strict_postgres_mode():
-        own_con = False
-        con_sql = con
-        if con_sql is None:
-            con_sql = _conn()
-            own_con = True
-        try:
-            row = con_sql.execute("SELECT key FROM investor_style_memory WHERE key=? LIMIT 1", (k,)).fetchone()
-            if row:
-                con_sql.execute("UPDATE investor_style_memory SET answer=?, updated_at=? WHERE key=?", (v, now, k))
-            else:
-                con_sql.execute(
-                    "INSERT INTO investor_style_memory (key, answer, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (k, v, now, now),
-                )
-            if own_con:
-                con_sql.commit()
-        finally:
-            if own_con:
-                con_sql.close()
-    ok_pg = True
-    if pg_enabled():
-        ok_pg = bool(upsert_investor_style_memory_pg(k, v))
-    return bool(ok_sql and ok_pg)
+    return bool(pg_enabled() and upsert_investor_style_memory_pg(k, v))
 
 
 def _upsert_watchlist_kv(
-    con: sqlite3.Connection | None,
     ticker: str,
     thesis_summary: str = "",
     time_horizon: str = "",
@@ -817,56 +555,19 @@ def _upsert_watchlist_kv(
     st = str(strategy_tag or "").strip().upper()[:32]
     if not (ts or hz or inv or st):
         return False
-    now = dt.datetime.now().isoformat()
-    ok_sql = True
-    if not strict_postgres_mode():
-        own_con = False
-        con_sql = con
-        if con_sql is None:
-            con_sql = _conn()
-            own_con = True
-        try:
-            row = con_sql.execute("SELECT ticker FROM watchlist_thesis WHERE ticker=? LIMIT 1", (tk,)).fetchone()
-            if row:
-                con_sql.execute(
-                    """UPDATE watchlist_thesis
-                       SET thesis=CASE WHEN ?<>'' THEN ? ELSE thesis END,
-                           thesis_summary=CASE WHEN ?<>'' THEN ? ELSE thesis_summary END,
-                           time_horizon=CASE WHEN ?<>'' THEN ? ELSE time_horizon END,
-                           invalidation_criteria=CASE WHEN ?<>'' THEN ? ELSE invalidation_criteria END,
-                           strategy_tag=CASE WHEN ?<>'' THEN ? ELSE strategy_tag END,
-                           updated_at=?
-                       WHERE ticker=?""",
-                    (ts, ts, th, th, hz, hz, inv, inv, st, st, now, tk),
-                )
-            else:
-                con_sql.execute(
-                    """INSERT INTO watchlist_thesis
-                       (ticker, thesis, thesis_summary, conviction_rating, time_horizon, invalidation_criteria,
-                        pick_method, triggers, invalidation, strategy_tag, pattern_learnable, status, created_at, updated_at)
-                       VALUES (?, ?, ?, 0, ?, ?, 'daily_operator', '', '', ?, 1, 'active', ?, ?)""",
-                    (tk, ts, th, hz, inv, st or "CORE", now, now),
-                )
-            if own_con:
-                con_sql.commit()
-        finally:
-            if own_con:
-                con_sql.close()
-    ok_pg = True
-    if pg_enabled():
-        ok_pg = bool(
-            upsert_watchlist_thesis_pg(
-                ticker=tk,
-                thesis=ts,
-                thesis_summary=th,
-                time_horizon=hz,
-                invalidation_criteria=inv,
-                strategy_tag=(st or "CORE"),
-                pattern_learnable=1,
-                status="active",
-            )
+    return bool(
+        pg_enabled()
+        and upsert_watchlist_thesis_pg(
+            ticker=tk,
+            thesis=ts,
+            thesis_summary=th,
+            time_horizon=hz,
+            invalidation_criteria=inv,
+            strategy_tag=(st or "CORE"),
+            pattern_learnable=1,
+            status="active",
         )
-    return bool(ok_sql and ok_pg)
+    )
 
 
 def resolve_dynamic_gap_answer(user_text: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -896,7 +597,6 @@ def resolve_dynamic_gap_answer(user_text: str, context: dict[str, Any] | None = 
         context_json = "{}"
     if not prompt_text and has_proactive_hint:
         prompt_text = "No explicit prompt row found; parse for durable investing profile updates."
-    con: sqlite3.Connection | None = None
     try:
         parser_prompt = (
             "Parse the user's answer into strict key-value updates for investment memory.\n"
@@ -931,18 +631,15 @@ def resolve_dynamic_gap_answer(user_text: str, context: dict[str, Any] | None = 
             _log_gap_audit("no_durable_updates", saved_count=0, prompt_id=prompt_id)
             return {"ok": True, "saved": 0, "skipped": "no_durable_updates"}
         saved = 0
-        if not strict_postgres_mode():
-            con = _conn()
         for it in list(obj.get("investor_style_memory") or []):
             if not isinstance(it, dict):
                 continue
-            if _upsert_style_kv(con, str(it.get("key") or ""), str(it.get("value") or "")):
+            if _upsert_style_kv(str(it.get("key") or ""), str(it.get("value") or "")):
                 saved += 1
         for it in list(obj.get("watchlist_thesis") or []):
             if not isinstance(it, dict):
                 continue
             if _upsert_watchlist_kv(
-                con,
                 ticker=str(it.get("ticker") or ""),
                 thesis_summary=str(it.get("thesis_summary") or ""),
                 time_horizon=str(it.get("time_horizon") or ""),
@@ -950,25 +647,13 @@ def resolve_dynamic_gap_answer(user_text: str, context: dict[str, Any] | None = 
                 strategy_tag=str(it.get("strategy_tag") or ""),
             ):
                 saved += 1
-        if con is not None:
-            con.commit()
-            con.close()
         if row and int(row.get("id") or 0) > 0:
             _mark_prompt_answered(int(row.get("id") or 0), ans, obj)
         _log_gap_audit("saved", saved_count=int(saved), prompt_id=prompt_id)
         return {"ok": True, "saved": int(saved), "prompt_id": prompt_id}
-    except sqlite3.OperationalError:
-        _log_gap_audit("db_locked", saved_count=0, prompt_id=str(row.get("prompt_id") or ""))
-        return {"ok": True, "saved": 0, "skipped": "db_locked"}
     except Exception as e:
         _log_gap_audit("resolve_error", saved_count=0, prompt_id=str(row.get("prompt_id") or ""), details={"error": str(e)[:220]})
         return {"ok": True, "saved": 0, "skipped": "resolve_error"}
-    finally:
-        if con is not None:
-            try:
-                con.close()
-            except Exception:
-                pass
 
 
 def get_dynamic_gap_audit() -> dict[str, Any]:
@@ -1003,41 +688,11 @@ def get_dynamic_gap_audit() -> dict[str, Any]:
                         "resolved_json": resolved,
                     }
             except Exception:
-                if strict_postgres_mode():
-                    return {"ok": True, "latest": {}, "persisted": {"investor_style_memory": [], "watchlist_thesis": []}}
+                return {"ok": True, "latest": {}, "persisted": {"investor_style_memory": [], "watchlist_thesis": []}}
             finally:
                 con_pg.close()
     if not latest:
-        con = _conn()
-        try:
-            row = con.execute(
-                """SELECT id, created_at, updated_at, prompt_id, user_name, prompt_text, status, answered_at, answer_text, resolved_json
-                   FROM daily_operator_gap_prompts
-                   ORDER BY id DESC
-                   LIMIT 1"""
-            ).fetchone()
-            if not row:
-                return {"ok": True, "latest": {}, "persisted": {"investor_style_memory": [], "watchlist_thesis": []}}
-            try:
-                resolved = dict(json.loads(str(row["resolved_json"] or "{}")))
-            except Exception:
-                resolved = {}
-            latest = {
-                "id": int(row["id"] or 0),
-                "created_at": str(row["created_at"] or ""),
-                "updated_at": str(row["updated_at"] or ""),
-                "prompt_id": str(row["prompt_id"] or ""),
-                "user_name": str(row["user_name"] or ""),
-                "prompt_text": str(row["prompt_text"] or ""),
-                "status": str(row["status"] or ""),
-                "answered_at": str(row["answered_at"] or ""),
-                "answer_text": str(row["answer_text"] or ""),
-                "resolved_json": resolved,
-            }
-        except sqlite3.OperationalError:
-            return {"ok": True, "latest": {}, "persisted": {"investor_style_memory": [], "watchlist_thesis": []}, "note": "db_locked"}
-        finally:
-            con.close()
+        return {"ok": True, "latest": {}, "persisted": {"investor_style_memory": [], "watchlist_thesis": []}}
     style_lookup = {str((r or {}).get("key") or "").strip().lower(): r for r in list_investor_style_memory_pg(limit=300)} if pg_enabled() else {}
     thesis_lookup = {str((r or {}).get("ticker") or "").strip().upper(): r for r in list_watchlist_thesis_pg(limit=300)} if pg_enabled() else {}
     style_rows: list[dict[str, str]] = []

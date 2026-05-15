@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 from typing import Any
 
@@ -23,11 +24,31 @@ except Exception:
 # For "earnings release from SEC filings", keep this strict to release-style filings.
 # 10-Q/10-K signals are handled separately via quarterly facts.
 _RELEASE_FORMS = {"8-K", "6-K"}
+_EARNINGS_MAX_CHARS = int(os.getenv("EARNINGS_ANALYSIS_MAX_CHARS", "12000"))
+_EARNINGS_OPENING_RATIO = float(os.getenv("EARNINGS_OPENING_RATIO", "0.4"))
 
 
 def _ticker(raw: str) -> str:
     s = re.sub(r"[^A-Z0-9.\-]", "", str(raw or "").strip().upper())
     return s[:16]
+
+
+def _compress_earnings_for_analysis(text: str, max_chars: int = _EARNINGS_MAX_CHARS) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    opening_budget = max(1000, int(max_chars * _EARNINGS_OPENING_RATIO))
+    qa_budget = max(1000, max_chars - opening_budget)
+    low = s.lower()
+    qa_match = re.search(r"(question-and-answer|question and answer|q&a|operator:)", low)
+    if not qa_match:
+        return s[:max_chars]
+    qa_start = max(0, int(qa_match.start()))
+    opening = s[:opening_budget]
+    qa = s[qa_start: qa_start + qa_budget]
+    return (opening + "\n\n[...]\n\n" + qa)[:max_chars]
 
 
 def _extract_release_payload(raw: str) -> dict[str, Any] | None:
@@ -617,7 +638,7 @@ def analyze_earnings_transcript(
     prompt = (
         f"You are analyzing an earnings document for {tk} ({form}, {filing_date}).\n"
         f"Extract structured intelligence from this earnings text.\n\n"
-        f"EARNINGS TEXT:\n{text[:8000]}\n\n"
+        f"EARNINGS TEXT:\n{_compress_earnings_for_analysis(text)}\n\n"
         f"{('PRIOR QUARTER CONTEXT:\n' + prior_summary + chr(10) + chr(10)) if prior_summary else ''}"
         "Return strict JSON:\n"
         "{\n"

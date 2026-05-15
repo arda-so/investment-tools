@@ -1496,3 +1496,212 @@ async def admin_upsert_ir_registry(request: Request):
         import logging
         logging.getLogger(__name__).error("admin_upsert_ir_registry error: %s", exc)
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+
+# ── Company browse API (used by workspace Company Search page) ────────
+
+@router.get("/api/companies/browse")
+def api_companies_browse(
+    q: str = "", scope: str = "all", sort: str = "mcap_desc",
+    page: int = 1, page_size: int = 60,
+):
+    """JSON API for the Company Search page in the workspace shell."""
+    try:
+        data = list_companies(query=q, scope=scope, sort=sort, page=page, page_size=page_size)
+        return JSONResponse({
+            "ok": True,
+            "rows": [
+                {"ticker": r.ticker, "name": r.name, "country": r.country,
+                 "industry": r.industry, "market_cap": r.market_cap}
+                for r in data.get("rows", [])
+            ],
+            "total": data.get("total", 0),
+            "page": data.get("page", 1),
+            "pages": data.get("pages", 1),
+            "sort": data.get("sort", sort),
+            "scope": data.get("scope", scope),
+        })
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error("api_companies_browse error: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+# ── Filing content API (used by slide-out filing viewer) ──────────────
+
+def _find_primary_sec_document(accession: str, index_url: str = "") -> str:
+    """Fetch the primary HTML document URL for a given SEC accession number.
+
+    Uses the index_url from DB (filings_core.doc_url) to find the filing index,
+    then locates the primary .htm document link.
+    Returns the full URL to the primary document, or empty string on failure.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    if not index_url:
+        return ""
+    acc_nodash = accession.replace("-", "")
+    headers = {"User-Agent": "InvestorTools/1.0 research@investoros.local"}
+    try:
+        import requests as _requests
+        # Fetch the index page directly (e.g. ...-index.html)
+        resp = _requests.get(index_url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        index_html = resp.text
+    except Exception as exc:
+        log.debug("_find_primary_sec_document fetch failed for %s: %s", index_url, exc)
+        return ""
+    # Strategy 1: Look for /ix?doc= links (inline XBRL viewer — the primary document)
+    ix_links = re.findall(r'href="/ix\?doc=([^"]+\.htm[l]?)"', index_html, re.IGNORECASE)
+    if ix_links:
+        # First ix?doc link is typically the main filing document
+        return f"https://www.sec.gov{ix_links[0]}"
+
+    # Strategy 2: Direct .htm links under /Archives/edgar/data/
+    links = re.findall(r'href="([^"]+\.htm[l]?)"', index_html, re.IGNORECASE)
+    primary = ""
+    for link in links:
+        if "/Archives/edgar/data/" not in link:
+            continue
+        fname = link.rsplit("/", 1)[-1].lower()
+        if fname.startswith("r") and fname[1:2].isdigit():
+            continue
+        if "index" in fname:
+            continue
+        if re.match(r'^ex\d', fname):
+            continue  # Skip exhibits (ex99-1.htm) but not 'executive.htm' etc
+        if not primary:
+            primary = link
+    if primary:
+        if primary.startswith("/"):
+            return f"https://www.sec.gov{primary}"
+        if not primary.startswith("http"):
+            base = index_url.rsplit("/", 1)[0] + "/" if "/" in index_url else index_url
+            return f"{base}{primary}"
+        return primary
+
+    # Strategy 3: Form 4 — look for ownership.xml with XSLT rendering
+    xml_links = re.findall(r'href="([^"]+ownership\.xml)"', index_html, re.IGNORECASE)
+    for link in xml_links:
+        if "/Archives/edgar/data/" in link:
+            # Use the XSLT-rendered version for human-readable display
+            if "/xsl" not in link:
+                link = link.replace("/ownership.xml", "/xslF345X06/ownership.xml")
+            return f"https://www.sec.gov{link}" if link.startswith("/") else link
+
+    return ""
+
+
+@router.get("/api/filing/content")
+def api_filing_content(ticker: str = "", accession: str = ""):
+    """Return filing content from DB (filings_core table).
+
+    Response: {ok, content, is_html, form, date, accession, ticker}
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    ticker = ticker.strip().upper()
+    accession = accession.strip()
+    if not ticker or not accession:
+        return JSONResponse({"ok": False, "error": "ticker and accession required"}, status_code=400)
+    try:
+        from app.services.postgres_core_service import pg_connect
+        con = pg_connect()
+        if con is None:
+            return JSONResponse({"ok": False, "error": "db_unavailable"}, status_code=503)
+        try:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT form, date, content, doc_url, path FROM filings_core "
+                "WHERE UPPER(ticker) = %s AND accession = %s LIMIT 1",
+                (ticker, accession),
+            )
+            row = cur.fetchone()
+        finally:
+            con.close()
+        if not row:
+            return JSONResponse({"ok": False, "error": "filing_not_found"}, status_code=404)
+        form, date_str, content, doc_url, fpath = row
+        content = content or ""
+        # If DB content is empty/stub, try reading from local file
+        if len(content) < 100 and fpath:
+            try:
+                p = Path(fpath)
+                if p.exists():
+                    content = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
+        # If still empty/stub, try fetching from SEC.gov
+        if len(content) < 100:
+            try:
+                doc_link = _find_primary_sec_document(accession, index_url=doc_url or "")
+                if doc_link:
+                    import requests as _requests
+                    resp = _requests.get(doc_link, headers={"User-Agent": "InvestorTools/1.0 research@investoros.local"}, timeout=15)
+                    resp.raise_for_status()
+                    content = resp.text
+            except Exception as exc:
+                log.debug("api_filing_content SEC fetch fallback failed: %s", exc)
+        # Determine if content is HTML
+        is_html = bool(re.search(r"<(html|body|div|table|p)\b", content[:2000], re.IGNORECASE))
+        # Cap at 500KB for safety
+        if len(content) > 500_000:
+            content = content[:500_000]
+        return JSONResponse({
+            "ok": True,
+            "content": content,
+            "is_html": is_html,
+            "form": form or "",
+            "date": date_str or "",
+            "accession": accession,
+            "ticker": ticker,
+        })
+    except Exception as exc:
+        log.error("api_filing_content error: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+@router.get("/api/filing/original-html")
+def api_filing_original_html(ticker: str = "", accession: str = ""):
+    """Fetch the original SEC filing HTML directly from EDGAR.
+
+    Response: {ok, html} or {ok: false, error: ...}
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    ticker = ticker.strip().upper()
+    accession = accession.strip()
+    if not ticker or not accession:
+        return JSONResponse({"ok": False, "error": "ticker and accession required"}, status_code=400)
+    try:
+        # Look up the index URL from DB
+        from app.services.postgres_core_service import pg_connect
+        db_doc_url = ""
+        con = pg_connect()
+        if con:
+            try:
+                cur = con.cursor()
+                cur.execute(
+                    "SELECT doc_url FROM filings_core WHERE UPPER(ticker) = %s AND accession = %s LIMIT 1",
+                    (ticker, accession),
+                )
+                row = cur.fetchone()
+                if row:
+                    db_doc_url = row[0] or ""
+            finally:
+                con.close()
+        doc_url = _find_primary_sec_document(accession, index_url=db_doc_url)
+        if not doc_url:
+            return JSONResponse({"ok": False, "error": "could_not_find_document"})
+        import requests as _requests
+        resp = _requests.get(doc_url, headers={"User-Agent": "InvestorTools/1.0 research@investoros.local"}, timeout=20)
+        resp.raise_for_status()
+        filing_html = resp.text
+        # Cap at 800KB
+        if len(filing_html) > 800_000:
+            filing_html = filing_html[:800_000]
+        return JSONResponse({"ok": True, "html": filing_html})
+    except Exception as exc:
+        log.debug("api_filing_original_html error: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc)})

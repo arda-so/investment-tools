@@ -131,6 +131,16 @@ def _column_exists(cur: Any, table: str, column: str) -> bool:
         return False
 
 
+def _iter_cursor_rows(cur: Any, batch_size: int = 128):
+    size = max(1, int(batch_size or 128))
+    while True:
+        rows = cur.fetchmany(size)
+        if not rows:
+            break
+        for row in rows:
+            yield row
+
+
 def _norm_time(raw: str) -> str:
     s = str(raw or "").strip()
     if not s:
@@ -193,16 +203,62 @@ def get_workspace_context() -> dict[str, Any]:
         pass
     finally:
         con.close()
-    # Holdings from portfolio service
+    # Holdings from portfolio state (with live prices)
     try:
-        from app.services.portfolio_memory_service import get_holdings
-        holdings = get_holdings(limit=10)
-        ctx["holdings"] = [
-            {"ticker": str(h.get("ticker") or ""), "weight": str(h.get("weight") or h.get("pct_weight") or "")}
-            for h in (holdings or [])
+        from app.services.portfolio_state_service import read_portfolio_rows_state
+        rows = read_portfolio_rows_state() or []
+        h_list = []
+        for r in rows[:10]:
+            tk = str(r.get("ticker") or "").strip().upper()
+            if not tk:
+                continue
+            h_list.append({
+                "ticker": tk,
+                "price": float(r.get("price_live") or r.get("price") or 0),
+                "day_pct": float(r.get("day_pct") or 0),
+                "value": float(r.get("value_usd") or 0),
+                "weight": float(r.get("weight_pct") or 0),
+                "shares": float(r.get("shares") or 0),
+            })
+        ctx["holdings"] = h_list
+    except Exception:
+        try:
+            from app.services.portfolio_memory_service import get_holdings
+            holdings = get_holdings(limit=10)
+            ctx["holdings"] = [
+                {"ticker": str(h.get("ticker") or ""), "price": 0, "day_pct": 0, "value": 0, "weight": 0}
+                for h in (holdings or [])
+            ]
+        except Exception:
+            pass
+    # Watchlist tickers (compact)
+    try:
+        from app.services.portfolio_state_service import read_watchlist_rows_state
+        wl = read_watchlist_rows_state() or []
+        ctx["watchlist"] = [
+            {"ticker": str(r.get("ticker") or "").strip().upper()}
+            for r in wl[:8]
+            if str(r.get("ticker") or "").strip()
         ]
     except Exception:
-        pass
+        ctx["watchlist"] = []
+    # Upcoming earnings (next 7 days)
+    try:
+        from app.services.postgres_core_service import list_earnings_calendar_snapshot_pg
+        ec = list_earnings_calendar_snapshot_pg(limit=20) or []
+        upcoming = []
+        today_str = dt.date.today().isoformat()
+        for e in ec:
+            ed = str(e.get("earnings_date") or "")[:10]
+            if ed >= today_str:
+                tk = str(e.get("ticker") or "").strip().upper()
+                if tk:
+                    upcoming.append({"ticker": tk, "date": ed, "time": str(e.get("call_time") or "")})
+            if len(upcoming) >= 5:
+                break
+        ctx["upcoming_earnings"] = upcoming
+    except Exception:
+        ctx["upcoming_earnings"] = []
     return ctx
 
 
@@ -211,10 +267,12 @@ _MARKET_PANEL_CACHE_TS: float = 0.0
 _MARKET_PANEL_TTL: float = 120.0  # seconds
 
 _MARKET_SPECS = [
-    ("^GSPC", "S&P 500"),
-    ("^VIX",  "VIX"),
-    ("^TNX",  "10Y Yield"),
-    ("BZ=F",  "Brent Oil"),
+    ("^GSPC",  "S&P 500"),
+    ("^IXIC",  "Nasdaq"),
+    ("^VIX",   "VIX"),
+    ("^TNX",   "10Y Yield"),
+    ("BZ=F",   "Brent Oil"),
+    ("GC=F",   "Gold"),
 ]
 
 
@@ -300,7 +358,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     """,
                     (min(lim, 12),),
                 )
-                for row in cur.fetchall() or []:
+                for row in _iter_cursor_rows(cur):
                     brief_day = str(row[0] or "")
                     created_at = _norm_time(str(row[1] or ""))
                     source = str(row[2] or "")
@@ -348,7 +406,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     """,
                     (min(lim, 50),),
                 )
-                for row in cur.fetchall() or []:
+                for row in _iter_cursor_rows(cur):
                     items.append(
                         {
                             "channel": "alerts",
@@ -379,7 +437,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     """,
                     (min(lim, 50),),
                 )
-                for row in cur.fetchall() or []:
+                for row in _iter_cursor_rows(cur):
                     items.append(
                         {
                             "channel": "alerts",
@@ -411,7 +469,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     """,
                     (min(lim, 80),),
                 )
-                for row in cur.fetchall() or []:
+                for row in _iter_cursor_rows(cur):
                     tk = str(row[0] or "").upper()
                     fm = str(row[1] or "")
                     fd = str(row[2] or "")
@@ -460,7 +518,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     """,
                     (min(lim, 80),),
                 )
-                for row in cur.fetchall() or []:
+                for row in _iter_cursor_rows(cur):
                     tk = str(row[1] or "").upper()
                     route = str(row[6] or "").strip()
                     open_url = route if route.startswith("/") else (f"/company_file?t={tk}" if tk else "/dashboard/classic")
@@ -494,7 +552,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     """,
                     (min(lim, 80),),
                 )
-                for row in cur.fetchall() or []:
+                for row in _iter_cursor_rows(cur):
                     ent = str(row[0] or "").upper()
                     items.append(
                         {
@@ -543,7 +601,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                     """,
                     (min(lim, 80),),
                 )
-                for row in cur.fetchall() or []:
+                for row in _iter_cursor_rows(cur):
                     status = str(row[2] or "unknown").upper()
                     dur = float(row[5] or 0.0)
                     items.append(
@@ -569,7 +627,7 @@ def load_workspace_feed(channel: str = "all", limit: int = 50) -> list[dict[str,
                 """,
                 (min(lim, 80),),
             )
-            for row in cur.fetchall() or []:
+            for row in _iter_cursor_rows(cur):
                 role = str(row[2] or "user").lower()
                 items.append(
                     {

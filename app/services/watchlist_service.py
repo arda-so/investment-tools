@@ -33,5 +33,6 @@ def write_watchlist_rows(rows: list[dict[str, str]]) -> None:
             continue
         added_at = str(r.get("added_at", "")).strip() or dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         reason = str(r.get("reason", "")).replace("\n", " ").strip()
-        cleaned.append({"ticker": t, "added_at": added_at, "reason": reason})
+        category = str(r.get("category", "")).replace("\n", " ").strip()
+        cleaned.append({"ticker": t, "added_at": added_at, "reason": reason, "category": category})
     write_watchlist_rows_state(cleaned)

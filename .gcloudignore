@@ -27,6 +27,9 @@ frontend/node_modules/
 data/
 onyx_brain.db
 
+# Tauri desktop app (not needed in cloud container).
+desktop/
+
 # Misc local notes and temp files.
 SESSION_*.md
 Notes/

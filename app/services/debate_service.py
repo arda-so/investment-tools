@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -18,6 +19,13 @@ try:
     from tools.llm_engine import ask_ai
 except Exception:  # pragma: no cover
     ask_ai = None  # type: ignore[assignment]
+
+
+_DEBATE_SIGNAL_CHARS = int(os.getenv("DEBATE_SIGNAL_CHARS", "1200"))
+_DEBATE_REASONING_CHARS = int(os.getenv("DEBATE_REASONING_CHARS", "1000"))
+_DEBATE_ADVOCATE_CHARS = int(os.getenv("DEBATE_ADVOCATE_CHARS", "1500"))
+_DEBATE_JUDGE_SIGNAL_CHARS = int(os.getenv("DEBATE_JUDGE_SIGNAL_CHARS", "800"))
+_DEBATE_ADVOCATE_WORDS = os.getenv("DEBATE_ADVOCATE_WORDS", "250-350")
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +106,9 @@ def run_proposal_debate(
     tk = str(ticker or "").upper()
     header = (
         f"Ticker: {tk}\n"
-        f"Signal: {signal[:800]}\n"
+        f"Signal: {signal[:_DEBATE_SIGNAL_CHARS]}\n"
         f"Proposed action: {proposed_stance}\n"
-        f"Reasoning: {reasoning_summary[:600]}"
+        f"Reasoning: {reasoning_summary[:_DEBATE_REASONING_CHARS]}"
     )
 
     def _bull() -> str:
@@ -110,7 +118,7 @@ def run_proposal_debate(
             "1. Why the signal is a genuine opportunity\n"
             "2. How it aligns with the investment thesis\n"
             "3. Market conditions that support it\n"
-            "Be specific and concise (150-200 words)."
+            f"Be specific and concise ({_DEBATE_ADVOCATE_WORDS} words)."
         )
         try:
             return str(
@@ -126,7 +134,7 @@ def run_proposal_debate(
             "1. What the signal may be missing or misreading\n"
             "2. Downside risks and red flags\n"
             "3. Alternative explanations that invalidate the thesis\n"
-            "Be specific and concise (150-200 words)."
+            f"Be specific and concise ({_DEBATE_ADVOCATE_WORDS} words)."
         )
         try:
             return str(
@@ -142,7 +150,7 @@ def run_proposal_debate(
             "1. Position sizing concerns (concentration / correlation risk)\n"
             "2. Macro or sector tail risks\n"
             "3. Liquidity or timing risks\n"
-            "Be specific and concise (150-200 words)."
+            f"Be specific and concise ({_DEBATE_ADVOCATE_WORDS} words)."
         )
         try:
             return str(
@@ -174,10 +182,10 @@ def run_proposal_debate(
     judge_prompt = (
         f"You are a senior investment committee judge.\n\n"
         f"PROPOSAL: {proposed_stance} on {tk}\n"
-        f"SIGNAL: {signal[:500]}\n\n"
-        f"BULL THESIS:\n{bull[:500]}\n\n"
-        f"BEAR REBUTTAL:\n{bear[:500]}\n\n"
-        f"RISK REVIEW:\n{risk[:500]}\n\n"
+        f"SIGNAL: {signal[:_DEBATE_JUDGE_SIGNAL_CHARS]}\n\n"
+        f"BULL THESIS:\n{bull[:_DEBATE_ADVOCATE_CHARS]}\n\n"
+        f"BEAR REBUTTAL:\n{bear[:_DEBATE_ADVOCATE_CHARS]}\n\n"
+        f"RISK REVIEW:\n{risk[:_DEBATE_ADVOCATE_CHARS]}\n\n"
         "Render your verdict. Respond ONLY in valid JSON:\n"
         '{"approved": true, "rationale": "2-3 sentence explanation"}\n'
         "Approve if the bull case clearly outweighs risks. "

@@ -3,7 +3,6 @@ from __future__ import annotations
 import concurrent.futures
 import csv
 import datetime as dt
-import difflib
 import json
 import os
 import re
@@ -15,11 +14,10 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks, Form, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from app.core.config import CORE_DB_PATH, ROOT
+from app.core.config import ROOT
 from app.core.date import parse_datetime_flexible
 from app.core.market import finnhub_key
 from app.core.num import to_float, to_float_clean as _to_float
-from app.core.db import get_sqlite_conn
 from app.core.ticker import normalize_ticker, yfinance_symbol
 from app.core.universe_command_parser import parse_universe_command
 from app.core.trade_decision_taxonomy import (
@@ -29,6 +27,31 @@ from app.core.trade_decision_taxonomy import (
     normalize_buy_belief,
     normalize_buy_reason,
     normalize_sell_reason,
+)
+from app.routers.dashboard_helpers import (
+    allow_text_mutations as _dh_allow_text_mutations,
+    contains_fuzzy_term as _dh_contains_fuzzy_term,
+    desk_parse as _dh_desk_parse,
+    explicit_mutation_request as _dh_explicit_mutation_request,
+    GLOBAL_SEARCH_APP_ROUTES as _DH_GLOBAL_SEARCH_APP_ROUTES,
+    global_search_add_result as _dh_global_search_add_result,
+    global_search_add_note_row as _dh_global_search_add_note_row,
+    global_search_add_task_row as _dh_global_search_add_task_row,
+    global_search_match as _dh_global_search_match,
+    has_add_intent as _dh_has_add_intent,
+    has_remove_intent as _dh_has_remove_intent,
+    parse_ai_command as _dh_parse_ai_command,
+    is_sec_like_query as _dh_is_sec_like_query,
+    is_op_like as _dh_is_op_like,
+    is_mutating_command_mode as _dh_is_mutating_command_mode,
+    looks_like_question as _dh_looks_like_question,
+    mutation_guard_enabled as _dh_mutation_guard_enabled,
+    parse_human_amount as _dh_parse_human_amount,
+    resolve_company_tickers_for_search as _dh_resolve_company_tickers_for_search,
+    search_tokens as _dh_search_tokens,
+    sec_query_parts as _dh_sec_query_parts,
+    starts_with_command_verb as _dh_starts_with_command_verb,
+    structured_capture_text as _dh_structured_capture_text,
 )
 from app.services.ai_orchestrator import (
     get_risk_veto_config,
@@ -79,9 +102,11 @@ from app.services.sec_ingest_pipeline_service import process_new_filings_pipelin
 from app.services.postgres_core_service import (
     core_backend,
     list_earnings_calendar_snapshot_pg,
+    list_lows_snapshot_pg,
     pg_connect,
     strict_postgres_mode,
     upsert_earnings_calendar_snapshot_pg,
+    upsert_lows_snapshot_pg,
 )
 from app.services.watchlist_service import read_watchlist_rows, write_watchlist_rows
 from app.services.workspace_feed_service import add_workspace_message, get_workspace_context, list_workspace_channels, load_workspace_feed
@@ -113,44 +138,13 @@ _UNIVERSE_QUOTES_LAST_REFRESH_TS = 0.0
 _NAME_FALLBACK_CACHE: dict[str, tuple[str, float]] = {}
 _NAME_FALLBACK_LOCK = threading.Lock()
 _NAME_FALLBACK_TTL_SEC = 24 * 60 * 60
+# Batch name-map cache: avoids repeated DB hits within short windows
+_NAMEMAP_CACHE: dict[str, str] = {}
+_NAMEMAP_CACHE_TS: float = 0.0
+_NAMEMAP_CACHE_TTL_SEC: float = 120.0  # 2 min
 _GLOBAL_SEARCH_LOCK = threading.Lock()
 _GLOBAL_SEARCH_CACHE_TTL_SEC = 20.0
 _GLOBAL_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
-_SEC_FORM_ALIAS: dict[str, str] = {
-    "6k": "6-K",
-    "8k": "8-K",
-    "10k": "10-K",
-    "10q": "10-Q",
-    "20f": "20-F",
-    "40f": "40-F",
-}
-_SEC_SEARCH_WORDS: set[str] = {
-    "sec",
-    "filing",
-    "filings",
-    "earnings",
-    "release",
-    "releases",
-    "report",
-    "reports",
-}
-_SEC_HINT_TOKENS: set[str] = {
-    "sec",
-    "filing",
-    "earnings",
-    "10k",
-    "10-k",
-    "10q",
-    "10-q",
-    "8k",
-    "8-k",
-    "20f",
-    "20-f",
-    "40f",
-    "40-f",
-    "6k",
-    "6-k",
-}
 BLUE_CHIPS_SEED_TICKERS: tuple[str, ...] = (
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "BRK.B", "JPM", "V", "UNH",
     "XOM", "JNJ", "PG", "AVGO", "MA", "HD", "COST", "KO", "PEP", "ABBV",
@@ -160,58 +154,23 @@ BLUE_CHIPS_SEED_TICKERS: tuple[str, ...] = (
 
 
 def _search_tokens(raw_query: str) -> tuple[str, list[str], list[str]]:
-    low = str(raw_query or "").strip().lower()
-    toks = [t for t in re.split(r"\s+", low) if t]
-    toks_norm = [re.sub(r"[^a-z0-9]+", "", t) for t in toks if t]
-    return low, toks, toks_norm
+    return _dh_search_tokens(raw_query)
 
 
 def _is_sec_like_query(low: str, toks: list[str]) -> bool:
-    return any(t in _SEC_HINT_TOKENS for t in toks) or ("earnings release" in str(low or ""))
+    return _dh_is_sec_like_query(low, toks)
 
 
 def _sec_query_parts(toks: list[str], toks_norm: list[str]) -> tuple[set[str], str]:
-    requested_forms = {_SEC_FORM_ALIAS[t] for t in toks_norm if t in _SEC_FORM_ALIAS}
-    company_terms = [
-        t for t, tn in zip(toks, toks_norm) if tn and tn not in _SEC_SEARCH_WORDS and tn not in _SEC_FORM_ALIAS
-    ]
-    return requested_forms, " ".join(company_terms).strip()
+    return _dh_sec_query_parts(toks, toks_norm)
 
 
 def _resolve_company_tickers_for_search(company_query: str, limit: int = 8) -> list[str]:
-    q = str(company_query or "").strip()
-    if not q:
-        return []
-    out: list[str] = []
-    try:
-        crows = list_companies(query=q, page=1, page_size=max(1, min(24, int(limit))), scope="all", sort="mcap_desc").get("rows") or []
-        for r in crows:
-            tk = str(getattr(r, "ticker", "") or (r.get("ticker") if isinstance(r, dict) else "") or "").strip().upper()
-            if tk and tk not in out:
-                out.append(tk)
-    except Exception:
-        return []
-    return out
+    return _dh_resolve_company_tickers_for_search(company_query, list_companies_fn=list_companies, limit=limit)
 
 
 def _parse_human_amount(raw: str, default: float = 0.0) -> float:
-    s = str(raw or "").strip().lower().replace(",", "")
-    if not s:
-        return default
-    mul = 1.0
-    if s.endswith("k"):
-        mul = 1_000.0
-        s = s[:-1]
-    elif s.endswith("m"):
-        mul = 1_000_000.0
-        s = s[:-1]
-    elif s.endswith("b"):
-        mul = 1_000_000_000.0
-        s = s[:-1]
-    try:
-        return float(s) * mul
-    except Exception:
-        return default
+    return _dh_parse_human_amount(raw, default)
 
 
 _safe_ticker = normalize_ticker
@@ -235,37 +194,51 @@ def _read_blue_chips_rows() -> list[dict[str, str]]:
 
 
 def _company_name_map(tickers: list[str]) -> dict[str, str]:
+    global _NAMEMAP_CACHE, _NAMEMAP_CACHE_TS
     wanted = [_safe_ticker(t) for t in (tickers or []) if _safe_ticker(t)]
+    if not wanted:
+        return {}
+
+    # Fast path: if all wanted tickers are in the batch cache and cache is fresh, return immediately
+    now = time.time()
+    if (now - _NAMEMAP_CACHE_TS) < _NAMEMAP_CACHE_TTL_SEC:
+        cached_hits = {t: _NAMEMAP_CACHE[t] for t in wanted if t in _NAMEMAP_CACHE and _NAMEMAP_CACHE[t]}
+        if len(cached_hits) == len(wanted):
+            return cached_hits
+
     out = lookup_company_name_map(wanted)
     missing = sorted({t for t in wanted if t and not str(out.get(t) or "").strip()})
     if not missing:
+        _NAMEMAP_CACHE.update(out)
+        _NAMEMAP_CACHE_TS = now
         return out
 
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is not None:
-            try:
-                cur = con_pg.cursor()
-                marks = ",".join("%s" for _ in missing)
-                cur.execute(
-                    f"SELECT UPPER(ticker), name FROM companies_core WHERE UPPER(ticker) IN ({marks})",
-                    tuple(missing),
-                )
-                for r in cur.fetchall() or []:
-                    tk = _safe_ticker(str(r[0] or ""))
-                    nm = str(r[1] or "").strip()
-                    if tk and nm:
-                        out[tk] = nm
-            except Exception:
-                pass
-            finally:
-                con_pg.close()
+    con_pg = pg_connect()
+    if con_pg is not None:
+        try:
+            cur = con_pg.cursor()
+            marks = ",".join("%s" for _ in missing)
+            cur.execute(
+                f"SELECT UPPER(ticker), name FROM companies_core WHERE UPPER(ticker) IN ({marks})",
+                tuple(missing),
+            )
+            for r in cur.fetchall() or []:
+                tk = _safe_ticker(str(r[0] or ""))
+                nm = str(r[1] or "").strip()
+                if tk and nm:
+                    out[tk] = nm
+        except Exception:
+            pass
+        finally:
+            con_pg.close()
     missing2 = sorted({t for t in wanted if t and not str(out.get(t) or "").strip()})
     if missing2:
         live = _live_company_name_map(missing2, limit=48)
         for tk, nm in live.items():
             if tk and nm:
                 out[tk] = nm
+    _NAMEMAP_CACHE.update(out)
+    _NAMEMAP_CACHE_TS = now
     return out
 
 
@@ -310,20 +283,20 @@ def _fetch_company_name_live(ticker: str, key: str) -> tuple[str, str]:
             import certifi  # type: ignore
             import requests  # type: ignore
 
-            r = requests.get(
+            with requests.get(
                 "https://finnhub.io/api/v1/stock/profile2",
                 params={"symbol": tk, "token": key},
                 timeout=(1.5, 2.5),
                 verify=certifi.where(),
                 headers={"Accept": "application/json", "User-Agent": "InvestorOS/1.0"},
-            )
-            if r.status_code == 200 and r.content:
-                obj = r.json()
-                if isinstance(obj, dict):
-                    nm = str(obj.get("name") or "").strip()
-                    if nm:
-                        _cache_name_put(tk, nm)
-                        return tk, nm
+            ) as r:
+                if r.status_code == 200 and r.content:
+                    obj = r.json()
+                    if isinstance(obj, dict):
+                        nm = str(obj.get("name") or "").strip()
+                        if nm:
+                            _cache_name_put(tk, nm)
+                            return tk, nm
         except Exception:
             pass
 
@@ -360,10 +333,10 @@ def _live_company_name_map(tickers: list[str], limit: int = 48) -> dict[str, str
     key = str(finnhub_key() or "").strip()
     workers = max(1, min(8, len(miss)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_fetch_company_name_live, tk, key) for tk in miss]
-        for f in concurrent.futures.as_completed(futs):
+        futs = {ex.submit(_fetch_company_name_live, tk, key): tk for tk in miss}
+        for f in concurrent.futures.as_completed(futs, timeout=8):
             try:
-                tk, nm = f.result()
+                tk, nm = f.result(timeout=4)
             except Exception:
                 continue
             if tk and nm:
@@ -436,9 +409,14 @@ def _last_quote_map(tickers: list[str]) -> dict[str, dict[str, float | None]]:
 
     # Stale-while-revalidate: serve cached values immediately, refresh in background.
     if stale_or_missing:
-        if not out:
-            # Cold cache bootstrap: fetch once synchronously to avoid blank first render.
-            fresh_boot = _fetch_quote_map_sync(stale_or_missing)
+        # Sync-fetch ONLY a small batch of tickers with no cached price.
+        # This keeps the response fast even on cold start.  The rest refresh async.
+        no_price = [tk for tk in stale_or_missing if tk not in out]
+        _SYNC_FETCH_LIMIT = 8  # max tickers to fetch synchronously
+        if no_price:
+            sync_batch = no_price[:_SYNC_FETCH_LIMIT]
+            async_batch = no_price[_SYNC_FETCH_LIMIT:]
+            fresh_boot = _fetch_quote_map_sync(sync_batch)
             if fresh_boot:
                 out.update(fresh_boot)
                 with _UNIVERSE_QUOTES_LOCK:
@@ -447,7 +425,13 @@ def _last_quote_map(tickers: list[str]) -> dict[str, dict[str, float | None]]:
                     for tk, payload in fresh_boot.items():
                         cache2[str(tk or "").strip().upper()] = {"ts": ts2, "payload": payload}
                     _write_universe_quotes_cache(cache2)
-        _refresh_universe_quotes_async(stale_or_missing)
+            # Remaining no-price tickers get fetched in background
+            if async_batch:
+                _refresh_universe_quotes_async(async_batch)
+        # Refresh stale (but cached) tickers in background.
+        stale_only = [tk for tk in stale_or_missing if tk in out]
+        if stale_only:
+            _refresh_universe_quotes_async(stale_only)
     return out
 
 
@@ -471,13 +455,13 @@ def _fetch_quote_map_sync(tickers: list[str]) -> dict[str, dict[str, float | Non
         try:
             obj = yf.Ticker(_yf_symbol(tk))
             fi = (obj.fast_info or {})
-            px = _to_float(fi.get("last_price"), 0.0)
-            prev = _to_float(fi.get("previous_close"), 0.0)
-            mcap = _to_float(fi.get("market_cap"), 0.0)
+            px = _to_float(fi.get("lastPrice"), 0.0)
+            prev = _to_float(fi.get("previousClose"), 0.0)
+            mcap = _to_float(fi.get("marketCap"), 0.0)
             if px <= 0:
-                px = _to_float(fi.get("regular_market_price"), 0.0)
+                px = _to_float(fi.get("regularMarketPrice"), 0.0)
             if prev <= 0:
-                prev = _to_float(fi.get("regular_market_previous_close"), 0.0)
+                prev = _to_float(fi.get("regularMarketPreviousClose"), 0.0)
             if px <= 0 or prev <= 0:
                 info = (obj.info or {})
                 if px <= 0:
@@ -509,10 +493,10 @@ def _fetch_quote_map_sync(tickers: list[str]) -> dict[str, dict[str, float | Non
 
     max_workers = min(12, max(1, len(uniq)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_fetch_one, tk) for tk in uniq]
-        for fut in concurrent.futures.as_completed(futures):
+        futures = {ex.submit(_fetch_one, tk): tk for tk in uniq}
+        for fut in concurrent.futures.as_completed(futures, timeout=12):
             try:
-                rec = fut.result()
+                rec = fut.result(timeout=4)
                 if rec:
                     tk, payload = rec
                     out[tk] = payload
@@ -719,9 +703,28 @@ def _market_brief(home: dict) -> dict[str, object]:
         {"id": "us5y", "label": "US 5Y", "symbol": "^FVX", "decimals": 2, "divide_by_10": True},
         {"id": "us10y", "label": "US 10Y", "symbol": "^TNX", "decimals": 2, "divide_by_10": True},
         {"id": "us30y", "label": "US 30Y", "symbol": "^TYX", "decimals": 2, "divide_by_10": True},
-        {"id": "de10y", "label": "German 10Y", "symbol": "^DE10Y", "decimals": 2, "divide_by_10": True},
-        {"id": "jp10y", "label": "Japan 10Y", "symbol": "^JP10Y", "decimals": 2, "divide_by_10": True},
+        # NOTE: ^DE10Y and ^JP10Y are not valid yfinance symbols (404).
+        # No free real-time German/Japan 10Y yield tickers exist on Yahoo Finance.
         {"id": "vix", "label": "VIX", "symbol": "^VIX", "decimals": 2},
+        # Credit & inflation proxies
+        {"id": "hyg", "label": "High Yield", "symbol": "HYG", "decimals": 2},
+        {"id": "lqd", "label": "Inv Grade", "symbol": "LQD", "decimals": 2},
+        {"id": "tip", "label": "TIPS (Infl)", "symbol": "TIP", "decimals": 2},
+        # International bonds
+        {"id": "bndx", "label": "Intl Bonds", "symbol": "BNDX", "decimals": 2},
+        {"id": "emb", "label": "EM Bonds", "symbol": "EMB", "decimals": 2},
+        # Sector ETFs
+        {"id": "xlk", "label": "Tech", "symbol": "XLK", "decimals": 2},
+        {"id": "xlf", "label": "Financials", "symbol": "XLF", "decimals": 2},
+        {"id": "xle", "label": "Energy", "symbol": "XLE", "decimals": 2},
+        {"id": "xlv", "label": "Healthcare", "symbol": "XLV", "decimals": 2},
+        {"id": "xlc", "label": "Comms", "symbol": "XLC", "decimals": 2},
+        {"id": "xli", "label": "Industrials", "symbol": "XLI", "decimals": 2},
+        {"id": "xlb", "label": "Materials", "symbol": "XLB", "decimals": 2},
+        {"id": "xlre", "label": "Real Estate", "symbol": "XLRE", "decimals": 2},
+        {"id": "xlu", "label": "Utilities", "symbol": "XLU", "decimals": 2},
+        {"id": "xlp", "label": "Staples", "symbol": "XLP", "decimals": 2},
+        {"id": "xly", "label": "Discret.", "symbol": "XLY", "decimals": 2},
         {"id": "gold", "label": "Gold", "symbol": "GC=F", "decimals": 2},
         {"id": "silver", "label": "Silver", "symbol": "SI=F", "decimals": 2},
         {"id": "platinum", "label": "Platinum", "symbol": "PL=F", "decimals": 2},
@@ -736,7 +739,7 @@ def _market_brief(home: dict) -> dict[str, object]:
         {"id": "corn", "label": "Corn", "symbol": "ZC=F", "decimals": 2},
         {"id": "wheat", "label": "Wheat", "symbol": "ZW=F", "decimals": 2},
         {"id": "soybeans", "label": "Soybeans", "symbol": "ZS=F", "decimals": 2},
-        {"id": "ironore", "label": "Iron Ore", "symbol": "TIO=F", "decimals": 2},
+        # TIO=F is delisted on Yahoo Finance — skip Iron Ore.
         {"id": "lumber", "label": "Lumber", "symbol": "LBS=F", "decimals": 2},
         {"id": "cotton", "label": "Cotton", "symbol": "CT=F", "decimals": 2},
         {"id": "sugar", "label": "Sugar", "symbol": "SB=F", "decimals": 2},
@@ -784,6 +787,8 @@ def _market_brief(home: dict) -> dict[str, object]:
     except Exception:
         cache_fresh = False
 
+    # Always return cached/home data immediately.
+    # If stale, trigger a background refresh so next request is fresh.
     if cache_fresh:
         return {
             "as_of": str(cache.get("updated_at") or dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
@@ -791,6 +796,52 @@ def _market_brief(home: dict) -> dict[str, object]:
             "live_hits": 0,
         }
 
+    # Stale-while-revalidate: return what we have now, refresh in background.
+    has_any_data = any(str(v.get("price", "-")) != "-" for v in items.values())
+    if has_any_data:
+        # Kick off background refresh
+        _specs_copy = list(specs)
+        def _bg_market_refresh():
+            try:
+                _bg_items, _bg_hits = _market_brief_fetch_live(_specs_copy)
+                if _bg_hits > 0:
+                    _save_market_cache(
+                        {
+                            "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "items": {k: {"price": v.get("price"), "day": v.get("day")} for k, v in _bg_items.items()},
+                        }
+                    )
+            except Exception:
+                pass
+        import threading as _thr
+        _thr.Thread(target=_bg_market_refresh, daemon=True, name="market-brief-bg").start()
+        return {
+            "as_of": str(cache.get("updated_at") or dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")) + " (refreshing)",
+            "items": items,
+            "live_hits": 0,
+        }
+
+    # No cached data at all (cold start) — must fetch synchronously.
+    live_items, live_hits = _market_brief_fetch_live(specs)
+    if live_hits > 0:
+        items.update(live_items)
+        _save_market_cache(
+            {
+                "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "items": {k: {"price": v.get("price"), "day": v.get("day")} for k, v in items.items()},
+            }
+        )
+
+    return {
+        "as_of": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "items": items,
+        "live_hits": live_hits,
+    }
+
+
+def _market_brief_fetch_live(specs: list[dict]) -> tuple[dict[str, dict[str, object]], int]:
+    """Fetch live prices for market brief symbols. Returns (items_dict, hit_count)."""
+    items: dict[str, dict[str, object]] = {}
     live_hits = 0
     try:
         import yfinance as yf  # type: ignore
@@ -803,12 +854,12 @@ def _market_brief(home: dict) -> dict[str, object]:
             try:
                 obj = yf.Ticker(sym)
                 fi = (obj.fast_info or {})
-                px = _to_float(fi.get("last_price"), 0.0)
-                prev = _to_float(fi.get("previous_close"), 0.0)
+                px = _to_float(fi.get("lastPrice"), 0.0)
+                prev = _to_float(fi.get("previousClose"), 0.0)
                 if px <= 0:
-                    px = _to_float(fi.get("regular_market_price"), 0.0)
+                    px = _to_float(fi.get("regularMarketPrice"), 0.0)
                 if prev <= 0:
-                    prev = _to_float(fi.get("regular_market_previous_close"), 0.0)
+                    prev = _to_float(fi.get("regularMarketPreviousClose"), 0.0)
                 if px <= 0 or prev <= 0:
                     info = (obj.info or {})
                     if px <= 0:
@@ -829,7 +880,6 @@ def _market_brief(home: dict) -> dict[str, object]:
                             prev = _to_float(closes.iloc[-2], 0.0)
 
                 if div10:
-                    # ^TNX can come either as 40.6 (needs /10) or 4.06 (already normalized).
                     if px > 20:
                         px = px / 10.0
                     if prev > 20:
@@ -842,8 +892,13 @@ def _market_brief(home: dict) -> dict[str, object]:
                 pass
             return sid, str(spec["label"]), "-", "-"
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-            for sid, label, price, day in ex.map(_fetch_live_row, specs):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            futs = {ex.submit(_fetch_live_row, spec): spec for spec in specs}
+            for fut in concurrent.futures.as_completed(futs, timeout=12):
+                try:
+                    sid, label, price, day = fut.result(timeout=4)
+                except Exception:
+                    continue
                 if price == "-":
                     continue
                 items[sid] = {
@@ -855,20 +910,7 @@ def _market_brief(home: dict) -> dict[str, object]:
                 live_hits += 1
     except Exception:
         pass
-
-    if live_hits > 0:
-        _save_market_cache(
-            {
-                "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "items": {k: {"price": v.get("price"), "day": v.get("day")} for k, v in items.items()},
-            }
-        )
-
-    return {
-        "as_of": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "items": items,
-        "live_hits": live_hits,
-    }
+    return items, live_hits
 
 
 def _latest_report_path(prefixes: tuple[str, ...]) -> Path | None:
@@ -1119,16 +1161,16 @@ def _enrich_earnings_with_reported_status(rows: list[dict[str, str]], today: dt.
         import certifi  # type: ignore
         import requests  # type: ignore
 
-        r = requests.get(
+        with requests.get(
             "https://finnhub.io/api/v1/calendar/earnings",
             params={"from": date_from, "to": date_to, "token": key},
             timeout=(2.0, 4.0),
             verify=certifi.where(),
             headers={"Accept": "application/json", "User-Agent": "InvestorOS/1.0"},
-        )
-        if r.status_code != 200:
-            return [dict(x) for x in rows]
-        cal = r.json() or {}
+        ) as r:
+            if r.status_code != 200:
+                return [dict(x) for x in rows]
+            cal = r.json() or {}
         events = cal.get("earningsCalendar") if isinstance(cal, dict) else []
         if not isinstance(events, list):
             events = []
@@ -1192,17 +1234,88 @@ def _enrich_earnings_with_reported_status(rows: list[dict[str, str]], today: dt.
             rr["event_status"] = "reported"
         else:
             # If event date is already in the past and we still have no feed result,
-            # avoid showing it as "upcoming" forever.
+            # avoid showing it as "upcoming" forever — mark as reported (no EPS data yet).
             try:
                 ed = dt.datetime.strptime(d, "%Y-%m-%d").date()
                 if ed < today:
+                    rr["reported"] = "1"
                     rr["event_status"] = "reported"
+                    rr["verdict"] = ""
                     rr["confidence"] = "preliminary"
             except Exception:
                 pass
         out.append(rr)
     final_rows = _verify_reported_earnings_with_sec(out)
     return _cache_and_return([dict(x) for x in final_rows])
+
+
+def _yfinance_earnings_for_tickers(tickers: list[str], today: dt.date, days_forward: int = 14) -> list[dict[str, str]]:
+    """Check upcoming earnings dates for specific tickers via yfinance."""
+    if not tickers:
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    cutoff = today + dt.timedelta(days=max(1, days_forward))
+    lookback = today - dt.timedelta(days=3)  # include recent past for reported status
+    try:
+        import yfinance as yf  # type: ignore
+
+        def _fetch_earnings(sym: str) -> list[dict[str, str]]:
+            results = []
+            try:
+                obj = yf.Ticker(sym)
+                # earnings_dates returns a DataFrame with index=datetime
+                ed = obj.earnings_dates
+                if ed is None or ed.empty:
+                    return results
+                for idx, row in ed.iterrows():
+                    try:
+                        edate = idx.date() if hasattr(idx, 'date') else dt.datetime.strptime(str(idx)[:10], "%Y-%m-%d").date()
+                    except Exception:
+                        continue
+                    if edate < lookback or edate > cutoff:
+                        continue
+                    # Determine time of day
+                    hour = idx.hour if hasattr(idx, 'hour') else 0
+                    time_label = "pre" if hour < 10 else ("post" if hour >= 16 else "day")
+                    entry: dict[str, str] = {
+                        "date": edate.isoformat(),
+                        "symbol": sym,
+                        "company": "-",
+                        "time": time_label,
+                    }
+                    # Check if EPS actual is available (reported)
+                    eps_actual = row.get("Reported EPS") if hasattr(row, 'get') else None
+                    eps_est = row.get("EPS Estimate") if hasattr(row, 'get') else None
+                    if eps_actual is not None and not (isinstance(eps_actual, float) and (eps_actual != eps_actual)):
+                        entry["eps_actual"] = str(round(float(eps_actual), 2))
+                        entry["reported"] = "1"
+                        if eps_est is not None and not (isinstance(eps_est, float) and (eps_est != eps_est)):
+                            entry["eps_estimate"] = str(round(float(eps_est), 2))
+                            entry["verdict"] = "BEAT" if float(eps_actual) >= float(eps_est) else "MISS"
+                            surprise = ((float(eps_actual) - float(eps_est)) / abs(float(eps_est)) * 100) if float(eps_est) != 0 else 0
+                            entry["surprise_txt"] = f"{surprise:+.1f}%"
+                    results.append(entry)
+            except Exception:
+                pass
+            return results
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(tickers))) as ex:
+            futs = {ex.submit(_fetch_earnings, t): t for t in tickers[:30]}
+            for fut in concurrent.futures.as_completed(futs, timeout=10):
+                try:
+                    ticker_results = fut.result(timeout=4)
+                except Exception:
+                    continue
+                for r in ticker_results:
+                    key = (r["date"], r["symbol"])
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(r)
+    except Exception:
+        pass
+    out.sort(key=lambda x: (str(x.get("date") or ""), str(x.get("symbol") or "")))
+    return out
 
 
 def _finnhub_earnings_week_rows(today: dt.date, row_limit: int = 120) -> list[dict[str, str]]:
@@ -1218,16 +1331,16 @@ def _finnhub_earnings_week_rows(today: dt.date, row_limit: int = 120) -> list[di
         import certifi  # type: ignore
         import requests  # type: ignore
 
-        r = requests.get(
+        with requests.get(
             "https://finnhub.io/api/v1/calendar/earnings",
             params={"from": week_start.isoformat(), "to": week_end.isoformat(), "token": key},
             timeout=(2.0, 4.0),
             verify=certifi.where(),
             headers={"Accept": "application/json", "User-Agent": "InvestorOS/1.0"},
-        )
-        if r.status_code != 200:
-            return []
-        cal = r.json() if r.content else {}
+        ) as r:
+            if r.status_code != 200:
+                return []
+            cal = r.json() if r.content else {}
         events = cal.get("earningsCalendar") if isinstance(cal, dict) else []
         if not isinstance(events, list):
             return []
@@ -1268,41 +1381,34 @@ def _verify_reported_earnings_with_sec(rows: list[dict[str, str]]) -> list[dict[
     if not tickers:
         return rows
     filing_map: dict[tuple[str, str], list[tuple[dt.date, str]]] = {}
-    used_pg = False
-    if core_backend() == "postgres":
-        con_pg = pg_connect()
-        if con_pg is None and strict_postgres_mode():
-            return rows
-        if con_pg is not None:
-            try:
-                marks = ",".join("%s" for _ in tickers)
-                q = (
-                    f"SELECT ticker, form, date FROM filings_core "
-                    f"WHERE ticker IN ({marks}) AND date IS NOT NULL AND date != '' "
-                    f"ORDER BY date DESC LIMIT 5000"
-                )
-                cur = con_pg.cursor()
-                cur.execute(q, tuple(tickers))
-                db_rows = cur.fetchall() or []
-                for r in db_rows:
-                    tk = _safe_ticker(str(r[0] or ""))
-                    fm = str(r[1] or "").strip().upper()
-                    ds = str(r[2] or "").strip()
-                    if not tk or not fm or fm not in forms or not ds:
-                        continue
-                    try:
-                        fd = dt.datetime.strptime(ds, "%Y-%m-%d").date()
-                    except Exception:
-                        continue
-                    filing_map.setdefault((tk, fm), []).append((fd, ds))
-                used_pg = True
-            except Exception:
-                if strict_postgres_mode():
-                    return rows
-            finally:
-                con_pg.close()
-    if not used_pg:
+    con_pg = pg_connect()
+    if con_pg is None:
         return rows
+    try:
+        marks = ",".join("%s" for _ in tickers)
+        q = (
+            f"SELECT ticker, form, date FROM filings_core "
+            f"WHERE ticker IN ({marks}) AND date IS NOT NULL AND date != '' "
+            f"ORDER BY date DESC LIMIT 5000"
+        )
+        cur = con_pg.cursor()
+        cur.execute(q, tuple(tickers))
+        db_rows = cur.fetchall() or []
+        for r in db_rows:
+            tk = _safe_ticker(str(r[0] or ""))
+            fm = str(r[1] or "").strip().upper()
+            ds = str(r[2] or "").strip()
+            if not tk or not fm or fm not in forms or not ds:
+                continue
+            try:
+                fd = dt.datetime.strptime(ds, "%Y-%m-%d").date()
+            except Exception:
+                continue
+            filing_map.setdefault((tk, fm), []).append((fd, ds))
+    except Exception:
+        return rows
+    finally:
+        con_pg.close()
 
     out: list[dict[str, str]] = []
     for rr in rows:
@@ -1368,8 +1474,33 @@ def dashboard_report_panels() -> dict[str, object]:
     morning_points: list[str] = []
     morning_updated_fallback = "-"
     # Cloud/Postgres-first source of truth: morning_briefs_core.
+    # Auto-generate if stale (>6h) or missing — Cloud Run kills bg threads on scale-to-zero.
     try:
         cached = get_cached_morning_brief()
+        _brief_stale = True
+        if cached and cached.get("asof"):
+            try:
+                _age = (dt.datetime.now() - dt.datetime.fromisoformat(str(cached["asof"]))).total_seconds()
+                _brief_stale = _age > 21600  # 6 hours
+            except Exception:
+                pass
+        # Also force regen if cached bullets contain garbage (filing metadata)
+        if not _brief_stale and cached:
+            _garbage_pats = ('10-K', '10-Q', '8-K', '6-K', '20-F')
+            _garbage_phrases = ('filing', 'captured', 'Latest filing')
+            _cb = [str(b or "") for b in (cached.get("bullets") or [])]
+            if any(
+                (b.endswith(g) or g in b) for b in _cb for g in _garbage_pats
+            ) or any(
+                p in b for b in _cb for p in _garbage_phrases
+            ):
+                _brief_stale = True
+        if _brief_stale:
+            try:
+                from app.services.portfolio_memory_service import save_morning_brief_snapshot
+                cached = save_morning_brief_snapshot(limit_holdings=5, source="dashboard-auto")
+            except Exception:
+                pass
         morning_points = render_morning_brief_bullets(cached, max_bullets=7, allow_runtime_fallback=True)
         if morning_points:
             asof = str((cached or {}).get("asof") or "").strip()
@@ -1436,6 +1567,27 @@ def dashboard_report_panels() -> dict[str, object]:
         tk = str(row.get("ticker") or "").strip().upper()
         row["company"] = str(name_map.get(tk) or "").strip()
 
+    # Persist lows to Postgres (so Cloud Run can read them even without report files).
+    if lows_both or lows_52:
+        try:
+            if lows_both:
+                upsert_lows_snapshot_pg("both", lows_both)
+            if lows_52:
+                upsert_lows_snapshot_pg("52", lows_52)
+        except Exception:
+            pass
+    # Fallback: read from Postgres if file parsing returned nothing.
+    if not lows_both:
+        try:
+            lows_both = list_lows_snapshot_pg("both")
+        except Exception:
+            pass
+    if not lows_52:
+        try:
+            lows_52 = list_lows_snapshot_pg("52")
+        except Exception:
+            pass
+
     # Prefer fresh appendix when earnings_radar is stale.
     earnings_primary = appendix_txt if _is_stale(earnings_path, max_age_hours=36) and appendix_txt else (earnings_txt or appendix_txt)
     earnings_week = _extract_earnings_week_rows(earnings_primary, today=today, row_limit=120)
@@ -1445,10 +1597,24 @@ def dashboard_report_panels() -> dict[str, object]:
     if not earnings_week:
         earnings_week = _finnhub_earnings_week_rows(today=today, row_limit=120)
     # Durable fallback from Postgres snapshot (stale-while-revalidate behavior).
-    if not earnings_week and core_backend() == "postgres":
+    if not earnings_week:
         ws = (today - dt.timedelta(days=today.weekday())).isoformat()
         we = (today - dt.timedelta(days=today.weekday()) + dt.timedelta(days=6)).isoformat()
         earnings_week = list_earnings_calendar_snapshot_pg(ws, we, limit=200)
+    # Supplement with yfinance earnings for the user's own tickers (portfolio + watchlist).
+    # Only fetch if we have NO earnings data at all — otherwise skip to keep page fast.
+    if not earnings_week:
+        try:
+            from app.services.dashboard_service import _read_portfolio
+            from app.services.portfolio_state_service import read_watchlist_rows_state
+            pf_tickers = [_safe_ticker(r.get("ticker", "")) for r in _read_portfolio() if _safe_ticker(r.get("ticker", ""))]
+            wl_tickers = [_safe_ticker(r.get("ticker", "")) for r in read_watchlist_rows_state() if _safe_ticker(r.get("ticker", ""))]
+            all_my_tickers = list(dict.fromkeys(pf_tickers + wl_tickers))  # dedup, preserve order
+            if all_my_tickers:
+                yf_rows = _yfinance_earnings_for_tickers(all_my_tickers, today=today, days_forward=10)
+                earnings_week.extend(yf_rows)
+        except Exception:
+            pass
     earnings_week = _enrich_earnings_with_reported_status(earnings_week, today=today)
     # Fill missing company names from local profile cache so UI does not show "-" for valid tickers.
     earnings_tickers = [str((r or {}).get("symbol") or "").strip().upper() for r in (earnings_week or [])]
@@ -1479,7 +1645,7 @@ def dashboard_report_panels() -> dict[str, object]:
             str((r or {}).get("symbol") or ""),
         ),
     )
-    if earnings_week and core_backend() == "postgres":
+    if earnings_week:
         try:
             upsert_earnings_calendar_snapshot_pg(earnings_week)
         except Exception:
@@ -1495,7 +1661,7 @@ def dashboard_report_panels() -> dict[str, object]:
         except Exception:
             return "-"
 
-    return {
+    result = {
         "morning_source": morning_path.name if morning_path else "-",
         "appendix_source": appendix_path.name if appendix_path else "-",
         "earnings_source": earnings_path.name if earnings_path else (appendix_path.name if appendix_path else "-"),
@@ -1511,6 +1677,63 @@ def dashboard_report_panels() -> dict[str, object]:
         "lows_52": lows_52,
         "earnings_week": earnings_week,
     }
+    # Auto-sync to Cloud Run in background (non-blocking).
+    if (earnings_week or lows_both or lows_52):
+        _bg_sync_to_cloud(earnings_week, lows_both, lows_52)
+    return result
+
+
+_CLOUD_SYNC_LOCK = threading.Lock()
+_CLOUD_SYNC_LAST: float = 0.0
+_CLOUD_SYNC_INTERVAL = 3600  # once per hour max
+
+
+def _bg_sync_to_cloud(
+    earnings: list[dict], lows_both: list[dict], lows_52: list[dict]
+) -> None:
+    """Push dashboard data to Cloud Run in a daemon thread (fire-and-forget)."""
+    global _CLOUD_SYNC_LAST
+    cloud_url = os.getenv("CLOUD_SYNC_URL", "").strip()
+    if not cloud_url:
+        return
+    now = time.time()
+    with _CLOUD_SYNC_LOCK:
+        if (now - _CLOUD_SYNC_LAST) < _CLOUD_SYNC_INTERVAL:
+            return
+        _CLOUD_SYNC_LAST = now
+
+    def _do_sync():
+        try:
+            import json as _json
+
+            import requests  # type: ignore
+
+            payload = {
+                "earnings_week": earnings,
+                "lows_both": lows_both,
+                "lows_52": lows_52,
+            }
+            # Also include cross-asset if available.
+            try:
+                from app.services.cross_asset_service import get_cross_asset_snapshot
+
+                ca = get_cross_asset_snapshot()
+                if ca.get("ok") and ca.get("rows"):
+                    payload["cross_asset"] = ca
+            except Exception:
+                pass
+            resp = requests.post(
+                cloud_url.rstrip("/") + "/api/internal/sync-dashboard",
+                json=payload,
+                timeout=(5.0, 30.0),
+            )
+            if resp.status_code == 200:
+                pass  # success
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_do_sync, daemon=True, name="cloud-dashboard-sync")
+    t.start()
 
 
 def _universe_reports(home: dict, metrics: dict[str, object]) -> tuple[list[str], list[str]]:
@@ -1588,26 +1811,13 @@ def _watchlist_opportunities(home: dict, limit: int = 8) -> list[dict[str, objec
     return out[: max(1, int(limit))]
 
 
-def _my_companies_metrics(home: dict) -> dict[str, object]:
+def _my_companies_metrics(home: dict, preloaded_quotes: dict | None = None) -> dict[str, object]:
     portfolio = list(home.get("portfolio", []) or [])
-    if not portfolio:
-        return {
-            "portfolio_rows": [],
-            "stock_value_usd": 0.0,
-            "cash_value_usd": 0.0,
-            "aum_usd": 0.0,
-            "cash_drag_pct": 0.0,
-            "top3": [],
-            "sector_exposure": [],
-            "industry_exposure": [],
-            "country_exposure": [],
-            "quick_analysis": ["No portfolio holdings yet."],
-            "intel24": [],
-            "cash_lines": [],
-        }
+    cash_usd, cash_lines = _cash_usd_total()
 
+    # ── Stock enrichment (safe when portfolio is empty — loops just don't run) ──
     tks = [_safe_ticker(r.get("ticker", "")) for r in portfolio]
-    quote_map = _last_quote_map(tks)
+    quote_map = preloaded_quotes if preloaded_quotes is not None else (_last_quote_map(tks) if tks else {})
 
     stock_value = 0.0
     stock_prev_close_value = 0.0
@@ -1636,19 +1846,24 @@ def _my_companies_metrics(home: dict) -> dict[str, object]:
             {
                 **r,
                 "ticker": t,
+                "shares": sh,
                 "shares_num": sh,
+                "cost": cost,
                 "cost_num": cost,
+                "price": px,
                 "price_now": px,
                 "price_live": live_px,
                 "day_pct": day_pct_live,
+                "value": val,
                 "value_usd": val,
+                "pnl": pnl,
                 "pnl_usd": pnl,
                 "day_pnl_usd": day_pnl,
                 "prev_close_value_usd": prev_val,
             }
         )
 
-    cash_usd, cash_lines = _cash_usd_total()
+    # ── AUM = stocks + cash (always computed, never skipped) ──
     aum = stock_value + cash_usd
     aum_prev_close = stock_prev_close_value + cash_usd
     for r in enriched:
@@ -1666,76 +1881,54 @@ def _my_companies_metrics(home: dict) -> dict[str, object]:
     top3 = sorted(enriched, key=lambda x: float(x.get("weight_pct") or 0.0), reverse=True)[:3]
 
     quick: list[str] = []
-    if top3:
-        quick.append(f"Concentration: {top3[0]['ticker']} is {float(top3[0]['weight_pct']):.1f}% of AUM.")
-    sectors = {str(r.get("industry") or "Unknown") for r in enriched}
-    quick.append(f"Diversification: {len(sectors)} industry group(s) represented.")
-    dlist = [r for r in enriched if isinstance(r.get("day_pct"), (int, float))]
-    if dlist:
-        best = sorted(dlist, key=lambda x: float(x.get("day_pct") or 0.0), reverse=True)[0]
-        worst = sorted(dlist, key=lambda x: float(x.get("day_pct") or 0.0))[0]
-        quick.append(
-            f"Daily dispersion: best {best['ticker']} {float(best.get('day_pct') or 0.0):+.2f}%, "
-            f"worst {worst['ticker']} {float(worst.get('day_pct') or 0.0):+.2f}%."
-        )
+    if not portfolio:
+        quick.append("No portfolio holdings yet.")
+        if cash_usd > 0:
+            quick.append(f"Cash: USD {cash_usd:,.2f}")
+    else:
+        if top3:
+            quick.append(f"Concentration: {top3[0]['ticker']} is {float(top3[0]['weight_pct']):.1f}% of AUM.")
+        sectors = {str(r.get("industry") or "Unknown") for r in enriched}
+        quick.append(f"Diversification: {len(sectors)} industry group(s) represented.")
+        dlist = [r for r in enriched if isinstance(r.get("day_pct"), (int, float))]
+        if dlist:
+            best = sorted(dlist, key=lambda x: float(x.get("day_pct") or 0.0), reverse=True)[0]
+            worst = sorted(dlist, key=lambda x: float(x.get("day_pct") or 0.0))[0]
+            quick.append(
+                f"Daily dispersion: best {best['ticker']} {float(best.get('day_pct') or 0.0):+.2f}%, "
+                f"worst {worst['ticker']} {float(worst.get('day_pct') or 0.0):+.2f}%."
+            )
 
     # 24h intelligence rows from intel24 snapshot.
     intel24: list[dict[str, object]] = []
     tickers = [t for t in tks if t]
     if tickers:
-        if core_backend() == "postgres":
-            con_pg = pg_connect()
-            if con_pg is not None:
-                try:
-                    cur = con_pg.cursor()
-                    cur.execute(
-                        """
-                        SELECT ticker, day_pct, insider_txt, sec_txt, happened, suggestion
-                        FROM intel24_snapshot_core
-                        WHERE ticker = ANY(%s)
-                        ORDER BY ABS(COALESCE(day_pct,0)) DESC
-                        """,
-                        (tickers,),
-                    )
-                    for r in cur.fetchall() or []:
-                        intel24.append(
-                            {
-                                "ticker": str(r[0] or "").strip().upper(),
-                                "day_pct": float(r[1] or 0.0),
-                                "insider_txt": str(r[2] or "-"),
-                                "sec_txt": str(r[3] or "-"),
-                                "happened": str(r[4] or "-"),
-                                "suggestion": str(r[5] or "-"),
-                            }
-                        )
-                finally:
-                    con_pg.close()
-        elif not strict_postgres_mode():
-            con = get_sqlite_conn(str(CORE_DB_PATH), row_factory=True)
+        con_pg = pg_connect()
+        if con_pg is not None:
             try:
-                marks = ",".join("?" for _ in tickers)
-                rows = con.execute(
-                    f"""
+                cur = con_pg.cursor()
+                cur.execute(
+                    """
                     SELECT ticker, day_pct, insider_txt, sec_txt, happened, suggestion
-                    FROM intel24_snapshot
-                    WHERE ticker IN ({marks})
+                    FROM intel24_snapshot_core
+                    WHERE ticker = ANY(%s)
                     ORDER BY ABS(COALESCE(day_pct,0)) DESC
                     """,
-                    tuple(tickers),
-                ).fetchall()
-                intel24 = [
-                    {
-                        "ticker": str(r["ticker"] or "").strip().upper(),
-                        "day_pct": float(r["day_pct"] or 0.0),
-                        "insider_txt": str(r["insider_txt"] or "-"),
-                        "sec_txt": str(r["sec_txt"] or "-"),
-                        "happened": str(r["happened"] or "-"),
-                        "suggestion": str(r["suggestion"] or "-"),
-                    }
-                    for r in rows
-                ]
+                    (tickers,),
+                )
+                for r in cur.fetchall() or []:
+                    intel24.append(
+                        {
+                            "ticker": str(r[0] or "").strip().upper(),
+                            "day_pct": float(r[1] or 0.0),
+                            "insider_txt": str(r[2] or "-"),
+                            "sec_txt": str(r[3] or "-"),
+                            "happened": str(r[4] or "-"),
+                            "suggestion": str(r[5] or "-"),
+                        }
+                    )
             finally:
-                con.close()
+                con_pg.close()
 
     return {
         "portfolio_rows": enriched,
@@ -1802,15 +1995,22 @@ def _render(
     active_policy = next((x for x in policy_versions if int(x.get("is_active") or 0) == 1), {})
     snap = dashboard_snapshot()
     home = snap.get("home", {}) or {}
-    market = _market_brief(home)
-    report_panels = dashboard_report_panels()
+    # Run the 4 heaviest dashboard calls in parallel instead of sequentially.
+    from app.services.earnings_transcript_service import list_earnings_analysis
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _dash_ex:
+        _fut_market = _dash_ex.submit(_market_brief, home)
+        _fut_panels = _dash_ex.submit(dashboard_report_panels)
+        _fut_metrics = _dash_ex.submit(_my_companies_metrics, home)
+        _fut_earnings = _dash_ex.submit(list_earnings_analysis, 10)
+    market = _fut_market.result(timeout=20)
+    report_panels = _fut_panels.result(timeout=20)
+    my_metrics = _fut_metrics.result(timeout=20)
+    earnings_analyses = _fut_earnings.result(timeout=10)
     thesis_breach_alerts = list_thesis_breach_alerts(status="open", limit=10)
     cascade_alerts = list_cascade_alerts(status="open", limit=10)
     ai_accuracy = get_ai_accuracy_stats(days=90)
     ai_audit_timeline = get_ai_audit_timeline(limit=30)
     data_integrity = get_data_integrity_health()
-    from app.services.earnings_transcript_service import list_earnings_analysis
-    earnings_analyses = list_earnings_analysis(limit=10)
     tpl = "components/dashboard_body.html" if _is_hx(request) else "dashboard.html"
     return templates.TemplateResponse(
         tpl,
@@ -1829,7 +2029,7 @@ def _render(
             "home": home,
             "market": market,
             "report_panels": report_panels,
-            "my_metrics": _my_companies_metrics(home),
+            "my_metrics": my_metrics,
             "portfolio_intel": portfolio_intel,
             "action_proposals": proposals,
             "risk_veto_decisions": risk_veto,
@@ -1849,496 +2049,61 @@ def _render(
 
 
 def _desk_parse(raw: str) -> tuple[str, str]:
-    s = str(raw or "").strip()
-    if not s:
-        return "note", ""
-    low = s.lower()
-    if low.startswith("/ask "):
-        return "ask", s[5:].strip()
-    if low.startswith("ask:"):
-        return "ask", s[4:].strip()
-    if low.startswith("/task "):
-        return "task", s[6:].strip()
-    if low.startswith("task:"):
-        return "task", s[5:].strip()
-    if low.startswith("todo:"):
-        return "task", s[5:].strip()
-    if re.match(r".+\?$", s):
-        return "ask", s
-    return "note", s
+    return _dh_desk_parse(raw)
 
 
 def _contains_fuzzy_term(text: str, term: str, min_ratio: float = 0.78) -> bool:
-    low = str(text or "").strip().lower()
-    t = str(term or "").strip().lower()
-    if not low or not t:
-        return False
-    if t in low:
-        return True
-    if t == "watchlist" and "watch list" in low:
-        return True
-    toks = re.findall(r"[a-z]+", low)
-    for tok in toks:
-        if difflib.SequenceMatcher(None, tok, t).ratio() >= min_ratio:
-            return True
-    return False
+    return _dh_contains_fuzzy_term(text, term, min_ratio=min_ratio)
 
 
 def _has_add_intent(text: str) -> bool:
-    low = str(text or "").strip().lower()
-    if re.search(r"\b(add|set|update|top\s*up|increase|put|buy|allocate|fund)\b", low):
-        return True
-    toks = re.findall(r"[a-z]+", low)
-    add_words = ("add", "set", "update", "buy")
-    for tok in toks:
-        if any(difflib.SequenceMatcher(None, tok, w).ratio() >= 0.8 for w in add_words):
-            return True
-    return False
+    return _dh_has_add_intent(text)
 
 
 def _has_remove_intent(text: str) -> bool:
-    low = str(text or "").strip().lower()
-    if re.search(r"\b(remove|delete|drop|sell|close)\b", low):
-        return True
-    toks = re.findall(r"[a-z]+", low)
-    rem_words = ("remove", "delete", "drop", "sell")
-    for tok in toks:
-        if any(difflib.SequenceMatcher(None, tok, w).ratio() >= 0.8 for w in rem_words):
-            return True
-    return False
+    return _dh_has_remove_intent(text)
 
 
 def _looks_like_question(text: str) -> bool:
-    s = str(text or "").strip().lower()
-    if not s:
-        return False
-    if "?" in s:
-        return True
-    return bool(re.match(r"^(what|why|how|when|where|which|can|could|would|should|do|does|did|is|are)\b", s))
+    return _dh_looks_like_question(text)
 
 
 def _starts_with_command_verb(text: str) -> bool:
-    s = str(text or "").strip().lower()
-    return bool(re.match(r"^(add|set|update|remove|delete|drop|buy|sell|close|fund|allocate|put)\b", s))
+    return _dh_starts_with_command_verb(text)
 
 
 def _is_mutating_command_mode(mode: str) -> bool:
-    m = str(mode or "").strip().lower()
-    return m in {
-        "cash_upsert",
-        "cash_remove",
-        "watchlist_add",
-        "watchlist_remove",
-        "portfolio_upsert",
-        "portfolio_remove",
-        "bluechips_add",
-        "bluechips_remove",
-    }
+    return _dh_is_mutating_command_mode(mode)
 
 
 def _explicit_mutation_request(text: str) -> bool:
-    s = str(text or "").strip().lower()
-    return bool(re.match(r"^(?:/apply|apply)\b", s))
+    return _dh_explicit_mutation_request(text)
 
 
 def _mutation_guard_enabled() -> bool:
-    v = str(os.getenv("AI_MUTATION_GUARD", "1")).strip().lower()
-    return v not in {"0", "false", "no", "off"}
+    return _dh_mutation_guard_enabled()
 
 
 def _allow_text_mutations() -> bool:
-    v = str(os.getenv("ALLOW_TEXT_MUTATIONS", "0")).strip().lower()
-    return v in {"1", "true", "yes", "on"}
+    return _dh_allow_text_mutations()
 
 
 def _parse_ai_command(raw: str) -> dict[str, str] | None:
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    low = re.sub(r"\s+", " ", s.lower()).strip()
-    if _looks_like_question(low) and not _starts_with_command_verb(low):
-        return None
-
-    # Intent-first parsing so similar phrasings still work.
-    has_add = _has_add_intent(low)
-    has_remove = _has_remove_intent(low)
-    has_watchlist = _contains_fuzzy_term(low, "watchlist")
-    has_portfolio = _contains_fuzzy_term(low, "portfolio")
-    has_cash = _contains_fuzzy_term(low, "cash")
-    has_balance = _contains_fuzzy_term(low, "balance")
-
-    # Cash (flexible)
-    if has_cash:
-        c_match = re.search(r"\b(usd|eur|gbp)\b", low)
-        cur = str(c_match.group(1) if c_match else "USD").upper()
-        a_match = re.search(r"\b(\d+(?:[.,]\d+)?\s*[kKmMbB]?)\b", s)
-        amt = _parse_human_amount(str(a_match.group(1) if a_match else ""), 0.0)
-        if has_remove:
-            return {"mode": "cash_remove", "currency": cur}
-        if has_add and amt > 0:
-            return {"mode": "cash_upsert", "currency": cur, "amount": f"{amt:g}"}
-    # Cash (implicit, no explicit word "cash")
-    # Examples:
-    # - add 10k usd to balance
-    # - set usd 5000 balance
-    if has_balance:
-        c_match = re.search(r"\b(usd|eur|gbp)\b", low)
-        cur = str(c_match.group(1) if c_match else "USD").upper()
-        a_match = re.search(r"\b(\d+(?:[.,]\d+)?\s*[kKmMbB]?)\b", s)
-        amt = _parse_human_amount(str(a_match.group(1) if a_match else ""), 0.0)
-        if has_remove:
-            return {"mode": "cash_remove", "currency": cur}
-        if has_add and amt > 0:
-            return {"mode": "cash_upsert", "currency": cur, "amount": f"{amt:g}"}
-
-    # Watchlist (flexible)
-    if has_watchlist:
-        if has_remove:
-            ticker = _infer_ticker(s)
-            if ticker:
-                return {"mode": "watchlist_remove", "text": "", "ticker": ticker}
-        if has_add:
-            ticker = _infer_ticker(s)
-            if ticker:
-                return {"mode": "watchlist_add", "text": "", "ticker": ticker}
-        ticker = _infer_ticker(s)
-        if ticker:
-            return {"mode": "watchlist_add", "text": "", "ticker": ticker}
-
-    # Portfolio (flexible)
-    if has_portfolio:
-        ticker = _infer_ticker(s)
-        if has_remove and ticker:
-            return {"mode": "portfolio_remove", "text": "", "ticker": ticker, "shares": "0", "cost": "0"}
-        if has_add and ticker:
-            m_sh = re.search(r"(\d+(?:\.\d+)?)\s*shares?\b", low, flags=re.I)
-            m_cost = re.search(r"(?:at|cost|price)\s*\$?\s*(\d+(?:\.\d+)?)", low, flags=re.I)
-            m_any = re.search(r"\b(\d+(?:\.\d+)?)\b", low)
-            shares = str(m_sh.group(1) if m_sh else (m_any.group(1) if m_any else "1"))
-            cost = str(m_cost.group(1) if m_cost else "0")
-            return {"mode": "portfolio_upsert", "text": "", "ticker": ticker, "shares": shares, "cost": cost}
-
-    # Portfolio shorthand without explicit "portfolio":
-    # - add CRM 45 at 185
-    # - buy UNH 20 at 490.5
-    # - add CRM 45 shares 185
-    m_port_short = re.match(
-        r"^\s*(?:please\s+)?(?:add|buy|set|update)\s+(?P<t>[A-Za-z.\-]{1,12})\s+(?P<sh>\d+(?:\.\d+)?)\s*(?:shares?)?\s*(?:at|@|price|cost)?\s*\$?\s*(?P<px>\d+(?:\.\d+)?)(?:\b.*)?$",
-        s,
-        flags=re.I,
-    )
-    if m_port_short:
-        tk_guess = _safe_ticker(m_port_short.group("t") or "")
-        tk = _infer_ticker(tk_guess) or tk_guess
-        if tk:
-            return {
-                "mode": "portfolio_upsert",
-                "text": "",
-                "ticker": tk,
-                "shares": str(m_port_short.group("sh") or "0"),
-                "cost": str(m_port_short.group("px") or "0"),
-            }
-
-    # Two-number fallback with clear buy/add intent:
-    # - add salesforce 45 at 185
-    # - buy hubspot 10 650
-    if has_add:
-        tk = _infer_ticker(s)
-        if tk:
-            nums = re.findall(r"\b(\d+(?:\.\d+)?)\b", low)
-            if len(nums) >= 2:
-                return {"mode": "portfolio_upsert", "text": "", "ticker": tk, "shares": nums[0], "cost": nums[1]}
-
-    # Cash commands:
-    # - add 10k usd cash
-    # - add usd 10000 cash
-    # - set cash usd 5000
-    m_cash_add = re.match(
-        r"^\s*(?:please\s+)?(?:add|set|update)\s+(?:(?P<a1>[\d.,]+[kKmMbB]?)\s*(?P<c1>[A-Za-z]{3})|(?P<c2>[A-Za-z]{3})\s*(?P<a2>[\d.,]+[kKmMbB]?))\s+cash(?:\b.*)?$",
-        s,
-        flags=re.I,
-    )
-    if not m_cash_add:
-        m_cash_add = re.match(
-            r"^\s*(?:please\s+)?(?:add|set|update)\s+(?P<a4>[\d.,]+[kKmMbB]?)\s+(?:to\s+)?(?:my\s+|the\s+)?cash(?:\s+balance)?(?:\s+in\s+(?P<c4>[A-Za-z]{3}))?(?:\b.*)?$",
-            s,
-            flags=re.I,
-        )
-    if not m_cash_add:
-        m_cash_add = re.match(
-            r"^\s*(?:please\s+)?(?:add|set|update)\s+cash\s+(?P<c3>[A-Za-z]{3})\s*(?P<a3>[\d.,]+[kKmMbB]?)(?:\b.*)?$",
-            s,
-            flags=re.I,
-        )
-    if m_cash_add:
-        cur = str(
-            m_cash_add.groupdict().get("c1")
-            or m_cash_add.groupdict().get("c2")
-            or m_cash_add.groupdict().get("c3")
-            or m_cash_add.groupdict().get("c4")
-            or "USD"
-        ).strip().upper()
-        amt_txt = str(
-            m_cash_add.groupdict().get("a1")
-            or m_cash_add.groupdict().get("a2")
-            or m_cash_add.groupdict().get("a3")
-            or m_cash_add.groupdict().get("a4")
-            or ""
-        ).strip()
-        amt = _parse_human_amount(amt_txt, 0.0)
-        if amt <= 0:
-            return None
-        return {"mode": "cash_upsert", "currency": cur, "amount": f"{amt:g}"}
-
-    m_cash_remove = re.match(
-        r"^\s*(?:please\s+)?remove\s+(?:(?P<c1>[A-Za-z]{3})\s+)?cash(?:\s+(?P<c2>[A-Za-z]{3}))?(?:\b.*)?$",
-        s,
-        flags=re.I,
-    )
-    if m_cash_remove:
-        cur = str(m_cash_remove.group("c1") or m_cash_remove.group("c2") or "USD").strip().upper()
-        return {"mode": "cash_remove", "currency": cur}
-
-    m_watch_remove = re.match(
-        r"^\s*(?:please\s+)?remove\s+(?P<target>.+?)\s+from\s+(?:my\s+|the\s+)?watchlist(?:\b.*)?$",
-        s,
-        flags=re.I,
-    )
-    if m_watch_remove:
-        target = str(m_watch_remove.group("target") or "").strip()
-        ticker = _infer_ticker(target or s)
-        if not ticker:
-            return None
-        return {"mode": "watchlist_remove", "text": "", "ticker": ticker}
-
-    m_watch = re.match(
-        r"^\s*(?:please\s+)?add\s+(?P<target>.+?)\s+to\s+(?:my\s+|the\s+)?watchlist(?:\b.*)?$",
-        s,
-        flags=re.I,
-    )
-    if m_watch:
-        target = str(m_watch.group("target") or "").strip()
-        ticker = _infer_ticker(target or s)
-        if not ticker:
-            return None
-        return {"mode": "watchlist_add", "text": "", "ticker": ticker}
-
-    m_port_remove = re.match(
-        r"^\s*(?:please\s+)?remove\s+(?P<target>.+?)\s+from\s+(?:my\s+|the\s+)?portfolio(?:\b.*)?$",
-        s,
-        flags=re.I,
-    )
-    if m_port_remove:
-        target = str(m_port_remove.group("target") or "").strip()
-        ticker = _infer_ticker(target or s)
-        if not ticker:
-            return None
-        return {"mode": "portfolio_remove", "text": "", "ticker": ticker, "shares": "0", "cost": "0"}
-
-    m_port = re.match(
-        r"^\s*(?:please\s+)?(?:add|update|set)\s+(?P<target>.+?)\s+to\s+(?:my\s+|the\s+)?portfolio(?:\s+(?P<rest>.*))?$",
-        s,
-        flags=re.I,
-    )
-    if m_port:
-        target = str(m_port.group("target") or "").strip()
-        ticker = _infer_ticker(target or s)
-        if not ticker:
-            return None
-        rest = str(m_port.group("rest") or "").strip()
-        shares = ""
-        cost = ""
-        m_sh = re.search(r"(\d+(?:\.\d+)?)\s*shares?\b", rest, flags=re.I)
-        if m_sh:
-            shares = str(m_sh.group(1) or "").strip()
-        m_cost = re.search(r"(?:at|cost|price)\s*\$?\s*(\d+(?:\.\d+)?)", rest, flags=re.I)
-        if m_cost:
-            cost = str(m_cost.group(1) or "").strip()
-        if not shares:
-            m_num = re.search(r"\b(\d+(?:\.\d+)?)\b", rest)
-            if m_num:
-                shares = str(m_num.group(1) or "").strip()
-        if not shares:
-            shares = "1"
-        if not cost:
-            cost = "0"
-        return {"mode": "portfolio_upsert", "text": "", "ticker": ticker, "shares": shares, "cost": cost}
-
-    # Examples:
-    # - add note for salesforce: check Q4 margins
-    # - create task for hubspot - read earnings call
-    # - save note: portfolio rebalance thought
-    m = re.match(
-        r"^\s*(?:please\s+)?(?:add|create|save|log|record|set)\s+(?:a\s+)?(?P<kind>note|task|todo|reminder)\b(?P<rest>.*)$",
-        s,
-        flags=re.I,
-    )
-    if not m:
-        return None
-    kind = str(m.group("kind") or "").strip().lower()
-    if kind in {"task", "todo"}:
-        mode = "task"
-    elif kind == "reminder":
-        mode = "reminder"
-    else:
-        mode = "note"
-    rest = str(m.group("rest") or "").strip()
-    if not rest:
-        return None
-
-    target = ""
-    text = ""
-    # target + payload separated with ":" or "-"
-    m2 = re.match(r"^(?:for|about|on)\s+(?P<target>[^:\-]+?)\s*(?::|\-)\s*(?P<body>.+)$", rest, flags=re.I)
-    if m2:
-        target = str(m2.group("target") or "").strip()
-        text = str(m2.group("body") or "").strip()
-    else:
-        # Natural style: "for hubspot to read their 10k"
-        m2b = re.match(r"^(?:for|about|on)\s+(?P<target>[a-z0-9 .&'-]+?)\s+to\s+(?P<body>.+)$", rest, flags=re.I)
-        if m2b:
-            target = str(m2b.group("target") or "").strip()
-            text = str(m2b.group("body") or "").strip()
-        else:
-        # payload-only command (no explicit target)
-            m3 = re.match(r"^(?::|\-)\s*(?P<body>.+)$", rest, flags=re.I)
-            if m3:
-                text = str(m3.group("body") or "").strip()
-            else:
-                # Soft fallback: "for X <body...>" where body follows target words.
-                m4 = re.match(r"^(?:for|about|on)\s+(?P<all>.+)$", rest, flags=re.I)
-                if m4:
-                    all_part = str(m4.group("all") or "").strip()
-                    toks = all_part.split()
-                    if len(toks) >= 4:
-                        target = " ".join(toks[:2]).strip()
-                        text = " ".join(toks[2:]).strip()
-                    else:
-                        target = all_part
-                        text = ""
-                else:
-                    text = rest
-
-    ticker = _infer_ticker(target or s)
-    if not text:
-        if ticker:
-            default_name = "reminder" if mode == "reminder" else ("task" if mode == "task" else "note")
-            text = f"{default_name} added via Ask AI"
-        else:
-            return None
-    return {"mode": mode, "text": text, "ticker": ticker}
+    return _dh_parse_ai_command(raw, infer_ticker_fn=_infer_ticker, safe_ticker_fn=_safe_ticker)
 
 
 def _is_op_like(text: str) -> bool:
-    s = str(text or "")
-    low = s.lower()
-    topic = (
-        _contains_fuzzy_term(low, "cash")
-        or _contains_fuzzy_term(low, "balance")
-        or _contains_fuzzy_term(low, "watchlist")
-        or _contains_fuzzy_term(low, "portfolio")
-    )
-    action = _has_add_intent(low) or _has_remove_intent(low)
-    if topic and action:
-        return True
-    return bool(
-        re.search(
-            r"\b(add|remove|set|update|buy|sell|allocate|fund|delete|drop)\b.*\b(cash|balance|watchlist|portfolio)\b|\b(cash|balance|watchlist|portfolio)\b.*\b(add|remove|set|update|buy|sell|allocate|fund|delete|drop)\b",
-            s,
-            flags=re.I,
-        )
-    )
+    return _dh_is_op_like(text)
 
 
 def _structured_capture_text(raw: str, mode: str, ticker: str = "") -> str:
-    src = str(raw or "").strip()
-    md = str(mode or "note").strip().lower()
-    tk = _safe_ticker(ticker)
-    if not src:
-        return src
-
-    # Compact pattern:
-    # "hubspot | task | listen to CEO interview | why: ... | next: ... | priority: p1"
-    parts = [p.strip() for p in src.split("|") if p.strip()]
-    company = tk
-    kind = "task" if md == "task" else "note"
-    summary = ""
-    why = ""
-    next_step = ""
-    priority = ""
-
-    key_map = {
-        "why": "why",
-        "reason": "why",
-        "next": "next",
-        "next step": "next",
-        "action": "next",
-        "priority": "priority",
-        "prio": "priority",
-        "type": "type",
-        "kind": "type",
-        "summary": "summary",
-    }
-
-    def _set_kv(k: str, v: str) -> None:
-        nonlocal kind, summary, why, next_step, priority
-        kk = key_map.get(k.strip().lower(), "")
-        vv = v.strip()
-        if not kk:
-            return
-        if kk == "type" and vv:
-            kind = vv.lower()
-        elif kk == "summary" and vv:
-            summary = vv
-        elif kk == "why":
-            why = vv
-        elif kk == "next":
-            next_step = vv
-        elif kk == "priority":
-            priority = vv.upper()
-
-    if len(parts) >= 2:
-        # First pass parse key:value parts.
-        free: list[str] = []
-        for p in parts:
-            if ":" in p:
-                k, v = p.split(":", 1)
-                _set_kv(k, v)
-            else:
-                free.append(p)
-        # Free segments: [company?], [type?], [summary?]
-        if free:
-            c0 = _infer_ticker(free[0])
-            if c0:
-                company = c0
-                free = free[1:]
-        if free:
-            k0 = free[0].strip().lower()
-            if k0 in {"task", "note", "idea", "risk", "question", "thesis"}:
-                kind = k0
-                free = free[1:]
-        if free and not summary:
-            summary = free[0].strip()
-    else:
-        # Natural text fallback: preserve original as summary only.
-        summary = src
-
-    if not company:
-        company = _infer_ticker(src)
-    if not summary:
-        summary = src
-
-    # Never invent missing fields. Keep blank markers when absent.
-    lines = [
-        "[Structured Note]",
-        f"Company: {company or '-'}",
-        f"Type: {kind or ('task' if md == 'task' else 'note')}",
-        f"Summary: {summary or '-'}",
-        f"Why: {why or '-'}",
-        f"Next: {next_step or '-'}",
-        f"Priority: {priority or '-'}",
-    ]
-    return "\n".join(lines)
+    return _dh_structured_capture_text(
+        raw,
+        mode=mode,
+        ticker=ticker,
+        infer_ticker_fn=_infer_ticker,
+        safe_ticker_fn=_safe_ticker,
+    )
 
 
 def _execute_ai_command(cmd: dict[str, str]) -> tuple[bool, str]:
@@ -2384,6 +2149,7 @@ def _execute_ai_command(cmd: dict[str, str]) -> tuple[bool, str]:
                 "ticker": ticker,
                 "added_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "reason": reason,
+                "category": "",
             }
         )
         _write_watchlist_file(rows)
@@ -2510,6 +2276,16 @@ def _infer_ticker(text: str, user_ticker: str = "") -> str:
     if not q:
         return ""
 
+    # Shared parser first (aliases + explicit forms) so local mode still
+    # resolves common commands like "add apple to watchlist" or "$AAPL".
+    try:
+        from app.services.orchestrator.command_parser import extract_ticker
+        cand = _safe_ticker(extract_ticker(q))
+        if cand:
+            return cand
+    except Exception:
+        pass
+
     # 1) Strong ticker patterns first.
     tokens: list[str] = []
     for m in re.findall(r"\$([A-Za-z]{1,6})\b|\b([A-Za-z]{2,5})\b", q):
@@ -2518,6 +2294,17 @@ def _infer_ticker(text: str, user_ticker: str = "") -> str:
             tokens.append(tk)
 
     if core_backend() != "postgres":
+        # Local fallback when postgres directory is not available.
+        stop_tickers = {
+            "ADD", "SET", "PUT", "BUY", "SELL", "THE", "AND", "FOR", "FROM", "WITH",
+            "TO", "MY", "YOUR", "USD", "EUR", "GBP", "PLS", "PLEASE", "CASH",
+            "REMOVE", "DELETE", "WATCHLIST", "PORTFOLIO", "NOTE", "TASK",
+        }
+        for tk in tokens[:8]:
+            if tk in stop_tickers:
+                continue
+            if 2 <= len(tk) <= 6:
+                return tk
         return ""
     con_pg = pg_connect()
     if con_pg is None:
@@ -2618,18 +2405,16 @@ def _infer_ticker(text: str, user_ticker: str = "") -> str:
 
 
 @router.get("/")
+def root_redirect():
+    return RedirectResponse(url="/today", status_code=302)
+
+
 @router.get("/dashboard")
 def dashboard_page(request: Request):
-    templates = request.app.state.templates
-    channels = list_workspace_channels()
-    return templates.TemplateResponse(
-        "workspace_dashboard.html",
-        {
-            "request": request,
-            "channels": channels,
-            "active_channel": "all",
-        },
-    )
+    # HTMX requests: serve content inline, not a redirect (avoids nested shell)
+    if request.headers.get("HX-Request") == "true":
+        return JSONResponse({"redirect": "/today?space=dashboard"})
+    return RedirectResponse(url="/today?space=dashboard", status_code=302)
 
 
 @router.get("/dashboard/classic")
@@ -2652,6 +2437,14 @@ def dashboard_workspace_context():
 def dashboard_workspace_context_live():
     from app.services.workspace_feed_service import get_workspace_live_panel  # noqa: PLC0415
     return JSONResponse({"ok": True, **get_workspace_live_panel()})
+
+
+@router.get("/dashboard/cross-asset/snapshot")
+def dashboard_cross_asset_snapshot(force: int = 0):
+    from app.services.cross_asset_service import get_cross_asset_snapshot  # noqa: PLC0415
+
+    payload = get_cross_asset_snapshot(force_refresh=bool(int(force or 0)))
+    return JSONResponse(payload)
 
 
 @router.post("/dashboard/message")
@@ -2916,12 +2709,24 @@ def dashboard_proposals_dismiss(
     ok = dismiss_action_proposal(proposal_id=proposal_id, reason=reason)
     if not ok:
         return _render(request, message="Could not dismiss insight.")
+    # Signal preference learning
+    try:
+        from app.services.cognitive_engine_service import record_signal_action
+        record_signal_action("proposal", "dismissed", signal_id=proposal_id)
+    except Exception:
+        pass
     return _render(request, message="Insight dismissed.")
 
 
 @router.post("/dashboard/proposals/{proposal_id}/execute")
 def dashboard_proposals_execute(request: Request, proposal_id: int):
     out = execute_action_proposal(proposal_id=proposal_id)
+    # Signal preference learning
+    try:
+        from app.services.cognitive_engine_service import record_signal_action
+        record_signal_action("proposal", "acted", signal_id=proposal_id)
+    except Exception:
+        pass
     if not bool(out.get("ok")):
         err = out.get("error") or "unknown_error"
         msg = out.get("message") or f"Could not execute proposal: {err}"
@@ -2969,6 +2774,12 @@ def dashboard_proposals_reject(
 ):
     rs = str(reason or "").strip()
     ok = reject_action_proposal(proposal_id=proposal_id, reason=rs)
+    # Signal preference learning
+    try:
+        from app.services.cognitive_engine_service import record_signal_action
+        record_signal_action("proposal", "dismissed", signal_id=proposal_id)
+    except Exception:
+        pass
     wants_json = _is_hx(request) or "application/json" in str(request.headers.get("accept") or "").lower()
     if not ok:
         if wants_json:
@@ -3033,6 +2844,182 @@ async def api_simulate_macro_shock_batch(request: Request):
 @router.get("/api/health/data-integrity")
 async def api_data_integrity_health():
     return JSONResponse(get_data_integrity_health())
+
+
+# ── Market history sparkline endpoint ──────────────────────────────────────
+_MARKET_ID_TO_SYMBOL: dict[str, tuple[str, bool]] = {
+    "sp500": ("^GSPC", False), "nasdaq": ("^IXIC", False), "dow": ("^DJI", False),
+    "russell2000": ("^RUT", False), "vix": ("^VIX", False),
+    "us2y": ("^IRX", True), "us5y": ("^FVX", True), "us10y": ("^TNX", True), "us30y": ("^TYX", True),
+    "hyg": ("HYG", False), "lqd": ("LQD", False), "tip": ("TIP", False),
+    "bndx": ("BNDX", False), "emb": ("EMB", False),
+    "gold": ("GC=F", False), "silver": ("SI=F", False), "platinum": ("PL=F", False),
+    "palladium": ("PA=F", False), "crude": ("CL=F", False), "brent": ("BZ=F", False),
+    "natgas": ("NG=F", False), "copper": ("HG=F", False), "aluminum": ("ALI=F", False),
+    "heatoil": ("HO=F", False), "gasoline": ("RB=F", False),
+    "corn": ("ZC=F", False), "wheat": ("ZW=F", False), "soybeans": ("ZS=F", False),
+    "lumber": ("LBS=F", False),
+    "cotton": ("CT=F", False), "sugar": ("SB=F", False), "coffee": ("KC=F", False), "cocoa": ("CC=F", False),
+    "dxy": ("DX-Y.NYB", False), "eurusd": ("EURUSD=X", False), "eurgbp": ("EURGBP=X", False),
+    "usdjpy": ("JPY=X", False), "gbpusd": ("GBPUSD=X", False), "usdcnh": ("CNH=X", False),
+    "xlk": ("XLK", False), "xlf": ("XLF", False), "xle": ("XLE", False),
+    "xlv": ("XLV", False), "xlc": ("XLC", False), "xli": ("XLI", False),
+    "xlb": ("XLB", False), "xlre": ("XLRE", False), "xlu": ("XLU", False),
+    "xlp": ("XLP", False), "xly": ("XLY", False),
+}
+
+_HIST_CACHE: dict[str, tuple[float, list]] = {}  # key → (timestamp, data)
+_HIST_CACHE_TTL = 600  # 10 min
+
+
+@router.get("/api/market/history/{key}")
+def api_market_history(key: str, period: str = "1y"):
+    """Return daily close prices for a market data key (sparkline data)."""
+    import time as _time
+    allowed_periods = {"1mo", "3mo", "6mo", "1y", "2y", "5y"}
+    if period not in allowed_periods:
+        period = "1y"
+    cache_key = f"{key}:{period}"
+    cached = _HIST_CACHE.get(cache_key)
+    if cached and (_time.time() - cached[0]) < _HIST_CACHE_TTL:
+        return JSONResponse({"ok": True, "key": key, "period": period, "data": cached[1]})
+
+    entry = _MARKET_ID_TO_SYMBOL.get(key)
+    if not entry:
+        return JSONResponse({"ok": False, "error": "unknown key"})
+    symbol, div10 = entry
+    try:
+        import yfinance as yf  # type: ignore
+        obj = yf.Ticker(symbol)
+        hist = obj.history(period=period, interval="1d")
+        if hist.empty:
+            return JSONResponse({"ok": False, "error": "no data"})
+        closes = hist["Close"].dropna()
+        points = []
+        for ts, val in closes.items():
+            v = float(val)
+            if div10 and v > 20:
+                v = v / 10.0
+            points.append({"d": ts.strftime("%Y-%m-%d"), "c": round(v, 4)})
+        _HIST_CACHE[cache_key] = (_time.time(), points)
+        return JSONResponse({"ok": True, "key": key, "period": period, "data": points})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)})
+
+
+@router.get("/api/dashboard/snapshot")
+def api_dashboard_snapshot():
+    """Full dashboard snapshot as JSON — powers the inline workspace dashboard."""
+    snap = dashboard_snapshot()
+    home = snap.get("home", {}) or {}
+    # Run the heaviest calls in parallel
+    from app.services.earnings_transcript_service import list_earnings_analysis
+    from app.services.portfolio_memory_service import get_live_portfolio_summary
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _snap_ex:
+        _fut_market = _snap_ex.submit(_market_brief, home)
+        _fut_panels = _snap_ex.submit(dashboard_report_panels)
+        _fut_portfolio = _snap_ex.submit(get_live_portfolio_summary)
+        _fut_earnings = _snap_ex.submit(list_earnings_analysis, 10)
+    market = _fut_market.result(timeout=20)
+    report_panels = _fut_panels.result(timeout=20)
+    earnings_analyses = _fut_earnings.result(timeout=10)
+    proposals = list_action_proposals(status="open", limit=60)
+    proposals = sorted(proposals, key=lambda p: int(p.get("id") or 0), reverse=True)[:10]
+    thesis_breach_alerts = list_thesis_breach_alerts(status="open", limit=10)
+    cascade_alerts = list_cascade_alerts(status="open", limit=10)
+    ai_accuracy = get_ai_accuracy_stats(days=90)
+    ai_audit_timeline = get_ai_audit_timeline(limit=30)
+    data_integrity = get_data_integrity_health()
+    agent_runs = list_recent_agent_runs(limit=8)
+    reflexions = list_recent_reflexions(limit=8)
+    # Cross-asset correlations
+    cross_asset = {}
+    try:
+        from app.services.cross_asset_service import get_cross_asset_snapshot
+        cross_asset = get_cross_asset_snapshot() or {}
+    except Exception:
+        pass
+    # Portfolio live summary
+    portfolio_live = {}
+    try:
+        portfolio_live = _fut_portfolio.result(timeout=20) or {}
+    except Exception:
+        pass
+    # Market status (open/closed/pre/after)
+    market_status = "closed"
+    try:
+        import pytz as _pytz
+        _et = _pytz.timezone("US/Eastern")
+        _now_et = dt.datetime.now(_et)
+        _wd = _now_et.weekday()  # 0=Mon..6=Sun
+        _hm = _now_et.hour * 100 + _now_et.minute
+        if _wd >= 5:
+            market_status = "closed"
+        elif 930 <= _hm < 1600:
+            market_status = "open"
+        elif 400 <= _hm < 930:
+            market_status = "pre-market"
+        elif 1600 <= _hm < 2000:
+            market_status = "after-hours"
+        else:
+            market_status = "closed"
+    except Exception:
+        try:
+            _now_utc = dt.datetime.utcnow()
+            _hm_utc = _now_utc.hour * 100 + _now_utc.minute
+            _wd = _now_utc.weekday()
+            if _wd < 5 and 1430 <= _hm_utc < 2100:
+                market_status = "open"
+            elif _wd < 5 and 900 <= _hm_utc < 1430:
+                market_status = "pre-market"
+            elif _wd < 5 and 2100 <= _hm_utc < 2400:
+                market_status = "after-hours"
+        except Exception:
+            pass
+    # Relative performance: portfolio vs S&P
+    sp500_day = 0.0
+    try:
+        sp = ((market or {}).get("items") or {}).get("sp500") or {}
+        sp500_day = float(str(sp.get("day") or "0").replace("%", "").replace("+", ""))
+    except Exception:
+        pass
+    portfolio_day = float(portfolio_live.get("day_change_pct") or 0.0)
+    relative_perf = portfolio_day - sp500_day
+    # Attention count (proposals + breaches + cascades needing review)
+    attention_count = len(proposals) + len(thesis_breach_alerts) + len(cascade_alerts)
+    # Greeting
+    _hour = dt.datetime.now().hour
+    greeting_time = "Good morning" if _hour < 12 else ("Good afternoon" if _hour < 17 else "Good evening")
+    return JSONResponse({
+        "ok": True,
+        "market": market,
+        "market_status": market_status,
+        "greeting_time": greeting_time,
+        "attention_count": attention_count,
+        "relative_perf": round(relative_perf, 2),
+        "sp500_day_pct": round(sp500_day, 2),
+        "portfolio_day_pct": round(portfolio_day, 2),
+        "report_panels": report_panels,
+        "proposals": proposals,
+        "thesis_breach_alerts": thesis_breach_alerts,
+        "cascade_alerts": cascade_alerts,
+        "ai_accuracy": ai_accuracy,
+        "ai_audit_timeline": ai_audit_timeline,
+        "data_integrity": data_integrity,
+        "earnings_analyses": earnings_analyses,
+        "agent_runs": agent_runs,
+        "reflexions": reflexions,
+        "cross_asset": cross_asset,
+        "portfolio_live": portfolio_live,
+        "home": {
+            "news_general": list(home.get("news_general", []) or [])[:10],
+            "news_company": list(home.get("news_company", []) or [])[:10],
+        },
+        "freshness": snap.get("freshness", {}),
+        "counts": snap.get("counts", {}),
+        "movers_up": snap.get("movers_up", []),
+        "movers_down": snap.get("movers_down", []),
+    })
 
 
 @router.post("/api/agent/runs/cleanup-stuck")
@@ -3159,6 +3146,11 @@ async def api_dismiss_breach_alert(alert_id: int):
 @router.post("/api/agent/cascade-alerts/{alert_id}/dismiss")
 async def api_dismiss_cascade_alert(alert_id: int):
     ok = dismiss_cascade_alert(alert_id)
+    try:
+        from app.services.cognitive_engine_service import record_signal_action
+        record_signal_action("cascade_alert", "dismissed", signal_id=alert_id)
+    except Exception:
+        pass
     return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
 
@@ -3263,6 +3255,140 @@ def desk_action(
         return JSONResponse({"ok": False, "message": f"Desk error: {exc}"}, status_code=500)
 
 
+@router.get("/api/universe/full")
+def api_universe_full():
+    """Full universe data as JSON — powers inline portfolio/watchlist/bluechips view."""
+    # Build a lightweight home dict with just portfolio rows (skip expensive dashboard_snapshot).
+    from app.services.dashboard_service import _read_portfolio
+    portfolio_raw = _read_portfolio()
+    name_map_pf = _company_name_map([_safe_ticker(r.get("ticker", "")) for r in portfolio_raw])
+    for r in portfolio_raw:
+        t = _safe_ticker(r.get("ticker", ""))
+        r["name"] = str(name_map_pf.get(t) or t)
+        r["industry"] = "Unknown"
+    home = {"portfolio": portfolio_raw}
+    watchlist_rows = _read_watchlist_rows()
+    wl_tickers = [_safe_ticker(r.get("ticker", "")) for r in watchlist_rows]
+    blue_rows = _read_blue_chips_rows()
+    blue_tickers = [_safe_ticker(r.get("ticker", "")) for r in blue_rows]
+    pf_tickers = [_safe_ticker(r.get("ticker", "")) for r in portfolio_raw]
+    # Portfolio tickers first so they get sync-fetched on cold start, then watchlist, then bluechips
+    seen_tickers: set[str] = set()
+    all_quote_tickers: list[str] = []
+    for t in pf_tickers + wl_tickers + blue_tickers:
+        if t and t not in seen_tickers:
+            seen_tickers.add(t)
+            all_quote_tickers.append(t)
+    quote_map_all = _last_quote_map(all_quote_tickers)
+    metrics = _my_companies_metrics(home, preloaded_quotes=quote_map_all)
+
+    # Enrich watchlist
+    wl_quotes = {t: quote_map_all.get(t, {}) for t in wl_tickers}
+    wl_added_map = {str(r.get("ticker") or "").strip().upper(): str(r.get("added_at") or "") for r in watchlist_rows}
+    wl_cur_px = {
+        t: (_to_float((wl_quotes.get(t, {}) or {}).get("price"), 0.0)
+            or _to_float(next((r.get("price_now") for r in watchlist_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0)
+            or _to_float(next((r.get("price") for r in watchlist_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0))
+        for t in wl_tickers
+    }
+    wl_since_added = _since_added_pct_map(wl_added_map, wl_cur_px)
+    name_map = _company_name_map(wl_tickers)
+    thesis_map = _load_thesis_map()
+    watchlist_full = []
+    for r in watchlist_rows:
+        t = _safe_ticker(r.get("ticker", ""))
+        q = wl_quotes.get(t, {})
+        day_live = _pick_day_pct(q.get("day_pct"), r.get("day_pct"))
+        day_safe = _to_float(day_live, 0.0)
+        live_px = _to_float(q.get("price"), 0.0) or _to_float(r.get("price_now"), 0.0) or _to_float(r.get("price"), 0.0)
+        mcap_live = _to_float(q.get("market_cap"), 0.0) or _parse_human_amount(str(r.get("market_cap") or ""), 0.0)
+        watchlist_full.append({
+            **r, "ticker": t, "name": str(name_map.get(t) or "").strip(),
+            "price_now": live_px, "market_cap": mcap_live,
+            "since_added_pct": wl_since_added.get(t),
+            "day_pct": day_live, "day_pct_safe": day_safe, "day_abs_pct": abs(day_safe),
+            "has_thesis": bool(thesis_map.get(t, {}).get("thesis")),
+        })
+
+    # Enrich bluechips
+    blue_quotes = {t: quote_map_all.get(t, {}) for t in blue_tickers}
+    blue_added_map = {str(r.get("ticker") or "").strip().upper(): str(r.get("added_at") or "") for r in blue_rows}
+    blue_cur_px = {
+        t: (_to_float((blue_quotes.get(t, {}) or {}).get("price"), 0.0)
+            or _to_float(next((r.get("price_now") for r in blue_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0)
+            or _to_float(next((r.get("price") for r in blue_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0))
+        for t in blue_tickers
+    }
+    blue_since_added = _since_added_pct_map(blue_added_map, blue_cur_px)
+    blue_name_map = _company_name_map(blue_tickers)
+    bluechips_full = []
+    for r in blue_rows:
+        t = _safe_ticker(r.get("ticker", ""))
+        q = blue_quotes.get(t, {})
+        day_live = _pick_day_pct(q.get("day_pct"), r.get("day_pct"))
+        day_safe = _to_float(day_live, 0.0)
+        live_px = _to_float(q.get("price"), 0.0) or _to_float(r.get("price_now"), 0.0) or _to_float(r.get("price"), 0.0)
+        mcap_live = _to_float(q.get("market_cap"), 0.0) or _parse_human_amount(str(r.get("market_cap") or ""), 0.0)
+        bluechips_full.append({
+            **r, "ticker": t, "name": str(blue_name_map.get(t) or "").strip(),
+            "price_now": live_px, "market_cap": mcap_live,
+            "since_added_pct": blue_since_added.get(t),
+            "day_pct": day_live, "day_pct_safe": day_safe, "day_abs_pct": abs(day_safe),
+        })
+
+    timeline_events = _recent_universe_timeline(limit=60)
+    quarterly_reviews = _load_quarterly_reviews()
+    cash_rows = _read_cash_rows()
+
+    # Portfolio accounts
+    from app.services.portfolio_state_service import read_portfolio_accounts
+    portfolio_accounts = read_portfolio_accounts()
+
+    # Build category groups for watchlist
+    from app.services.portfolio_state_service import read_watchlist_groups
+    wl_group_settings = read_watchlist_groups()  # {name: {color, emoji, sort_order}}
+    wl_categories: dict[str, list] = {}
+    for item in watchlist_full:
+        cat = str(item.get("category") or "").strip() or "General"
+        wl_categories.setdefault(cat, []).append(item)
+    # Include empty groups from DB so newly created groups appear immediately
+    for gname in wl_group_settings:
+        if gname not in wl_categories:
+            wl_categories[gname] = []
+    # Sort: by group sort_order (from settings), then General last, then alphabetical
+    def _group_sort_key(c: str) -> tuple:
+        gs = wl_group_settings.get(c, {})
+        return (gs.get("sort_order", 999), c == "General", c)
+    sorted_cats = sorted(wl_categories.keys(), key=_group_sort_key)
+    watchlist_grouped = []
+    for c in sorted_cats:
+        gs = wl_group_settings.get(c, {})
+        watchlist_grouped.append({
+            "category": c,
+            "color": gs.get("color", ""),
+            "emoji": gs.get("emoji", ""),
+            "sort_order": gs.get("sort_order", 0),
+            "items": wl_categories[c],
+        })
+
+    return JSONResponse({
+        "ok": True,
+        "portfolio": list(home.get("portfolio", []) or []),
+        "metrics": metrics,
+        "portfolio_accounts": portfolio_accounts,
+        "watchlist_full": watchlist_full,
+        "watchlist_grouped": watchlist_grouped,
+        "watchlist_group_settings": wl_group_settings,
+        "bluechips_full": bluechips_full,
+        "thesis_map": thesis_map,
+        "timeline_events": timeline_events,
+        "quarterly_reviews": quarterly_reviews,
+        "cash_rows": cash_rows,
+        "movers_up": [],
+        "movers_down": [],
+    })
+
+
 @router.get("/my_companies")
 def my_companies_page(request: Request, msg: str = "", tab: str = "all"):
     target = "/my_universe?tab=all"
@@ -3276,125 +3402,533 @@ def my_universe_page(request: Request, msg: str = "", tab: str = "all"):
     requested = str(tab or "all").strip().lower()
     if requested not in {"all", "portfolio", "watchlist", "bluechips"}:
         requested = "all"
-    templates = request.app.state.templates
-    snap = dashboard_snapshot()
-    home = snap.get("home", {}) or {}
-    tv = requested
-    metrics = _my_companies_metrics(home)
-    # Durable sources first: do not rely on transient dashboard snapshot for list membership.
-    watchlist_rows = _read_watchlist_rows()
-    if not watchlist_rows:
-        watchlist_rows = list(home.get("watchlist", []) or [])
-    wl_tickers = [_safe_ticker(r.get("ticker", "")) for r in watchlist_rows]
-    blue_rows = _read_blue_chips_rows()
-    if not blue_rows:
-        blue_rows = list(home.get("bluechips", []) or [])
-    blue_tickers = [_safe_ticker(r.get("ticker", "")) for r in blue_rows]
-    all_quote_tickers = sorted(
-        {
-            t
-            for t in (
-                [_safe_ticker(r.get("ticker", "")) for r in (metrics.get("portfolio_rows") or [])]
-                + wl_tickers
-                + blue_tickers
+    space = "watchlist" if requested == "watchlist" else "portfolio"
+    if request.headers.get("HX-Request") == "true":
+        return JSONResponse({"redirect": f"/today?space={space}"})
+    return RedirectResponse(url=f"/today?space={space}", status_code=302)
+
+
+# ── Portfolio Review Room + Watchlist Thesis Board ─────────────────────────
+
+
+def _load_thesis_map() -> dict[str, dict]:
+    """Return {TICKER: {thesis, thesis_summary, target_price, key_questions, phase, ...}} from watchlist_thesis_core."""
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled():
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """SELECT ticker, thesis, thesis_summary, conviction_rating,
+                      time_horizon, invalidation_criteria, strategy_tag,
+                      status, target_price, key_questions, phase,
+                      created_at, updated_at
+               FROM watchlist_thesis_core ORDER BY updated_at DESC"""
+        )
+        out: dict[str, dict] = {}
+        for r in cur.fetchall():
+            out[str(r[0] or "").upper()] = {
+                "ticker": str(r[0] or ""),
+                "thesis": str(r[1] or ""),
+                "thesis_summary": str(r[2] or ""),
+                "conviction_rating": int(r[3] or 0),
+                "time_horizon": str(r[4] or ""),
+                "invalidation_criteria": str(r[5] or ""),
+                "strategy_tag": str(r[6] or "CORE"),
+                "status": str(r[7] or "active"),
+                "target_price": float(r[8]) if r[8] is not None else None,
+                "key_questions": r[9] if isinstance(r[9], list) else [],
+                "phase": str(r[10] or "watching"),
+                "created_at": str(r[11] or ""),
+                "updated_at": str(r[12] or ""),
+            }
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def _load_earnings_map(tickers: list[str]) -> dict[str, list[dict]]:
+    """Return {TICKER: [earnings_rows]} from earnings_analysis_core."""
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled() or not tickers:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        ph = ",".join(["%s"] * len(tickers))
+        cur.execute(
+            f"""SELECT ticker, quarter, summary, guidance_direction, filing_date, created_at
+               FROM earnings_analysis_core
+               WHERE UPPER(ticker) IN ({ph})
+               ORDER BY created_at DESC""",
+            tuple(t.upper() for t in tickers),
+        )
+        out: dict[str, list[dict]] = {}
+        for r in cur.fetchall():
+            t = str(r[0] or "").upper()
+            if t not in out:
+                out[t] = []
+            out[t].append({
+                "quarter": str(r[1] or ""),
+                "summary": str(r[2] or ""),
+                "guidance_direction": str(r[3] or ""),
+                "filing_date": str(r[4] or ""),
+                "created_at": str(r[5] or ""),
+            })
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def _load_assumptions_map(tickers: list[str]) -> dict[str, list[dict]]:
+    """Return {TICKER: [assumption_rows]} from position_assumptions_core."""
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled() or not tickers:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        ph = ",".join(["%s"] * len(tickers))
+        cur.execute(
+            f"""SELECT ticker, assumption_text, measurable_condition, status, last_checked_at
+               FROM position_assumptions_core
+               WHERE UPPER(ticker) IN ({ph})
+               ORDER BY id DESC""",
+            tuple(t.upper() for t in tickers),
+        )
+        out: dict[str, list[dict]] = {}
+        for r in cur.fetchall():
+            t = str(r[0] or "").upper()
+            if t not in out:
+                out[t] = []
+            out[t].append({
+                "text": str(r[1] or ""),
+                "condition": str(r[2] or ""),
+                "status": str(r[3] or "active"),
+                "last_checked": str(r[4] or ""),
+            })
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def _load_conviction_map(tickers: list[str]) -> dict[str, dict]:
+    """Return {TICKER: {score, components}} from conviction_scores_core."""
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled() or not tickers:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        ph = ",".join(["%s"] * len(tickers))
+        cur.execute(
+            f"""SELECT ticker, score, components, updated_at
+               FROM conviction_scores_core
+               WHERE UPPER(ticker) IN ({ph})""",
+            tuple(t.upper() for t in tickers),
+        )
+        out: dict[str, dict] = {}
+        for r in cur.fetchall():
+            t = str(r[0] or "").upper()
+            out[t] = {
+                "score": int(r[1] or 0),
+                "components": r[2] if isinstance(r[2], dict) else {},
+                "updated_at": str(r[3] or ""),
+            }
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def _load_records_map(tickers: list[str], limit_per: int = 10) -> dict[str, list[dict]]:
+    """Return {TICKER: [record_rows]} from investment_records_core."""
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled() or not tickers:
+        return {}
+    con = pg_connect()
+    if con is None:
+        return {}
+    try:
+        cur = con.cursor()
+        ph = ",".join(["%s"] * len(tickers))
+        cur.execute(
+            f"""SELECT ticker, kind, title, body, sentiment, created_at
+               FROM investment_records_core
+               WHERE UPPER(ticker) IN ({ph}) AND status != 'deleted'
+               ORDER BY created_at DESC
+               LIMIT %s""",
+            tuple(t.upper() for t in tickers) + (len(tickers) * limit_per,),
+        )
+        out: dict[str, list[dict]] = {}
+        for r in cur.fetchall():
+            t = str(r[0] or "").upper()
+            if t not in out:
+                out[t] = []
+            if len(out[t]) < limit_per:
+                out[t].append({
+                    "kind": str(r[1] or "note"),
+                    "title": str(r[2] or ""),
+                    "body": str(r[3] or ""),
+                    "sentiment": str(r[4] or ""),
+                    "created_at": str(r[5] or ""),
+                })
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
+def _load_quarterly_reviews() -> list[dict]:
+    """Return quarterly review records."""
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled():
+        return []
+    con = pg_connect()
+    if con is None:
+        return []
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """SELECT id, quarter, year, notes, portfolio_return, benchmark_return, created_at, updated_at
+               FROM quarterly_reviews_core ORDER BY year DESC, quarter DESC"""
+        )
+        out = []
+        for r in cur.fetchall():
+            out.append({
+                "id": int(r[0] or 0),
+                "quarter": str(r[1] or ""),
+                "year": int(r[2] or 0),
+                "notes": str(r[3] or ""),
+                "portfolio_return": float(r[4]) if r[4] is not None else None,
+                "benchmark_return": float(r[5]) if r[5] is not None else None,
+                "created_at": str(r[6] or ""),
+                "updated_at": str(r[7] or ""),
+            })
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+@router.get("/my_universe/portfolio")
+def portfolio_review_page(request: Request):
+    return RedirectResponse(url="/today?space=portfolio", status_code=302)
+
+
+@router.get("/my_universe/watchlist")
+def watchlist_thesis_page(request: Request):
+    return RedirectResponse(url="/today?space=watchlist", status_code=302)
+
+
+@router.put("/api/thesis/{ticker}")
+async def api_save_thesis(ticker: str, request: Request):
+    """Save/update thesis for a ticker."""
+    t = _safe_ticker(ticker)
+    if not t:
+        return JSONResponse({"ok": False, "error": "ticker_required"}, status_code=400)
+    body = await request.json()
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled():
+        return JSONResponse({"ok": False, "error": "pg_required"}, status_code=500)
+    con = pg_connect()
+    if con is None:
+        return JSONResponse({"ok": False, "error": "db_error"}, status_code=500)
+    try:
+        cur = con.cursor()
+        thesis_text = str(body.get("thesis") or "").strip()[:3000]
+        target_price = body.get("target_price")
+        if target_price is not None:
+            try:
+                target_price = float(target_price)
+            except (ValueError, TypeError):
+                target_price = None
+        time_horizon = str(body.get("time_horizon") or "").strip()[:120]
+        invalidation = str(body.get("invalidation_criteria") or "").strip()[:1000]
+        status = str(body.get("status") or "").strip()[:32] or "active"
+        phase = str(body.get("phase") or "").strip()[:32]
+        key_questions = body.get("key_questions")
+        if not isinstance(key_questions, list):
+            key_questions = None
+        now = dt.datetime.now().isoformat()
+        cur.execute(
+            """INSERT INTO watchlist_thesis_core
+               (ticker, thesis, thesis_summary, target_price, key_questions, phase,
+                time_horizon, invalidation_criteria, status, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT(ticker) DO UPDATE SET
+                 thesis = COALESCE(NULLIF(EXCLUDED.thesis, ''), watchlist_thesis_core.thesis),
+                 thesis_summary = COALESCE(NULLIF(EXCLUDED.thesis, ''), watchlist_thesis_core.thesis_summary),
+                 target_price = COALESCE(EXCLUDED.target_price, watchlist_thesis_core.target_price),
+                 key_questions = CASE WHEN EXCLUDED.key_questions != '[]'::jsonb THEN EXCLUDED.key_questions ELSE watchlist_thesis_core.key_questions END,
+                 phase = COALESCE(NULLIF(EXCLUDED.phase, ''), watchlist_thesis_core.phase),
+                 time_horizon = COALESCE(NULLIF(EXCLUDED.time_horizon, ''), watchlist_thesis_core.time_horizon),
+                 invalidation_criteria = COALESCE(NULLIF(EXCLUDED.invalidation_criteria, ''), watchlist_thesis_core.invalidation_criteria),
+                 status = COALESCE(NULLIF(EXCLUDED.status, ''), watchlist_thesis_core.status),
+                 updated_at = EXCLUDED.updated_at""",
+            (
+                t,
+                thesis_text,
+                thesis_text,
+                target_price,
+                json.dumps(key_questions) if key_questions else "[]",
+                phase,
+                time_horizon,
+                invalidation,
+                status,
+                now,
+                now,
+            ),
+        )
+        con.commit()
+        record_decision(ticker=t, action="thesis_update", reason=thesis_text[:500], confidence=0.95, source="thesis_board")
+        return JSONResponse({"ok": True, "ticker": t})
+    except Exception as exc:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=500)
+    finally:
+        con.close()
+
+
+@router.post("/api/thesis/{ticker}/question")
+async def api_add_question(ticker: str, request: Request):
+    """Add a key question to a ticker's thesis."""
+    t = _safe_ticker(ticker)
+    if not t:
+        return JSONResponse({"ok": False, "error": "ticker_required"}, status_code=400)
+    body = await request.json()
+    question = str(body.get("question") or "").strip()[:500]
+    if not question:
+        return JSONResponse({"ok": False, "error": "question_required"}, status_code=400)
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled():
+        return JSONResponse({"ok": False, "error": "pg_required"}, status_code=500)
+    con = pg_connect()
+    if con is None:
+        return JSONResponse({"ok": False, "error": "db_error"}, status_code=500)
+    try:
+        cur = con.cursor()
+        now = dt.datetime.now().isoformat()
+        new_q = json.dumps({"question": question, "answered": False, "date": now[:10]})
+        cur.execute(
+            """UPDATE watchlist_thesis_core
+               SET key_questions = key_questions || %s::jsonb,
+                   updated_at = %s
+               WHERE ticker = %s""",
+            (f"[{new_q}]", now, t),
+        )
+        if cur.rowcount == 0:
+            cur.execute(
+                """INSERT INTO watchlist_thesis_core (ticker, key_questions, created_at, updated_at)
+                   VALUES (%s, %s::jsonb, %s, %s)""",
+                (t, f"[{new_q}]", now, now),
             )
-            if t
-        }
-    )
-    quote_map_all = _last_quote_map(all_quote_tickers)
-    wl_quotes = {t: quote_map_all.get(t, {}) for t in wl_tickers}
-    blue_quotes = {t: quote_map_all.get(t, {}) for t in blue_tickers}
-    wl_added_map = {str(r.get("ticker") or "").strip().upper(): str(r.get("added_at") or "") for r in watchlist_rows}
-    blue_added_map = {str(r.get("ticker") or "").strip().upper(): str(r.get("added_at") or "") for r in blue_rows}
-    wl_cur_px = {
-        t: (
-            _to_float((wl_quotes.get(t, {}) or {}).get("price"), 0.0)
-            or _to_float(next((r.get("price_now") for r in watchlist_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0)
-            or _to_float(next((r.get("price") for r in watchlist_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0)
+        con.commit()
+        return JSONResponse({"ok": True})
+    except Exception as exc:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=500)
+    finally:
+        con.close()
+
+
+@router.put("/api/thesis/{ticker}/question/{idx}")
+async def api_toggle_question(ticker: str, idx: int, request: Request):
+    """Toggle a question's answered state."""
+    t = _safe_ticker(ticker)
+    if not t:
+        return JSONResponse({"ok": False, "error": "ticker_required"}, status_code=400)
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled():
+        return JSONResponse({"ok": False, "error": "pg_required"}, status_code=500)
+    con = pg_connect()
+    if con is None:
+        return JSONResponse({"ok": False, "error": "db_error"}, status_code=500)
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT key_questions FROM watchlist_thesis_core WHERE ticker = %s", (t,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        qs = row[0] if isinstance(row[0], list) else []
+        if idx < 0 or idx >= len(qs):
+            return JSONResponse({"ok": False, "error": "invalid_index"}, status_code=400)
+        qs[idx]["answered"] = not qs[idx].get("answered", False)
+        if qs[idx]["answered"]:
+            qs[idx]["answered_date"] = dt.datetime.now().isoformat()[:10]
+        now = dt.datetime.now().isoformat()
+        cur.execute(
+            "UPDATE watchlist_thesis_core SET key_questions = %s::jsonb, updated_at = %s WHERE ticker = %s",
+            (json.dumps(qs), now, t),
         )
-        for t in wl_tickers
-    }
-    blue_cur_px = {
-        t: (
-            _to_float((blue_quotes.get(t, {}) or {}).get("price"), 0.0)
-            or _to_float(next((r.get("price_now") for r in blue_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0)
-            or _to_float(next((r.get("price") for r in blue_rows if _safe_ticker(r.get("ticker", "")) == t), 0.0), 0.0)
+        con.commit()
+        return JSONResponse({"ok": True})
+    except Exception as exc:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=500)
+    finally:
+        con.close()
+
+
+@router.post("/api/thesis/{ticker}/journal")
+async def api_add_journal(ticker: str, request: Request):
+    """Add a journal entry for a ticker (stored in investment_records_core)."""
+    t = _safe_ticker(ticker)
+    if not t:
+        return JSONResponse({"ok": False, "error": "ticker_required"}, status_code=400)
+    body = await request.json()
+    text = str(body.get("text") or "").strip()[:3000]
+    if not text:
+        return JSONResponse({"ok": False, "error": "text_required"}, status_code=400)
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled():
+        return JSONResponse({"ok": False, "error": "pg_required"}, status_code=500)
+    con = pg_connect()
+    if con is None:
+        return JSONResponse({"ok": False, "error": "db_error"}, status_code=500)
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT COALESCE(MAX(id),0)+1 FROM investment_records_core")
+        next_id = cur.fetchone()[0]
+        now = dt.datetime.now().isoformat()
+        cur.execute(
+            """INSERT INTO investment_records_core
+               (id, kind, ticker, title, body, source, created_by, status, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (next_id, "watchlist_journal", t, f"Journal: {t}", text, "thesis_board", "user", "open", now, now),
         )
-        for t in blue_tickers
-    }
-    wl_since_added = _since_added_pct_map(wl_added_map, wl_cur_px)
-    blue_since_added = _since_added_pct_map(blue_added_map, blue_cur_px)
-    name_map = _company_name_map(wl_tickers)
-    watchlist_full: list[dict[str, object]] = []
-    for r in watchlist_rows:
-        t = _safe_ticker(r.get("ticker", ""))
-        q = wl_quotes.get(t, {})
-        day_live = _pick_day_pct(q.get("day_pct"), r.get("day_pct"))
-        day_safe = _to_float(day_live, 0.0)
-        live_px = _to_float(q.get("price"), 0.0) or _to_float(r.get("price_now"), 0.0) or _to_float(r.get("price"), 0.0)
-        mcap_live = _to_float(q.get("market_cap"), 0.0) or _parse_human_amount(str(r.get("market_cap") or ""), 0.0)
-        watchlist_full.append(
-            {
-                **r,
-                "ticker": t,
-                "name": str(name_map.get(t) or "").strip(),
-                "price_now": live_px,
-                "market_cap": mcap_live,
-                "since_added_pct": wl_since_added.get(t),
-                "day_pct": day_live,
-                "day_pct_safe": day_safe,
-                "day_abs_pct": abs(day_safe),
-            }
+        con.commit()
+        return JSONResponse({"ok": True})
+    except Exception as exc:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=500)
+    finally:
+        con.close()
+
+
+@router.post("/api/quarterly-review")
+async def api_save_quarterly_review(request: Request):
+    """Save/update a quarterly review."""
+    body = await request.json()
+    quarter = str(body.get("quarter") or "").strip().upper()[:2]
+    year = int(body.get("year") or 0)
+    notes = str(body.get("notes") or "").strip()[:5000]
+    if not quarter or not year:
+        return JSONResponse({"ok": False, "error": "quarter_and_year_required"}, status_code=400)
+    p_ret = body.get("portfolio_return")
+    b_ret = body.get("benchmark_return")
+    try:
+        p_ret = float(p_ret) if p_ret is not None else None
+    except (ValueError, TypeError):
+        p_ret = None
+    try:
+        b_ret = float(b_ret) if b_ret is not None else None
+    except (ValueError, TypeError):
+        b_ret = None
+    from app.services.postgres_core_service import pg_connect, pg_enabled
+    if not pg_enabled():
+        return JSONResponse({"ok": False, "error": "pg_required"}, status_code=500)
+    con = pg_connect()
+    if con is None:
+        return JSONResponse({"ok": False, "error": "db_error"}, status_code=500)
+    try:
+        cur = con.cursor()
+        now = dt.datetime.now().isoformat()
+        cur.execute(
+            """INSERT INTO quarterly_reviews_core (quarter, year, notes, portfolio_return, benchmark_return, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT(quarter, year) DO UPDATE SET
+                 notes = EXCLUDED.notes,
+                 portfolio_return = EXCLUDED.portfolio_return,
+                 benchmark_return = EXCLUDED.benchmark_return,
+                 updated_at = EXCLUDED.updated_at""",
+            (quarter, year, notes, p_ret, b_ret, now),
         )
-    blue_name_map = _company_name_map(blue_tickers)
-    bluechips_full: list[dict[str, object]] = []
-    for r in blue_rows:
-        t = _safe_ticker(r.get("ticker", ""))
-        q = blue_quotes.get(t, {})
-        day_live = _pick_day_pct(q.get("day_pct"), r.get("day_pct"))
-        day_safe = _to_float(day_live, 0.0)
-        live_px = _to_float(q.get("price"), 0.0) or _to_float(r.get("price_now"), 0.0) or _to_float(r.get("price"), 0.0)
-        mcap_live = _to_float(q.get("market_cap"), 0.0) or _parse_human_amount(str(r.get("market_cap") or ""), 0.0)
-        bluechips_full.append(
-            {
-                **r,
-                "ticker": t,
-                "name": str(blue_name_map.get(t) or "").strip(),
-                "price_now": live_px,
-                "market_cap": mcap_live,
-                "since_added_pct": blue_since_added.get(t),
-                "day_pct": day_live,
-                "day_pct_safe": day_safe,
-                "day_abs_pct": abs(day_safe),
-            }
-        )
-    p_report, w_report = _universe_reports({**home, "watchlist": watchlist_full}, metrics)
-    timeline_events = _recent_universe_timeline(limit=60)
-    return templates.TemplateResponse(
-        "my_universe.html",
-        {
-            "request": request,
-            "message": str(msg or "").strip(),
-            "tab": tv,
-            "generated_at": str((home.get("generated_at") or "")),
-            "portfolio": list(home.get("portfolio", []) or []),
-            "watchlist": watchlist_rows,
-            "watchlist_full": watchlist_full,
-            "bluechips": blue_rows,
-            "bluechips_full": bluechips_full,
-            "metrics": metrics,
-            "cash_rows": _read_cash_rows(),
-            "universe_portfolio_report": p_report,
-            "universe_watchlist_report": w_report,
-            "watchlist_opportunities": _watchlist_opportunities(home, limit=10),
-            "timeline_events": timeline_events,
-            "movers_up": snap.get("movers_up", []),
-            "movers_down": snap.get("movers_down", []),
-            "feed": snap.get("feed", []),
-            "signals": snap.get("signals", {}),
-            "signal_items": (snap.get("signals", {}) or {}).get("items", []),
-        },
-    )
+        con.commit()
+        return JSONResponse({"ok": True})
+    except Exception as exc:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=500)
+    finally:
+        con.close()
+
+
+# ── Idea List API ──────────────────────────────────────────────────────────
+
+@router.get("/api/ideas")
+async def api_list_ideas(request: Request, status: str = "open"):
+    from app.services.postgres_core_service import list_ideas_pg
+    ideas = list_ideas_pg(status=status)
+    return JSONResponse({"ok": True, "ideas": ideas})
+
+
+@router.post("/api/ideas")
+async def api_add_idea(request: Request):
+    body = await request.json()
+    title = str(body.get("title") or "").strip()[:500]
+    if not title:
+        return JSONResponse({"ok": False, "error": "title_required"}, status_code=400)
+    ticker = body.get("ticker")
+    if ticker:
+        ticker = str(ticker).strip().upper()[:16] or None
+    notes = str(body.get("notes") or "").strip()[:2000]
+    source = str(body.get("source") or "manual").strip()[:100]
+    from app.services.postgres_core_service import add_idea_pg
+    idea_id = add_idea_pg(title=title, ticker=ticker, notes=notes, source=source)
+    if idea_id:
+        return JSONResponse({"ok": True, "id": idea_id})
+    return JSONResponse({"ok": False, "error": "db_error"}, status_code=500)
+
+
+@router.put("/api/ideas/{idea_id}/status")
+async def api_update_idea_status(idea_id: int, request: Request):
+    body = await request.json()
+    status = str(body.get("status") or "").strip()
+    if status not in ("open", "promoted", "archived"):
+        return JSONResponse({"ok": False, "error": "invalid_status"}, status_code=400)
+    from app.services.postgres_core_service import update_idea_status_pg
+    ok = update_idea_status_pg(idea_id, status)
+    return JSONResponse({"ok": ok})
+
+
+@router.delete("/api/ideas/{idea_id}")
+async def api_delete_idea(idea_id: int, request: Request):
+    from app.services.postgres_core_service import delete_idea_pg
+    ok = delete_idea_pg(idea_id)
+    return JSONResponse({"ok": ok})
 
 
 @router.post("/my_companies/portfolio/upsert")
@@ -3406,23 +3940,39 @@ def my_companies_portfolio_upsert(
     note: str = Form(""),
     trade_reason: str = Form(""),
     buy_belief: str = Form(""),
+    account: str = Form("Main"),
 ):
     t = _safe_ticker(ticker)
     if not t:
         return JSONResponse({"ok": False, "message": "Ticker required."}, status_code=400)
     sh = _to_float(shares, 0.0)
     c = _to_float(cost, 0.0)
+    acct = str(account or "Main").strip() or "Main"
     side_key = str(side or "").strip().lower()
-    if side_key not in {"buy", "sell"}:
+    if side_key not in {"buy", "sell", "edit"}:
         side_key = ""
     rows = _read_portfolio_file()
     existing = None
     kept: list[dict[str, str]] = []
     for r in rows:
-        if _safe_ticker(r.get("ticker", "")) == t and existing is None:
+        if _safe_ticker(r.get("ticker", "")) == t and str(r.get("account") or "Main") == acct and existing is None:
             existing = r
         else:
             kept.append(r)
+
+    # Direct edit path: overwrite shares and cost exactly as provided.
+    if side_key == "edit":
+        if sh <= 0 or c <= 0:
+            return JSONResponse({"ok": False, "message": "Shares and average cost are both required."}, status_code=400)
+        kept.append({"ticker": t, "shares": f"{sh:g}", "cost": f"{c:.6f}", "note": str(note or "").strip() or (existing or {}).get("note", ""), "account": acct})
+        _write_portfolio_file(kept)
+        record_portfolio_transaction(
+            ticker=t, action="edit", shares=sh, price=c,
+            note=str(note or "").strip() or "Position edited (direct set)",
+            source="my_companies_form",
+            meta={"was_existing_position": bool(existing), "edit_mode": True},
+        )
+        return JSONResponse({"ok": True, "message": f"Position updated: {sh:g} shares @ ${c:,.2f}"})
 
     # explicit sell path: sell quantity from existing position (or full remove).
     if side_key == "sell":
@@ -3451,6 +4001,7 @@ def my_companies_portfolio_upsert(
                     "shares": f"{next_sh:g}",
                     "cost": f"{old_c:.6f}",
                     "note": str(note or "").strip() or str(removed.get("note", "")).strip(),
+                    "account": acct,
                 }
             )
         _write_portfolio_file(kept)
@@ -3466,6 +4017,7 @@ def my_companies_portfolio_upsert(
                 "decision_reason_label": reason_label,
                 "decision_reason_raw": raw_reason,
                 "was_existing_position": bool(existing),
+                "account": acct,
             },
         )
         record_decision(
@@ -3534,6 +4086,7 @@ def my_companies_portfolio_upsert(
                 "shares": f"{new_sh:g}",
                 "cost": f"{new_c:.6f}",
                 "note": str(note or "").strip() or "Accumulated via Ask AI",
+                "account": acct,
             }
         )
         _write_portfolio_file(kept)
@@ -3552,6 +4105,7 @@ def my_companies_portfolio_upsert(
                 "decision_reason_label": reason_label,
                 "decision_reason_raw": raw_reason,
                 "was_existing_position": True,
+                "account": acct,
             },
         )
         record_decision(
@@ -3574,6 +4128,7 @@ def my_companies_portfolio_upsert(
             "shares": f"{sh:g}",
             "cost": f"{c:.6f}",
             "note": str(note or "").strip(),
+            "account": acct,
         }
     )
     _write_portfolio_file(kept)
@@ -3591,6 +4146,7 @@ def my_companies_portfolio_upsert(
             "buy_belief": belief_key,
             "buy_belief_label": belief_label,
             "was_existing_position": False,
+            "account": acct,
         },
     )
     record_decision(
@@ -3616,6 +4172,7 @@ def my_universe_portfolio_upsert(
     note: str = Form(""),
     trade_reason: str = Form(""),
     buy_belief: str = Form(""),
+    account: str = Form("Main"),
 ):
     return my_companies_portfolio_upsert(
         ticker=ticker,
@@ -3625,6 +4182,7 @@ def my_universe_portfolio_upsert(
         note=note,
         trade_reason=trade_reason,
         buy_belief=buy_belief,
+        account=account,
     )
 
 
@@ -3632,6 +4190,7 @@ def my_universe_portfolio_upsert(
 def my_companies_watchlist_add(
     ticker: str = Form(""),
     reason: str = Form(""),
+    category: str = Form(""),
 ):
     t = _safe_ticker(ticker)
     if not t:
@@ -3643,6 +4202,7 @@ def my_companies_watchlist_add(
             "ticker": t,
             "added_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
             "reason": str(reason or "").strip(),
+            "category": str(category or "").strip(),
         }
     )
     _write_watchlist_file(rows)
@@ -3658,8 +4218,9 @@ def my_companies_watchlist_add(
 def my_universe_watchlist_add(
     ticker: str = Form(""),
     reason: str = Form(""),
+    category: str = Form(""),
 ):
-    return my_companies_watchlist_add(ticker=ticker, reason=reason)
+    return my_companies_watchlist_add(ticker=ticker, reason=reason, category=category)
 
 
 @router.post("/my_companies/watchlist/remove")
@@ -3679,6 +4240,126 @@ def my_universe_watchlist_remove(
     ticker: str = Form(""),
 ):
     return my_companies_watchlist_remove(ticker=ticker)
+
+
+@router.post("/my_universe/watchlist/set-category")
+def my_universe_watchlist_set_category(
+    ticker: str = Form(""),
+    category: str = Form(""),
+):
+    """Update the category for a watchlist ticker."""
+    t = _safe_ticker(ticker)
+    if not t:
+        return JSONResponse({"ok": False, "message": "Ticker required."}, status_code=400)
+    rows = _read_watchlist_rows()
+    found = False
+    for r in rows:
+        if _safe_ticker(r.get("ticker", "")) == t:
+            r["category"] = str(category or "").strip()
+            found = True
+            break
+    if not found:
+        return JSONResponse({"ok": False, "message": f"{t} not in watchlist."}, status_code=404)
+    _write_watchlist_file(rows)
+    return JSONResponse({"ok": True, "message": f"Category updated to '{category}' for {t}."})
+
+
+@router.get("/api/watchlist-groups")
+def api_watchlist_groups():
+    """Return all watchlist group settings (color, emoji, sort_order)."""
+    from app.services.portfolio_state_service import read_watchlist_groups
+    groups = read_watchlist_groups()
+    return JSONResponse({"ok": True, "groups": groups})
+
+
+@router.post("/api/watchlist-groups/upsert")
+def api_watchlist_groups_upsert(
+    group_name: str = Form(""),
+    color: str = Form(""),
+    emoji: str = Form(""),
+    sort_order: str = Form("0"),
+):
+    """Create or update a watchlist group's color/emoji."""
+    from app.services.portfolio_state_service import upsert_watchlist_group
+    name = str(group_name or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "message": "Group name required."}, status_code=400)
+    ok = upsert_watchlist_group(name, color=color, emoji=emoji, sort_order=int(sort_order or 0))
+    if not ok:
+        return JSONResponse({"ok": False, "message": "Failed to save group."}, status_code=500)
+    return JSONResponse({"ok": True, "message": f"Group '{name}' updated."})
+
+
+@router.post("/api/watchlist-groups/delete")
+def api_watchlist_groups_delete(
+    group_name: str = Form(""),
+):
+    """Delete a watchlist group (moves tickers to General)."""
+    from app.services.portfolio_state_service import delete_watchlist_group
+    name = str(group_name or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "message": "Group name required."}, status_code=400)
+    ok = delete_watchlist_group(name)
+    return JSONResponse({"ok": True, "message": f"Group '{name}' deleted."})
+
+
+@router.get("/api/portfolio-accounts")
+def api_portfolio_accounts():
+    """Return all portfolio accounts."""
+    from app.services.portfolio_state_service import read_portfolio_accounts
+    accounts = read_portfolio_accounts()
+    return JSONResponse({"ok": True, "accounts": accounts})
+
+
+@router.post("/api/portfolio-accounts/upsert")
+def api_portfolio_accounts_upsert(
+    account_name: str = Form(""),
+    color: str = Form("#6366f1"),
+    sort_order: str = Form("0"),
+):
+    """Create or update a portfolio account."""
+    from app.services.portfolio_state_service import upsert_portfolio_account
+    name = str(account_name or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "message": "Account name required."}, status_code=400)
+    ok = upsert_portfolio_account(name, color=color, sort_order=int(sort_order or 0))
+    if not ok:
+        return JSONResponse({"ok": False, "message": "Failed to save account."}, status_code=500)
+    return JSONResponse({"ok": True, "message": f"Account '{name}' saved."})
+
+
+@router.post("/api/portfolio-accounts/delete")
+def api_portfolio_accounts_delete(
+    account_name: str = Form(""),
+):
+    """Delete a portfolio account (moves positions to Main)."""
+    from app.services.portfolio_state_service import delete_portfolio_account
+    name = str(account_name or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "message": "Account name required."}, status_code=400)
+    if name == "Main":
+        return JSONResponse({"ok": False, "message": "Cannot delete the Main account."}, status_code=400)
+    ok = delete_portfolio_account(name)
+    return JSONResponse({"ok": True, "message": f"Account '{name}' deleted. Positions moved to Main."})
+
+
+@router.post("/api/portfolio-accounts/rename")
+def api_portfolio_accounts_rename(
+    old_name: str = Form(""),
+    new_name: str = Form(""),
+):
+    """Rename a portfolio account."""
+    from app.services.portfolio_state_service import rename_portfolio_account
+    old = str(old_name or "").strip()
+    new = str(new_name or "").strip()
+    if not old or not new:
+        return JSONResponse({"ok": False, "message": "Both old and new name required."}, status_code=400)
+    if old == new:
+        return JSONResponse({"ok": True, "message": "Name unchanged."})
+    ok = rename_portfolio_account(old, new)
+    if not ok:
+        return JSONResponse({"ok": False, "message": "Failed to rename account."}, status_code=500)
+    return JSONResponse({"ok": True, "message": f"Account renamed to '{new}'."})
 
 
 @router.post("/my_companies/bluechips/add")
@@ -3791,19 +4472,22 @@ def my_universe_cash_remove(
     return JSONResponse({"ok": True, "message": "Cash balance removed."})
 
 
-def _recent_universe_timeline(limit: int = 60) -> list[dict[str, str]]:
+def _recent_universe_timeline(limit: int = 80) -> list[dict[str, str]]:
     if core_backend() != "postgres":
         return []
     con = pg_connect()
     if con is None:
         return []
     events: list[dict[str, str]] = []
-    lim = max(10, min(int(limit or 60), 300))
+    lim = max(10, min(int(limit or 80), 300))
+    per_source = lim // 2  # cap per source to avoid one dominating
     try:
         cur = con.cursor()
+
+        # 1. Portfolio / watchlist decisions
         cur.execute(
             """
-            SELECT created_at, action, COALESCE(ticker,''), COALESCE(reason,''), COALESCE(source,''), COALESCE(confidence,0)
+            SELECT created_at, action, COALESCE(ticker,''), COALESCE(reason,''), COALESCE(source,'')
               FROM decision_log_core
              WHERE action LIKE 'portfolio%%'
                 OR action LIKE 'watchlist%%'
@@ -3812,43 +4496,128 @@ def _recent_universe_timeline(limit: int = 60) -> list[dict[str, str]]:
              ORDER BY created_at DESC
              LIMIT %s
             """,
-            (lim,),
+            (per_source,),
         )
-        for ts, action, ticker, reason, source, conf in (cur.fetchall() or []):
-            events.append(
-                {
-                    "ts": str(ts or ""),
-                    "kind": "decision",
-                    "action": str(action or ""),
-                    "ticker": str(ticker or ""),
-                    "summary": str(reason or ""),
-                    "source": str(source or ""),
-                    "confidence": f"{_to_float(conf, 0.0):.2f}",
-                }
-            )
+        for ts, action, ticker, reason, source in (cur.fetchall() or []):
+            # Build human-readable label
+            act = str(action or "")
+            tk = str(ticker or "")
+            label = act.replace("_", " ").title()
+            if tk:
+                label = f"{tk} — {label}"
+            if str(reason or "").strip():
+                label += f" ({str(reason).strip()[:80]})"
+            events.append({"ts": str(ts or ""), "kind": "decision", "ticker": tk,
+                           "label": label, "icon": "📋", "color": "blue"})
+
+        # 2. Portfolio transactions (trades)
         cur.execute(
             """
-            SELECT created_at, COALESCE(ticker,''), COALESCE(action,''), COALESCE(shares,0), COALESCE(price,0), COALESCE(note,''), COALESCE(source,'')
+            SELECT created_at, COALESCE(ticker,''), COALESCE(action,''),
+                   COALESCE(shares,0), COALESCE(price,0), COALESCE(note,'')
               FROM portfolio_transactions_core
-             ORDER BY created_at DESC
-             LIMIT %s
+             ORDER BY created_at DESC LIMIT %s
             """,
-            (lim,),
+            (per_source,),
         )
-        for ts, ticker, action, shares, price, note, source in (cur.fetchall() or []):
-            events.append(
-                {
-                    "ts": str(ts or ""),
-                    "kind": "trade",
-                    "action": str(action or ""),
-                    "ticker": str(ticker or ""),
-                    "summary": f"{_to_float(shares, 0.0):g} @ {_to_float(price, 0.0):,.2f}" + (f" | {str(note or '')}" if str(note or "").strip() else ""),
-                    "source": str(source or ""),
-                    "confidence": "",
-                }
-            )
+        for ts, ticker, action, shares, price, note in (cur.fetchall() or []):
+            tk = str(ticker or "")
+            act = str(action or "").upper()
+            sh = _to_float(shares, 0.0)
+            px = _to_float(price, 0.0)
+            is_buy = act in ("BUY", "ADD")
+            label = f"{'Bought' if is_buy else 'Sold'} {tk} — {sh:g} shares @ ${px:,.2f}"
+            if str(note or "").strip():
+                label += f" | {str(note).strip()[:60]}"
+            events.append({"ts": str(ts or ""), "kind": "trade", "ticker": tk,
+                           "label": label, "icon": "💰" if is_buy else "📤",
+                           "color": "green" if is_buy else "red"})
+
+        # 3. SEC filings for held + watchlist tickers
+        cur.execute(
+            """
+            SELECT created_at, COALESCE(ticker,''), COALESCE(headline,''),
+                   COALESCE(event_type,''), COALESCE(summary,'')
+              FROM events_core
+             WHERE event_type = 'sec_filing'
+             ORDER BY created_at DESC LIMIT %s
+            """,
+            (per_source,),
+        )
+        for ts, ticker, headline, etype, summary in (cur.fetchall() or []):
+            tk = str(ticker or "")
+            hl = str(headline or "").strip()
+            label = f"{tk} — {hl}" if hl else f"{tk} — SEC Filing"
+            events.append({"ts": str(ts or ""), "kind": "filing", "ticker": tk,
+                           "label": label, "icon": "🏛️", "color": "amber"})
+
+        # 4. Insider trades
+        cur.execute(
+            """
+            SELECT created_at, COALESCE(ticker,''), COALESCE(headline,''),
+                   COALESCE(summary,'')
+              FROM events_core
+             WHERE event_type = 'insider_trade_signal'
+             ORDER BY created_at DESC LIMIT %s
+            """,
+            (per_source,),
+        )
+        for ts, ticker, headline, summary in (cur.fetchall() or []):
+            tk = str(ticker or "")
+            hl = str(headline or "").strip()
+            label = f"{tk} — {hl}" if hl else f"{tk} — Insider Trade"
+            events.append({"ts": str(ts or ""), "kind": "insider", "ticker": tk,
+                           "label": label, "icon": "👤", "color": "purple"})
+
+        # 5. Earnings analyses
+        cur.execute(
+            """
+            SELECT created_at, COALESCE(ticker,''), COALESCE(period,''),
+                   COALESCE(guidance_direction,''), COALESCE(management_tone,'')
+              FROM earnings_analysis_core
+             ORDER BY created_at DESC LIMIT %s
+            """,
+            (per_source,),
+        )
+        for ts, ticker, period, guidance, tone in (cur.fetchall() or []):
+            tk = str(ticker or "")
+            per = str(period or "").strip()
+            parts = [f"{tk} — Earnings {per}"]
+            if str(guidance or "").strip():
+                parts.append(f"Guidance: {guidance}")
+            if str(tone or "").strip():
+                parts.append(f"Tone: {tone}")
+            label = " | ".join(parts)
+            events.append({"ts": str(ts or ""), "kind": "earnings", "ticker": tk,
+                           "label": label, "icon": "📊", "color": "green"})
+
+        # 6. AI proposals (acted on or notable)
+        cur.execute(
+            """
+            SELECT created_at, COALESCE(ticker,''), COALESCE(headline,''),
+                   COALESCE(action_type,''), COALESCE(status,'')
+              FROM proactive_proposals_core
+             WHERE status IN ('pending','executed','dismissed')
+             ORDER BY created_at DESC LIMIT %s
+            """,
+            (per_source,),
+        )
+        for ts, ticker, headline, action_type, status in (cur.fetchall() or []):
+            tk = str(ticker or "")
+            hl = str(headline or "").strip()
+            st = str(status or "")
+            label = f"{tk} — AI: {hl}" if hl else f"{tk} — AI Proposal"
+            if st == "executed":
+                label += " ✓ Acted"
+            elif st == "dismissed":
+                label += " ✗ Dismissed"
+            events.append({"ts": str(ts or ""), "kind": "proposal", "ticker": tk,
+                           "label": label, "icon": "🤖", "color": "indigo"})
+
     except Exception:
-        return []
+        import traceback
+        traceback.print_exc()
+        return events  # return what we have so far
     finally:
         con.close()
     events.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
@@ -3919,34 +4688,6 @@ def api_global_search(q: str = "", limit: int = 12):
     results: list[dict[str, str]] = []
     seen: set[str] = set()
 
-    def _add(kind: str, title: str, url: str, subtitle: str = "") -> None:
-        u = str(url or "").strip()
-        t = str(title or "").strip()
-        if not u or not t:
-            return
-        key = f"{kind}|{u}|{t}".lower()
-        if key in seen:
-            return
-        seen.add(key)
-        results.append(
-            {
-                "kind": str(kind or "result"),
-                "title": t[:120],
-                "subtitle": str(subtitle or "").strip()[:180],
-                "url": u,
-            }
-        )
-
-    def _match(*parts: object) -> bool:
-        txt = " ".join(str(x or "") for x in parts).strip().lower()
-        if not txt:
-            return False
-        if low in txt:
-            return True
-        # Normalize punctuation to support queries like "10k nvda" matching "10-K".
-        txt_norm = re.sub(r"[^a-z0-9]+", "", txt)
-        return bool(toks) and all((t in txt) or (tn and tn in txt_norm) for t, tn in zip(toks, toks_norm))
-
     def _add_filing_hits(
         scan_limit: int,
         *,
@@ -3990,15 +4731,15 @@ def api_global_search(q: str = "", limit: int = 12):
                     continue
             if force_ticker_match and forced_tickers and tk in forced_tickers:
                 pass
-            elif not _match(tk, nm, kind, rpt, fact):
+            elif not _dh_global_search_match(low, toks, toks_norm, tk, nm, kind, rpt, fact):
                 continue
             if tk:
                 title = f"{tk} · {kind}"
                 if nm:
                     title = f"{tk} · {nm} · {kind}"
-                _add("filing", title, f"/company_file?t={quote(tk)}", fact[:160] or rpt[:160])
+                _dh_global_search_add_result(results, seen, "filing", title, f"/company_file?t={quote(tk)}", fact[:160] or rpt[:160])
             else:
-                _add("filing", (rpt or kind or "Filing")[:120], "/reports", fact[:160])
+                _dh_global_search_add_result(results, seen, "filing", (rpt or kind or "Filing")[:120], "/reports", fact[:160])
             if len(results) >= lim:
                 break
         return len(results) - added_before
@@ -4009,103 +4750,50 @@ def api_global_search(q: str = "", limit: int = 12):
         if not want_tks:
             return 0
         forms = sorted({f.upper() for f in requested_forms if str(f or "").strip()})
-        if core_backend() == "postgres":
-            con_pg = pg_connect()
-            if con_pg is None:
-                return 0
-            try:
-                cur = con_pg.cursor()
-                for tk in want_tks[:3]:
-                    fetched_any = False
-                    if forms:
-                        cur.execute(
-                            """
-                            SELECT form, date, accession, doc_url
-                            FROM filings_core
-                            WHERE ticker=%s AND form = ANY(%s)
-                            ORDER BY date DESC, id DESC
-                            LIMIT %s
-                            """,
-                            (tk, forms, max(1, min(50, int(max_rows)))),
-                        )
-                        rows = cur.fetchall() or []
-                        fetched_any = bool(rows)
-                    else:
-                        rows = []
-                    if not rows:
-                        cur.execute(
-                            """
-                            SELECT form, date, accession, doc_url
-                            FROM filings_core
-                            WHERE ticker=%s
-                            ORDER BY date DESC, id DESC
-                            LIMIT %s
-                            """,
-                            (tk, max(1, min(50, int(max_rows)))),
-                        )
-                        rows = cur.fetchall() or []
-                    for r in rows:
-                        fm = str(r[0] or "").strip().upper()
-                        dt_s = str(r[1] or "").strip()[:10]
-                        acc = str(r[2] or "").strip()
-                        subtitle = f"{dt_s} • {fm}"
-                        if forms and (not fetched_any):
-                            subtitle += " • nearest match"
-                        if acc:
-                            subtitle += f" • {acc}"
-                        _add("filing", f"{tk} · {fm} SEC Filing", f"/company_file/sec?t={quote(tk)}&form={quote(fm)}", subtitle)
-                        if len(results) >= lim:
-                            break
-                    if len(results) >= lim:
-                        break
-            except Exception:
-                return len(results) - added_before
-            finally:
-                try:
-                    con_pg.close()
-                except Exception:
-                    pass
-            return len(results) - added_before
-        con = get_sqlite_conn(CORE_DB_PATH)
+        con_pg = pg_connect()
+        if con_pg is None:
+            return 0
         try:
+            cur = con_pg.cursor()
             for tk in want_tks[:3]:
                 fetched_any = False
                 if forms:
-                    marks = ",".join("?" for _ in forms)
-                    rows = con.execute(
-                        f"""
+                    cur.execute(
+                        """
                         SELECT form, date, accession, doc_url
-                        FROM filings
-                        WHERE UPPER(ticker)=? AND UPPER(form) IN ({marks})
+                        FROM filings_core
+                        WHERE ticker=%s AND form = ANY(%s)
                         ORDER BY date DESC, id DESC
-                        LIMIT ?
+                        LIMIT %s
                         """,
-                        tuple([tk] + forms + [max(1, min(50, int(max_rows)))]),
-                    ).fetchall()
+                        (tk, forms, max(1, min(50, int(max_rows)))),
+                    )
+                    rows = cur.fetchall() or []
                     fetched_any = bool(rows)
                 else:
                     rows = []
                 if not rows:
-                    rows = con.execute(
+                    cur.execute(
                         """
                         SELECT form, date, accession, doc_url
-                        FROM filings
-                        WHERE UPPER(ticker)=?
+                        FROM filings_core
+                        WHERE ticker=%s
                         ORDER BY date DESC, id DESC
-                        LIMIT ?
+                        LIMIT %s
                         """,
                         (tk, max(1, min(50, int(max_rows)))),
-                    ).fetchall()
+                    )
+                    rows = cur.fetchall() or []
                 for r in rows:
-                    fm = str(r["form"] or "").strip().upper()
-                    dt_s = str(r["date"] or "").strip()[:10]
-                    acc = str(r["accession"] or "").strip()
+                    fm = str(r[0] or "").strip().upper()
+                    dt_s = str(r[1] or "").strip()[:10]
+                    acc = str(r[2] or "").strip()
                     subtitle = f"{dt_s} • {fm}"
                     if forms and (not fetched_any):
                         subtitle += " • nearest match"
                     if acc:
                         subtitle += f" • {acc}"
-                    _add("filing", f"{tk} · {fm} SEC Filing", f"/company_file/sec?t={quote(tk)}&form={quote(fm)}", subtitle)
+                    _dh_global_search_add_result(results, seen, "filing", f"{tk} · {fm} SEC Filing", f"/company_file/sec?t={quote(tk)}&form={quote(fm)}", subtitle)
                     if len(results) >= lim:
                         break
                 if len(results) >= lim:
@@ -4114,22 +4802,15 @@ def api_global_search(q: str = "", limit: int = 12):
             return len(results) - added_before
         finally:
             try:
-                con.close()
+                con_pg.close()
             except Exception:
                 pass
         return len(results) - added_before
+        return len(results) - added_before
 
-    app_routes = [
-        ("page", "Dashboard", "/dashboard", "Market overview"),
-        ("page", "Portfolio / Universe", "/my_universe", "Holdings, watchlist, blue chips"),
-        ("page", "Company Search", "/company_file", "Browse company files"),
-        ("page", "Organizer", "/organizer", "Tasks, notes, timeline"),
-        ("page", "Settings", "/observability", "System and observability"),
-        ("page", "Reports", "/reports", "Generated reports"),
-    ]
-    for kind, title, url, subtitle in app_routes:
-        if _match(title, subtitle):
-            _add(kind, title, url, subtitle)
+    for kind, title, url, subtitle in _DH_GLOBAL_SEARCH_APP_ROUTES:
+        if _dh_global_search_match(low, toks, toks_norm, title, subtitle):
+            _dh_global_search_add_result(results, seen, kind, title, url, subtitle)
 
     if len(results) < lim:
         try:
@@ -4137,20 +4818,17 @@ def api_global_search(q: str = "", limit: int = 12):
             task_scan = max(300, min(900, lim * 70))
             for open_only in (True, False):
                 for r in list_tasks(open_only=open_only, limit=task_scan):
-                    rid = int((r.get("id") if isinstance(r, dict) else r["id"]) or 0)
-                    if rid > 0 and rid in task_seen:
-                        continue
-                    task = str((r.get("task") if isinstance(r, dict) else r["task"]) or "").strip()
-                    status = str((r.get("status") if isinstance(r, dict) else r["status"]) or "").strip().lower()
-                    tk = str((r.get("ticker") if isinstance(r, dict) else r["ticker"]) or "").strip().upper()
-                    if not task or not _match(task, tk, status):
-                        continue
-                    if rid > 0:
-                        task_seen.add(rid)
-                    if tk:
-                        _add("task", task, f"/company_file?t={quote(tk)}", f"Task - {tk} ({status or 'open'})")
-                    else:
-                        _add("task", task, f"/organizer?q={quote(needle)}", f"Task ({status or 'open'})")
+                    _dh_global_search_add_task_row(
+                        r,
+                        low=low,
+                        toks=toks,
+                        toks_norm=toks_norm,
+                        needle=needle,
+                        results=results,
+                        seen=seen,
+                        task_seen=task_seen,
+                        quote_fn=quote,
+                    )
                     if len(results) >= lim:
                         break
                 if len(results) >= lim:
@@ -4162,15 +4840,16 @@ def api_global_search(q: str = "", limit: int = 12):
         try:
             note_scan = max(300, min(1200, lim * 90))
             for r in list_recent_notes(limit=note_scan):
-                txt = str(r.get("text") or "").strip()
-                tag = str(r.get("tag") or "").strip()
-                tk = str(r.get("ticker") or "").strip().upper()
-                if not txt or not _match(txt, tag, tk):
-                    continue
-                if tk:
-                    _add("note", txt[:90], f"/company_file?t={quote(tk)}", f"Note - {tk}")
-                else:
-                    _add("note", txt[:90], f"/organizer?q={quote(needle)}", "Note")
+                _dh_global_search_add_note_row(
+                    r,
+                    low=low,
+                    toks=toks,
+                    toks_norm=toks_norm,
+                    needle=needle,
+                    results=results,
+                    seen=seen,
+                    quote_fn=quote,
+                )
                 if len(results) >= lim:
                     break
         except Exception:
@@ -4178,50 +4857,28 @@ def api_global_search(q: str = "", limit: int = 12):
 
     if len(results) < lim:
         try:
-            if core_backend() == "postgres":
-                con_pg = pg_connect()
-                if con_pg is not None:
-                    try:
-                        cur = con_pg.cursor()
-                        cur.execute(
-                            """
-                            SELECT day, content
-                            FROM daily_notes_core
-                            ORDER BY day DESC
-                            LIMIT 120
-                            """
-                        )
-                        for r in cur.fetchall() or []:
-                            day = str(r[0] or "").strip()
-                            txt = str(r[1] or "").strip()
-                            if not txt or not _match(txt, day):
-                                continue
-                            _add("note", f"Daily note {day}", f"/organizer?day={quote(day)}", txt[:160])
-                            if len(results) >= lim:
-                                break
-                    finally:
-                        con_pg.close()
-            else:
-                con = get_sqlite_conn(CORE_DB_PATH)
+            con_pg = pg_connect()
+            if con_pg is not None:
                 try:
-                    rows = con.execute(
+                    cur = con_pg.cursor()
+                    cur.execute(
                         """
                         SELECT day, content
-                        FROM daily_notes
+                        FROM daily_notes_core
                         ORDER BY day DESC
                         LIMIT 120
                         """
-                    ).fetchall()
-                    for r in rows:
-                        day = str(r["day"] or "").strip()
-                        txt = str(r["content"] or "").strip()
-                        if not txt or not _match(txt, day):
+                    )
+                    for r in cur.fetchall() or []:
+                        day = str(r[0] or "").strip()
+                        txt = str(r[1] or "").strip()
+                        if not txt or not _dh_global_search_match(low, toks, toks_norm, txt, day):
                             continue
-                        _add("note", f"Daily note {day}", f"/organizer?day={quote(day)}", txt[:160])
+                        _dh_global_search_add_result(results, seen, "note", f"Daily note {day}", f"/organizer?day={quote(day)}", txt[:160])
                         if len(results) >= lim:
                             break
                 finally:
-                    con.close()
+                    con_pg.close()
         except Exception:
             pass
 
@@ -4255,7 +4912,7 @@ def api_global_search(q: str = "", limit: int = 12):
                         matched = True
                         title = str(sr.get("title") or f"{form} Earnings Release").strip()[:120]
                         excerpt = str(sr.get("excerpt") or "").strip()[:160]
-                        _add("filing", f"{tk} · {title}", f"/company_file?t={quote(tk)}", excerpt)
+                        _dh_global_search_add_result(results, seen, "filing", f"{tk} · {title}", f"/company_file?t={quote(tk)}", excerpt)
                         if len(results) >= lim:
                             break
                     if (not matched) and sec_rows:
@@ -4263,7 +4920,9 @@ def api_global_search(q: str = "", limit: int = 12):
                             form = str(sr.get("form") or "").strip().upper()
                             title = str(sr.get("title") or f"{form} Earnings Release").strip()[:120]
                             excerpt = str(sr.get("excerpt") or "").strip()[:140]
-                            _add(
+                            _dh_global_search_add_result(
+                                results,
+                                seen,
                                 "filing",
                                 f"{tk} · {title}",
                                 f"/company_file?t={quote(tk)}",
@@ -4279,7 +4938,9 @@ def api_global_search(q: str = "", limit: int = 12):
             if len(results) < lim and sec_tickers and requested_forms:
                 for tk in sec_tickers[:3]:
                     for fm in sorted(requested_forms):
-                        _add(
+                        _dh_global_search_add_result(
+                            results,
+                            seen,
                             "filing",
                             f"{tk} · {fm} SEC Filings",
                             f"/company_file/sec?t={quote(tk)}&form={quote(fm)}",
@@ -4305,7 +4966,7 @@ def api_global_search(q: str = "", limit: int = 12):
                 title = str(r.get("title") or nm).strip()
                 if low not in f"{nm} {title}".lower():
                     continue
-                _add("report", title, f"/reports?open={quote(nm)}", str(r.get("kind") or "Report"))
+                _dh_global_search_add_result(results, seen, "report", title, f"/reports?open={quote(nm)}", str(r.get("kind") or "Report"))
                 if len(results) >= lim:
                     break
         except Exception:
@@ -4321,7 +4982,7 @@ def api_global_search(q: str = "", limit: int = 12):
                 nm = str(getattr(r, "name", "") or (r.get("name") if isinstance(r, dict) else "") or tk).strip()
                 ind = str(getattr(r, "industry", "") or (r.get("industry") if isinstance(r, dict) else "") or "").strip()
                 if tk:
-                    _add("company", f"{tk} - {nm}", f"/company_file?t={quote(tk)}", ind)
+                    _dh_global_search_add_result(results, seen, "company", f"{tk} - {nm}", f"/company_file?t={quote(tk)}", ind)
                 if len(results) >= lim:
                     break
         except Exception:
@@ -4364,3 +5025,45 @@ def api_ticker_search(q: str = "", limit: int = 10):
         return JSONResponse({"ok": True, "results": out})
     except Exception:
         return JSONResponse({"ok": True, "results": []})
+
+
+# ── Dashboard Data Sync (local → cloud) ──────────────────────────
+
+
+@router.post("/api/internal/sync-dashboard")
+async def api_sync_dashboard(request: Request):
+    """Accept earnings + lows data pushed from the local server to populate Cloud SQL."""
+    if core_backend() != "postgres":
+        return JSONResponse({"ok": False, "error": "not_postgres"}, status_code=400)
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad_json"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "expected_object"}, status_code=400)
+    counts: dict[str, int] = {}
+    # Earnings
+    earnings = payload.get("earnings_week")
+    if isinstance(earnings, list) and earnings:
+        try:
+            counts["earnings"] = upsert_earnings_calendar_snapshot_pg(earnings)
+        except Exception:
+            counts["earnings"] = 0
+    # Lows
+    for cat in ("both", "52"):
+        lows = payload.get(f"lows_{cat}")
+        if isinstance(lows, list) and lows:
+            try:
+                counts[f"lows_{cat}"] = upsert_lows_snapshot_pg(cat, lows)
+            except Exception:
+                counts[f"lows_{cat}"] = 0
+    # Cross-asset
+    cross_asset = payload.get("cross_asset")
+    if isinstance(cross_asset, dict) and cross_asset.get("rows"):
+        try:
+            from app.services.cross_asset_service import save_cross_asset_snapshot_pg  # noqa: PLC0415
+            save_cross_asset_snapshot_pg(cross_asset)
+            counts["cross_asset"] = len(cross_asset.get("rows", []))
+        except Exception:
+            counts["cross_asset"] = 0
+    return JSONResponse({"ok": True, "synced": counts})

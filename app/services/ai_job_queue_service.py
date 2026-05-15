@@ -4,13 +4,9 @@ import datetime as dt
 import hashlib
 import json
 import os
-import sqlite3
 import uuid
-from pathlib import Path
 from typing import Any
 
-from app.core.config import CORE_DB_PATH, DATA_DIR
-from app.core.db import get_sqlite_conn, sqlite_retry
 from app.core.date import parse_datetime_flexible
 from app.services.postgres_core_service import pg_connect, strict_postgres_mode
 
@@ -18,22 +14,6 @@ try:
     import redis
 except Exception:  # pragma: no cover
     redis = None  # type: ignore[assignment]
-
-
-def _queue_conn() -> sqlite3.Connection:
-    if _queue_backend() != "sqlite" and strict_postgres_mode():
-        raise RuntimeError("sqlite_queue_fallback_forbidden_in_strict_postgres_mode")
-    qpath = str(os.getenv("AI_QUEUE_DB_PATH", "")).strip()
-    if not qpath:
-        qpath = str(DATA_DIR / "ai_queue.db")
-    p = Path(qpath)
-    try:
-        if not p.parent.exists():
-            p.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        # Fallback to core DB if custom queue path is not writable.
-        p = Path(str(CORE_DB_PATH))
-    return get_sqlite_conn(p, row_factory=True)
 
 
 def _queue_backend() -> str:
@@ -52,10 +32,8 @@ def _is_production() -> bool:
 
 def _queue_policy_guard() -> None:
     strict_prod = str(os.getenv("AI_QUEUE_STRICT_PROD", "1")).strip().lower() in {"1", "true", "yes", "on"}
-    if strict_postgres_mode() and _queue_backend() == "sqlite":
-        raise RuntimeError("sqlite_queue_forbidden_in_strict_postgres_mode")
-    if strict_prod and _is_production() and _queue_backend() == "sqlite":
-        raise RuntimeError("sqlite_queue_forbidden_in_production")
+    if strict_prod and _is_production() and _queue_backend() not in {"postgres", "redis"}:
+        raise RuntimeError("unsupported_queue_backend_in_production")
 
 
 def _redis_client():
@@ -109,60 +87,14 @@ def ensure_ai_job_queue_schema() -> None:
     if _use_redis():
         # Redis backend has no SQL schema requirement.
         return
-    if _use_postgres():
-        con = pg_connect()
-        if con is None:
-            return
-        try:
-            cur = con.cursor()
-            cur.execute(
-                """CREATE TABLE IF NOT EXISTS ai_command_jobs (
-                    id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    result_json TEXT NOT NULL DEFAULT '{}',
-                    error_text TEXT NOT NULL DEFAULT '',
-                    worker_id TEXT NOT NULL DEFAULT '',
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    started_at TEXT NOT NULL DEFAULT '',
-                    heartbeat_at TEXT NOT NULL DEFAULT '',
-                    finished_at TEXT NOT NULL DEFAULT ''
-                )"""
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_jobs_status_created ON ai_command_jobs(status, created_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_jobs_heartbeat ON ai_command_jobs(heartbeat_at)")
-            cur.execute(
-                """CREATE TABLE IF NOT EXISTS ai_worker_heartbeats (
-                    worker_id TEXT PRIMARY KEY,
-                    heartbeat_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )"""
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_worker_heartbeat ON ai_worker_heartbeats(heartbeat_at)")
-            cur.execute(
-                """CREATE TABLE IF NOT EXISTS ai_command_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    result_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )"""
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_command_cache(updated_at DESC)")
-            con.commit()
-            return
-        except Exception:
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            return
-        finally:
-            con.close()
-    con = _queue_conn()
+    if not _use_postgres():
+        return
+    con = pg_connect()
+    if con is None:
+        return
     try:
-        con.execute(
+        cur = con.cursor()
+        cur.execute(
             """CREATE TABLE IF NOT EXISTS ai_command_jobs (
                 id TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
@@ -178,17 +110,17 @@ def ensure_ai_job_queue_schema() -> None:
                 finished_at TEXT NOT NULL DEFAULT ''
             )"""
         )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_ai_jobs_status_created ON ai_command_jobs(status, created_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_ai_jobs_heartbeat ON ai_command_jobs(heartbeat_at)")
-        con.execute(
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_jobs_status_created ON ai_command_jobs(status, created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_jobs_heartbeat ON ai_command_jobs(heartbeat_at)")
+        cur.execute(
             """CREATE TABLE IF NOT EXISTS ai_worker_heartbeats (
                 worker_id TEXT PRIMARY KEY,
                 heartbeat_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )"""
         )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_ai_worker_heartbeat ON ai_worker_heartbeats(heartbeat_at)")
-        con.execute(
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_worker_heartbeat ON ai_worker_heartbeats(heartbeat_at)")
+        cur.execute(
             """CREATE TABLE IF NOT EXISTS ai_command_cache (
                 cache_key TEXT PRIMARY KEY,
                 result_json TEXT NOT NULL,
@@ -196,8 +128,13 @@ def ensure_ai_job_queue_schema() -> None:
                 updated_at TEXT NOT NULL
             )"""
         )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_command_cache(updated_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_command_cache(updated_at DESC)")
         con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
     finally:
         con.close()
 
@@ -238,18 +175,7 @@ def touch_worker(worker_id: str) -> None:
         finally:
             con.close()
         return
-    ensure_ai_job_queue_schema()
-    con = _queue_conn()
-    try:
-        con.execute(
-            """INSERT INTO ai_worker_heartbeats(worker_id, heartbeat_at, updated_at)
-               VALUES (?, ?, ?)
-               ON CONFLICT(worker_id) DO UPDATE SET heartbeat_at=excluded.heartbeat_at, updated_at=excluded.updated_at""",
-            (wid, now, now),
-        )
-        con.commit()
-    finally:
-        con.close()
+    return
 
 
 def _cache_key(payload: dict[str, Any]) -> str:
@@ -301,30 +227,7 @@ def get_cached_result(payload: dict[str, Any], ttl_sec: int = 75) -> dict[str, A
             return obj if isinstance(obj, dict) else None
         finally:
             con.close()
-    ensure_ai_job_queue_schema()
-    key = _cache_key(payload)
-    now = dt.datetime.now()
-    con = _queue_conn()
-    try:
-        row = con.execute(
-            "SELECT result_json, updated_at FROM ai_command_cache WHERE cache_key = ? LIMIT 1",
-            (key,),
-        ).fetchone()
-        if not row:
-            return None
-        upd = str(row["updated_at"] or "").strip()
-        ts = parse_datetime_flexible(upd)
-        if ts is None:
-            return None
-        if (now - ts).total_seconds() > float(max(5, int(ttl_sec or 75))):
-            return None
-        try:
-            obj = json.loads(str(row["result_json"] or "{}"))
-        except Exception:
-            return None
-        return obj if isinstance(obj, dict) else None
-    finally:
-        con.close()
+    return None
 
 
 def set_cached_result(payload: dict[str, Any], result: dict[str, Any]) -> None:
@@ -364,23 +267,7 @@ def set_cached_result(payload: dict[str, Any], result: dict[str, Any]) -> None:
                 pass
         finally:
             con.close()
-        return
-    ensure_ai_job_queue_schema()
-    key = _cache_key(payload)
-    now = dt.datetime.now().isoformat()
-    con = _queue_conn()
-    try:
-        con.execute(
-            """INSERT INTO ai_command_cache(cache_key, result_json, created_at, updated_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(cache_key) DO UPDATE SET
-                 result_json=excluded.result_json,
-                 updated_at=excluded.updated_at""",
-            (key, json.dumps(result or {}, ensure_ascii=True), now, now),
-        )
-        con.commit()
-    finally:
-        con.close()
+    return
 
 
 def enqueue_job(payload: dict[str, Any]) -> str:
@@ -439,27 +326,7 @@ def enqueue_job(payload: dict[str, Any]) -> str:
             return jid
         finally:
             con.close()
-    ensure_ai_job_queue_schema()
-    jid = "aj_" + uuid.uuid4().hex[:16]
-    now = dt.datetime.now().isoformat()
-    out: dict[str, str] = {"id": ""}
-
-    def _write() -> None:
-        con = _queue_conn()
-        try:
-            con.execute(
-                """INSERT INTO ai_command_jobs
-                   (id, status, payload_json, result_json, error_text, worker_id, attempts, created_at, updated_at, started_at, heartbeat_at, finished_at)
-                   VALUES (?, 'queued', ?, '{}', '', '', 0, ?, ?, '', '', '')""",
-                (jid, json.dumps(payload or {}, ensure_ascii=True), now, now),
-            )
-            con.commit()
-            out["id"] = jid
-        finally:
-            con.close()
-
-    sqlite_retry(_write)
-    return str(out.get("id") or jid)
+    return "aj_" + uuid.uuid4().hex[:16]
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
@@ -544,44 +411,7 @@ def get_job(job_id: str) -> dict[str, Any] | None:
             }
         finally:
             con.close()
-    ensure_ai_job_queue_schema()
-    jid = str(job_id or "").strip()
-    if not jid:
-        return None
-    con = _queue_conn()
-    try:
-        row = con.execute(
-            """SELECT id, status, payload_json, result_json, error_text, worker_id, attempts,
-                      created_at, updated_at, started_at, heartbeat_at, finished_at
-               FROM ai_command_jobs WHERE id = ? LIMIT 1""",
-            (jid,),
-        ).fetchone()
-        if not row:
-            return None
-        try:
-            payload = json.loads(str(row["payload_json"] or "{}"))
-        except Exception:
-            payload = {}
-        try:
-            result = json.loads(str(row["result_json"] or "{}"))
-        except Exception:
-            result = {}
-        return {
-            "id": str(row["id"] or ""),
-            "status": str(row["status"] or ""),
-            "payload": payload if isinstance(payload, dict) else {},
-            "result": result if isinstance(result, dict) else {},
-            "error": str(row["error_text"] or ""),
-            "worker_id": str(row["worker_id"] or ""),
-            "attempts": int(row["attempts"] or 0),
-            "created_at": str(row["created_at"] or ""),
-            "updated_at": str(row["updated_at"] or ""),
-            "started_at": str(row["started_at"] or ""),
-            "heartbeat_at": str(row["heartbeat_at"] or ""),
-            "finished_at": str(row["finished_at"] or ""),
-        }
-    finally:
-        con.close()
+    return None
 
 
 def claim_next_job(worker_id: str, stale_after_sec: int = 120) -> dict[str, Any] | None:
@@ -665,48 +495,7 @@ def claim_next_job(worker_id: str, stale_after_sec: int = 120) -> dict[str, Any]
             return None
         finally:
             con.close()
-    ensure_ai_job_queue_schema()
-    wid = str(worker_id or "").strip()[:80] or "worker"
-    now_dt = dt.datetime.now()
-    now = now_dt.isoformat()
-    stale_cut = (now_dt - dt.timedelta(seconds=max(30, int(stale_after_sec or 120)))).isoformat()
-    con = _queue_conn()
-    try:
-        con.execute("BEGIN IMMEDIATE")
-        row = con.execute(
-            """SELECT id, payload_json, attempts FROM ai_command_jobs
-               WHERE status='queued'
-                  OR (status='running' AND COALESCE(heartbeat_at,'') <> '' AND heartbeat_at < ?)
-               ORDER BY created_at ASC
-               LIMIT 1""",
-            (stale_cut,),
-        ).fetchone()
-        if not row:
-            con.execute("COMMIT")
-            return None
-        jid = str(row["id"] or "").strip()
-        attempts = int(row["attempts"] or 0) + 1
-        con.execute(
-            """UPDATE ai_command_jobs
-               SET status='running',
-                   worker_id=?,
-                   attempts=?,
-                   updated_at=?,
-                   started_at=CASE WHEN COALESCE(started_at,'')='' THEN ? ELSE started_at END,
-                   heartbeat_at=?
-               WHERE id=?""",
-            (wid, attempts, now, now, now, jid),
-        )
-        con.execute("COMMIT")
-    except Exception:
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
-    finally:
-        con.close()
-    return get_job(jid)
+    return None
 
 
 def heartbeat(job_id: str, worker_id: str) -> None:
@@ -750,21 +539,7 @@ def heartbeat(job_id: str, worker_id: str) -> None:
                 pass
         finally:
             con.close()
-        return
-    jid = str(job_id or "").strip()
-    wid = str(worker_id or "").strip()
-    if not jid:
-        return
-    now = dt.datetime.now().isoformat()
-    con = _queue_conn()
-    try:
-        con.execute(
-            "UPDATE ai_command_jobs SET heartbeat_at=?, updated_at=?, worker_id=? WHERE id=? AND status='running'",
-            (now, now, wid, jid),
-        )
-        con.commit()
-    finally:
-        con.close()
+    return
 
 
 def complete_job(job_id: str, result: dict[str, Any]) -> None:
@@ -815,22 +590,7 @@ def complete_job(job_id: str, result: dict[str, Any]) -> None:
                 pass
         finally:
             con.close()
-        return
-    jid = str(job_id or "").strip()
-    if not jid:
-        return
-    now = dt.datetime.now().isoformat()
-    con = _queue_conn()
-    try:
-        con.execute(
-            """UPDATE ai_command_jobs
-               SET status='done', result_json=?, error_text='', updated_at=?, finished_at=?, heartbeat_at=?
-               WHERE id=?""",
-            (json.dumps(result or {}, ensure_ascii=True), now, now, now, jid),
-        )
-        con.commit()
-    finally:
-        con.close()
+    return
 
 
 def fail_job(job_id: str, error: str, result: dict[str, Any] | None = None) -> None:
@@ -881,27 +641,12 @@ def fail_job(job_id: str, error: str, result: dict[str, Any] | None = None) -> N
                 pass
         finally:
             con.close()
-        return
-    jid = str(job_id or "").strip()
-    if not jid:
-        return
-    now = dt.datetime.now().isoformat()
-    con = _queue_conn()
-    try:
-        con.execute(
-            """UPDATE ai_command_jobs
-               SET status='error', result_json=?, error_text=?, updated_at=?, finished_at=?, heartbeat_at=?
-               WHERE id=?""",
-            (json.dumps(result or {"status": "error", "message": "Command failed."}, ensure_ascii=True), str(error or "")[:1000], now, now, now, jid),
-        )
-        con.commit()
-    finally:
-        con.close()
+    return
 
 
 def worker_health(active_within_sec: int = 120) -> dict[str, Any]:
     now = dt.datetime.now()
-    backend = "redis" if _use_redis() else ("postgres" if _use_postgres() else "sqlite")
+    backend = "redis" if _use_redis() else ("postgres" if _use_postgres() else "unknown")
     recent_window_sec = max(30, int(str(os.getenv("AI_HEALTH_ERROR_WINDOW_SEC", "300")).strip() or "300"))
     if backend == "redis":
         r = _redis_client()
@@ -1044,76 +789,13 @@ def worker_health(active_within_sec: int = 120) -> dict[str, Any]:
         finally:
             con.close()
 
-    ensure_ai_job_queue_schema()
-    con = _queue_conn()
-    try:
-        counts = {"queued": 0, "running": 0, "done": 0, "error": 0}
-        rows = con.execute(
-            """SELECT status, COUNT(*) AS c
-               FROM ai_command_jobs
-               GROUP BY status"""
-        ).fetchall()
-        for r in rows:
-            st = str(r["status"] or "").strip().lower()
-            if st in counts:
-                counts[st] = int(r["c"] or 0)
-        recent_error_count = 0
-        try:
-            since = (now - dt.timedelta(seconds=recent_window_sec)).isoformat()
-            rr = con.execute(
-                "SELECT COUNT(*) AS c FROM ai_command_jobs WHERE status='error' AND updated_at >= ?",
-                (since,),
-            ).fetchone()
-            recent_error_count = int((rr["c"] if rr else 0) or 0)
-        except Exception:
-            recent_error_count = 0
-        qd = int(counts.get("queued") or 0)
-        wrs = con.execute(
-            """SELECT worker_id, MAX(heartbeat_at) AS hb
-               FROM ai_command_jobs
-               WHERE COALESCE(worker_id,'') <> ''
-               GROUP BY worker_id
-               ORDER BY hb DESC
-               LIMIT 50"""
-        ).fetchall()
-        try:
-            wr2 = con.execute(
-                """SELECT worker_id, heartbeat_at AS hb
-                   FROM ai_worker_heartbeats
-                   WHERE COALESCE(worker_id,'') <> ''
-                   ORDER BY heartbeat_at DESC
-                   LIMIT 100"""
-            ).fetchall()
-            by_id = {str(r["worker_id"] or "").strip(): str(r["hb"] or "").strip() for r in wrs}
-            for r in wr2:
-                wid = str(r["worker_id"] or "").strip()
-                hb = str(r["hb"] or "").strip()
-                if wid and hb and (wid not in by_id or hb > by_id[wid]):
-                    by_id[wid] = hb
-            wrs = [{"worker_id": k, "hb": v} for k, v in by_id.items()]
-        except Exception:
-            pass
-        active_workers: list[dict[str, str]] = []
-        for r in wrs:
-            wid = str(r["worker_id"] or "").strip()
-            hb = str(r["hb"] or "").strip()
-            if not wid or not hb:
-                continue
-            hb_dt = parse_datetime_flexible(hb)
-            if hb_dt is None:
-                continue
-            age = (now - hb_dt).total_seconds()
-            if age <= float(max(10, int(active_within_sec or 120))):
-                active_workers.append({"worker_id": wid, "heartbeat_at": hb, "age_sec": f"{age:.1f}"})
-        return {
-            "ok": True,
-            "backend": "sqlite",
-            "redis_connected": False,
-            "queue_depth": qd,
-            "counts": counts,
-            "recent_error_count": int(recent_error_count),
-            "active_workers": sorted(active_workers, key=lambda x: float(x.get("age_sec") or 0.0)),
-            "asof": now.isoformat(),
-        }
-    finally:
-        con.close()
+    return {
+        "ok": False,
+        "backend": "unknown",
+        "redis_connected": False,
+        "queue_depth": 0,
+        "counts": {"queued": 0, "running": 0, "done": 0, "error": 0},
+        "recent_error_count": 0,
+        "active_workers": [],
+        "asof": now.isoformat(),
+    }

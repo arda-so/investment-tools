@@ -1,29 +1,29 @@
 {% macro omnibox_styles() -%}
 .omnibox-wrap {
   margin: 0 0 12px 0;
-  border: 1px solid #dbe4ee;
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--panel);
   padding: 10px 12px;
   box-shadow: 0 2px 8px rgba(20,42,66,.04);
 }
 .omnibox {
   width: 100%;
   height: 46px;
-  border: 1px solid #cfdceb;
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 16px;
   font-size: 14px;
   font-weight: 600;
-  color: #1f2f46;
-  background: #f8fbff;
+  color: var(--text);
+  background: var(--panel2);
   box-sizing: border-box;
 }
 .omnibox:focus {
   outline: none;
   border-color: #86a6ca;
   box-shadow: 0 0 0 3px rgba(134,166,202,.16);
-  background: #fff;
+  background: var(--panel);
 }
 {%- endmacro %}
 

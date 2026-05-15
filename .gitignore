@@ -8,5 +8,11 @@ __pycache__/
 .venv/
 .venv-memory/
 .env
+.env.test
+.env.cloud
 *.log
 
+# Frontend generated files
+frontend/node_modules/
+frontend/dist/
+frontend/.DS_Store
